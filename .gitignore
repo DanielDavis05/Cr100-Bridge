@@ -1,0 +1,27 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+/dist/
+/*.pcap*
+/runs/
+/bridge-config.json
+/bridge-state.json
+/webui.json
+/ha-token
+/spotify-token.json
+/t4-decrypted.jsonl
+/STATIC-FINDINGS-4.3.2.md
+/RESEARCH.md
+/MUSIC-SERVICES.md
+/SPOTIFY-SETUP.md
+.impeccable/
+# Experimental scripts and captures stay local; production pairing is netstart_pair.py.
+/tools/ap_t4.py
+/tools/inject_t1.py
+/tools/probe_resp_t3.py
+/tools/rate_test.py
+/tools/t2_run.sh
+/tools/bridge_run.sh
+/tools/bridge_stop.sh

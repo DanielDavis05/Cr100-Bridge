@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CR100 Bridge</title>
+<meta name="description" content="Settings for the bridge that connects a Sonos CR100 controller to your speakers.">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@300;400;600;700;800&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="arcs" aria-hidden="true"></div>
+
+<header class="screen-head">
+  <h1 id="title">Bridge</h1>
+  <div class="status" id="status" hidden>
+    <span class="badge" id="badge-controller" role="img" aria-label="Controller status"></span>
+    <span class="badge" id="badge-ha" role="img" aria-label="Home Assistant status"></span>
+  </div>
+</header>
+
+<div class="screen" id="app" hidden>
+  <nav class="menu" aria-label="Settings">
+    <a href="#speakers" data-view="speakers"><span class="icon" data-icon="speaker"></span>Speakers</a>
+    <a href="#controllers" data-view="controllers"><span class="icon" data-icon="controller"></span>Controllers</a>
+    <a href="#spotify" data-view="spotify"><span class="icon" data-icon="note"></span>Spotify</a>
+    <a href="#home-assistant" data-view="home-assistant"><span class="icon" data-icon="house"></span>Home Assistant</a>
+    <a href="#password" data-view="password"><span class="icon" data-icon="key"></span>Password</a>
+  </nav>
+  <main id="view" tabindex="-1"></main>
+</div>
+
+<section class="gate" id="gate" hidden>
+  <form class="popup" id="gate-form">
+    <h2 id="gate-title">Sign in</h2>
+    <p id="gate-text">Enter the bridge password.</p>
+    <label class="field">
+      <span>Password</span>
+      <input type="password" id="gate-password" autocomplete="current-password" required>
+    </label>
+    <label class="field" id="gate-confirm-row" hidden>
+      <span>Type it again</span>
+      <input type="password" id="gate-confirm" autocomplete="new-password">
+    </label>
+    <p class="error" id="gate-error" role="alert"></p>
+    <button type="submit" class="gate-submit" id="gate-submit">Sign in</button>
+  </form>
+</section>
+
+<footer class="softkeys" id="softkeys" aria-label="Actions">
+  <button type="button" data-slot="0"></button>
+  <button type="button" data-slot="1"></button>
+  <button type="button" data-slot="2"></button>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden>
+  <h2 id="toast-title"></h2>
+  <p id="toast-text"></p>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

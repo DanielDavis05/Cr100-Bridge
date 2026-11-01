@@ -1,0 +1,2 @@
+# Preserve protocol fixtures byte-for-byte, including the original CRLF/whitespace.
+tools/zp80/fixtures/** -text -whitespace

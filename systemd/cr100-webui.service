@@ -1,0 +1,19 @@
+[Unit]
+Description=CR100 bridge settings
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/cr100-bridge/current/tools
+ExecStart=/opt/cr100-bridge/current/.venv/bin/python -u /opt/cr100-bridge/current/tools/webui.py --managed --config /var/lib/cr100-bridge/bridge-config.json --state /var/lib/cr100-bridge/bridge-state.json --data /var/lib/cr100-bridge/webui.json --run-dir /run/cr100-bridge --players-pid /run/cr100-bridge/players.pid --port 8080
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=cr100-bridge
+RuntimeDirectoryPreserve=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

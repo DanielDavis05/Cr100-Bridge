@@ -1,0 +1,22 @@
+[Unit]
+Description=CR100 SonosNet bridge
+Wants=network-online.target
+Requires=cr100-radio.service
+After=network-online.target cr100-radio.service
+ConditionPathExists=/var/lib/cr100-bridge/bridge-state.json
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/cr100-bridge/current/tools
+ExecStart=/opt/cr100-bridge/current/.venv/bin/python -u /opt/cr100-bridge/current/tools/bridge_service.py run
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=15
+RuntimeDirectory=cr100-bridge
+RuntimeDirectoryPreserve=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

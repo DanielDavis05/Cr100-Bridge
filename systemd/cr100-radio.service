@@ -1,0 +1,10 @@
+[Unit]
+Description=CR100 Nexmon radio setup
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/cr100-bridge/current/.venv/bin/python /opt/cr100-bridge/current/tools/bridge_service.py radio
+RemainAfterExit=yes
+TimeoutStartSec=30
+UMask=0077

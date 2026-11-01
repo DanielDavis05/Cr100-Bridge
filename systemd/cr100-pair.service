@@ -1,0 +1,15 @@
+[Unit]
+Description=Pair one CR100 controller
+Requires=cr100-radio.service
+After=cr100-radio.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/cr100-bridge/current/tools
+ExecStart=/opt/cr100-bridge/current/.venv/bin/python -u /opt/cr100-bridge/current/tools/bridge_service.py pair
+TimeoutStartSec=240
+TimeoutStopSec=15
+KillMode=mixed
+RuntimeDirectory=cr100-bridge
+RuntimeDirectoryPreserve=yes
+UMask=0077

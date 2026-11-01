@@ -1,0 +1,17 @@
+{
+  "home_assistant": {
+    "url": "",
+    "token_file": "ha-token"
+  },
+  "rooms": [],
+  "spotify_music_service": {
+    "enabled": false,
+    "host": "192.168.69.1",
+    "port": 8400,
+    "id": 240,
+    "name": "Spotify",
+    "client_id": "",
+    "token_file": "spotify-token.json",
+    "redirect_uri": "http://127.0.0.1:8888/callback"
+  }
+}

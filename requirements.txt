@@ -1,0 +1,7 @@
+# Tested together; update these pins with the offline test suite.
+cryptography==50.0.2
+websockets==17.4
+Pillow==13.0.0
+scapy==2.8.0
+cffi==2.1.1
+pycparser==3.12
