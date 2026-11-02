@@ -131,7 +131,7 @@ if [[ "$PAIR_STATE" == active || "$PAIR_STATE" == activating || "$PAIR_STATE" ==
   die 'Pairing is in progress. Wait for it to finish and rerun installation.'
 fi
 systemctl stop cr100-bridge.service cr100-webui.service cr100-radio.service 2>/dev/null || true
-OLD_RELEASE=$(readlink -f /opt/cr100-bridge/current 2>/dev/null || true)
+OLD_RELEASE=$(readlink -e /opt/cr100-bridge/current 2>/dev/null || true)   # -e: empty on a first install
 ln -s "$RELEASE" /opt/cr100-bridge/.current-new
 mv -Tf /opt/cr100-bridge/.current-new /opt/cr100-bridge/current
 install -m 755 "$RELEASE/scripts/cr100-bridge" /usr/local/bin/cr100-bridge
