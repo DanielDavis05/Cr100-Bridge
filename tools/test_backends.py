@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backends
@@ -148,7 +149,21 @@ class MemoryHousehold(unittest.TestCase):
         self.assertEqual(len(self.one.calls) + len(self.two.calls), 1)
 
 
+def load(settings, config_dir, log):
+    """backends.load() entry point for MemoryBackend (registered by a test)."""
+    backend = MemoryBackend('memory')
+    backend.settings = settings
+    return backend
+
+
 class Config(unittest.TestCase):
+    def test_a_backend_without_settings_gets_none(self):
+        # The Sonos backend needs no settings: a config without its section must still load.
+        with patch.dict(backends.BACKENDS, {'memory': ('memory', __name__)}):
+            self.assertEqual(backends.load({}, '.', ['memory'], print)['memory'].settings, {})
+        with self.assertRaisesRegex(ValueError, 'home_assistant.url'):
+            backends.load({}, '.', ['ha'], print)
+
     def test_room_refs_and_library(self):
         self.assertEqual(backends.room_ref({'entity': 'media_player.den'}), ('ha', 'media_player.den'))
         self.assertEqual(backends.room_ref({'backend': 'sonos', 'id': 'RINCON_1', 'entity': 'x'}), ('sonos', 'RINCON_1'))

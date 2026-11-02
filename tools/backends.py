@@ -443,10 +443,11 @@ def room_ref(entry):
 
 def load(config, config_dir, names, log):
     """Connect the named backends: {name: Backend}. Each module's load(settings, config_dir,
-    log) gets its own config section; relative paths in it are relative to config_dir."""
+    log) gets its own config section, {} when there is none (Sonos needs no settings);
+    relative paths in it are relative to config_dir."""
     loaded = {}
     for name in names:
         if name not in BACKENDS: raise ValueError('Unknown backend: %s' % name)
         section, module = BACKENDS[name]
-        loaded[name] = importlib.import_module(module).load(config[section], config_dir, log)
+        loaded[name] = importlib.import_module(module).load(config.get(section) or {}, config_dir, log)
     return loaded

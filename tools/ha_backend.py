@@ -53,6 +53,8 @@ class HABackend(Backend):
 
 def load(settings, config_dir, log):
     from ha_client import HomeAssistant
+    if not settings.get('url') or not settings.get('token_file'):
+        raise ValueError('Home Assistant rooms need home_assistant.url and token_file in the config')
     token_file = Path(settings['token_file']).expanduser()
     if not token_file.is_absolute(): token_file = Path(config_dir) / token_file
     ha = HomeAssistant(settings['url'], token_file.read_text().strip(), log)
