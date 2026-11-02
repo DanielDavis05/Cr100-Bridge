@@ -1,46 +1,26 @@
-"""Home Assistant content for the CR100's Music menu: browse in pages, play through HA.
+"""Home Assistant content for the CR100's Music menu (a content.ContentSource): browse
+through HA's media browser, play through HA.
 
-The CR100 browses its own object IDs (4.3.2 firmware strings, seen in captures):
-FV:2 Sonos Favorites, A:... the Music Library, SQ: Sonos Playlists, R:0/0 radio
-stations, Q:0 the room's queue, S: folders, AI: line-in. Home Assistant's Sonos media
-browser uses the same Sonos IDs for favourites, the library and playlists, so most
-object IDs are also Home Assistant media_content_ids. Anything else (Radio Browser
-stations; library tracks, whose HA ID is their URI) gets a short ID derived under its
-parent, kept in a registry so a later Browse or play finds it again.
-
-Paging: Home Assistant returns whole lists. The bridge caches them briefly and gives
-the CR100 at most PAGE_LIMIT entries per Browse, with the true TotalMatches, so it asks
-for the rest as it scrolls.
-
-Playing: every playable entry carries a URI the bridge recognises when the CR100 hands
-it back (AddURIToQueue, SetAVTransportURI): x-rincon-playlist:<udn>#<id> for containers,
-as the ZP80 does; a library track's own URI; RADIO_PREFIX + <id> for anything else
-(favourites, stations), which the CR100 plays directly rather than queueing.
+Home Assistant's Sonos media browser uses the CR100's own Sonos IDs for favourites, the
+library and playlists, so most object IDs are also Home Assistant media_content_ids (a
+Node's ref; its kind is the media_content_type). Anything else (Radio Browser stations;
+library tracks, whose HA ID is their URI) gets an ID derived under its parent.
+Playing follows content.py's URI conventions; Home Assistant plays PLAIN_SCHEMES URIs as
+they are.
 """
 from __future__ import annotations
 
-import collections
 import dataclasses
-import hashlib
 import html
 import re
-import threading
-import time
 from urllib.parse import quote, unquote
 
+from content import (BROADCAST_CLASS, CACHE_TTL, PLAIN_SCHEMES, RADIO_PREFIX, TRACK_CLASS, ContentError,
+                     ContentSource, Node, derived_id)
 from sonos_queue_art import SonosQueueArt
 
-PAGE_LIMIT = 100          # entries per Browse answer, whatever the CR100 asks for (it asks 500)
-CACHE_TTL = 30.0          # s a Home Assistant list is reused while the CR100 pages through it
 QUEUE_TTL = 2.0           # the CR100 asks for Q:0 metadata many times in a row
-NODE_LIMIT = 20000        # registry entries kept (object ID -> what Home Assistant calls it)
 BROWSE_TIMEOUT = 30
-RADIO_PREFIX = 'x-rincon-mp3radio://bridge/'
-
-DIDL_OPEN = ('<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
-             'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
-             'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
-             'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">')
 
 # CR100 object ID -> (title, parent, Home Assistant media_content_id, media_content_type)
 TOP = {
@@ -68,38 +48,6 @@ CONTAINER_CLASS = {'album': 'object.container.album.musicAlbum', 'artist': 'obje
                    'contributing_artist': 'object.container.person.musicArtist',
                    'composer': 'object.container.person.composer', 'genre': 'object.container.genre.musicGenre',
                    'playlist': 'object.container.playlistContainer'}
-TRACK_CLASS = 'object.item.audioItem.musicTrack'
-BROADCAST_CLASS = 'object.item.audioItem.audioBroadcast'
-PLAIN_SCHEMES = ('x-file-cifs:', 'http:', 'https:')   # URIs Home Assistant can play as they are
-
-
-class ContentError(Exception):
-    """Reported to the CR100 as this UPnP error code (701: no such object)."""
-
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
-
-
-@dataclasses.dataclass
-class Node:
-    object_id: str
-    parent_id: str
-    title: str
-    ha_id: str | None
-    ha_type: str | None
-    container: bool
-    upnp_class: str
-    playable: bool = True
-    uri: str = ''            # items only; containers get x-rincon-playlist per player
-    artist: str = ''
-    album: str = ''
-    thumbnail: str = ''
-    child_count: int | None = None
-
-
-def derived_id(parent, ha_id, ha_type):
-    return '%s/%s' % (parent, hashlib.sha1(('%s|%s' % (ha_type, ha_id)).encode()).hexdigest()[:10])
 
 
 def guess(object_id):
@@ -113,44 +61,14 @@ def guess(object_id):
     return None
 
 
-def text(value):
-    return html.escape(str(value), quote=False)
-
-
-class Content:
-    """The household's content, browsed through any Sonos room's media_player entity."""
+class Content(ContentSource):
+    """The household's content, browsed through any Sonos room's media_player entity
+    (the room key is its entity_id)."""
 
     def __init__(self, ha, art=None, log=print):
-        self.ha, self.art, self.log = ha, art, log
-        self.lock = threading.Lock()
-        self.nodes = collections.OrderedDict()   # object ID -> Node (LRU)
-        self.by_uri = {}                         # item URI -> object ID
-        self.cache = {}                          # cache key -> (monotonic time, [Node])
+        super().__init__(art, log)
+        self.ha = ha
         self.queue_art = SonosQueueArt(ha, log) if art else None
-
-    # --- registry and cache ------------------------------------------------------
-    def register(self, node):
-        with self.lock:
-            self.nodes[node.object_id] = node
-            self.nodes.move_to_end(node.object_id)
-            if node.uri: self.by_uri[node.uri] = node.object_id
-            while len(self.nodes) > NODE_LIMIT:
-                _, old = self.nodes.popitem(last=False)
-                if old.uri and self.by_uri.get(old.uri) == old.object_id: del self.by_uri[old.uri]
-
-    def cached(self, key, ttl):
-        with self.lock:
-            hit = self.cache.get(key)
-            return hit[1] if hit and time.monotonic() - hit[0] < ttl else None
-
-    def store(self, key, nodes):
-        with self.lock:
-            self.cache[key] = (time.monotonic(), nodes)
-            stale = [k for k, (t, _) in self.cache.items() if time.monotonic() - t > CACHE_TTL]
-            for k in stale: del self.cache[k]
-
-    def queue_changed(self, entity):
-        with self.lock: self.cache.pop((entity, 'Q:0'), None)
 
     # --- Home Assistant -------------------------------------------------------------
     def browse_ha(self, entity, ha_id, ha_type):
@@ -180,7 +98,7 @@ class Content:
         self.store((entity, 'Q:0'), nodes)
         return nodes
 
-    def enrich_queue_art(self, entity, nodes, start):
+    def decorate_queue(self, entity, nodes, start):
         """Recover artwork only for rows being returned, including hover metadata."""
         if not self.queue_art or not nodes or all(node.thumbnail for node in nodes): return nodes
         # Current-track proxy art changes as playback advances. Keep it out of
@@ -238,7 +156,7 @@ class Content:
         """(media_content_id, media_content_type) to browse for a container ID."""
         if object_id in TOP and TOP[object_id][2] is not None: return TOP[object_id][2:]
         with self.lock: node = self.nodes.get(object_id)
-        if node and node.container: return node.ha_id, node.ha_type
+        if node and node.container: return node.ref, node.kind
         found = guess(object_id)
         if found and found[1] != 'favorite_item_id': return found
         raise ContentError(701, 'No such object: %s' % object_id)
@@ -270,18 +188,6 @@ class Content:
         if node: return node
         raise ContentError(701, 'No such object: %s' % object_id)
 
-    def browse(self, entity, udn, object_id, flag, start=0, count=0):
-        """(DIDL-Lite, NumberReturned, TotalMatches) for a CR100 Browse."""
-        if flag == 'BrowseMetadata':
-            node = self.metadata(entity, object_id)
-            if object_id.startswith('Q:0/'):
-                node = self.enrich_queue_art(entity, [node], int(object_id[len('Q:0/'):]) - 1)[0]
-            return self.didl([node], udn), 1, 1
-        nodes = self.children(entity, object_id)
-        page = nodes[start:start + min(count or PAGE_LIMIT, PAGE_LIMIT)]
-        if object_id == 'Q:0': page = self.enrich_queue_art(entity, page, start)
-        return self.didl(page, udn), len(page), len(nodes)
-
     def resolve(self, uri, metadata=''):
         """The Node the CR100 means by a URI (and its DIDL) it was given, or None."""
         candidates = []
@@ -300,22 +206,3 @@ class Content:
             found = guess(object_id)
             if found: return Node(object_id, '', '', found[0], found[1], found[1] != 'favorite_item_id', '')
         return None
-
-    def didl(self, nodes, udn):
-        return DIDL_OPEN + ''.join(self.entry(node, udn) for node in nodes) + '</DIDL-Lite>'
-
-    def entry(self, node, udn):
-        tag = 'container' if node.container else 'item'
-        attributes = ' id="%s" parentID="%s" restricted="true"' % (html.escape(node.object_id), html.escape(node.parent_id))
-        if node.child_count is not None: attributes += ' childCount="%d"' % node.child_count
-        fields = ['<dc:title>%s</dc:title>' % text(node.title), '<upnp:class>%s</upnp:class>' % node.upnp_class]
-        if node.artist: fields.append('<dc:creator>%s</dc:creator>' % text(node.artist))
-        if node.album: fields.append('<upnp:album>%s</upnp:album>' % text(node.album))
-        if node.thumbnail and self.art:
-            fields.append('<upnp:albumArtURI>%s</upnp:albumArtURI>' % self.art.path_for(node.thumbnail, prefetch=False))
-        if node.container and node.playable and node.ha_id is not None:
-            uri = 'x-rincon-playlist:%s#%s' % (udn, node.object_id)
-            fields.append('<res protocolInfo="x-rincon-playlist:*:*:*">%s</res>' % text(uri))
-        elif node.uri:
-            fields.append('<res protocolInfo="%s:*:*:*">%s</res>' % (node.uri.split(':', 1)[0], text(node.uri)))
-        return '<%s%s>%s</%s>' % (tag, attributes, ''.join(fields), tag)

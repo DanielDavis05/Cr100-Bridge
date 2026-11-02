@@ -157,6 +157,7 @@ function setDirty(value) { dirty = value; }
 window.addEventListener('beforeunload', (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 
 async function show(name) {
+  if (name === 'home-assistant') name = 'source';   // the page's earlier name
   if (!views[name]) name = 'speakers';
   if (dirty && current && current !== name && !confirm('Leave without saving your changes?')) {
     history.replaceState(null, '', '#' + current);
@@ -189,7 +190,7 @@ views.speakers = {
   async open(main) {
     const data = await api('GET', '/api/speakers');
     const rows = data.speakers.map((s) => ({ ...s }));
-    let library = data.library_entity || '';
+    let library = data.library || '';
     const saved = () => JSON.stringify({ rows: rows.filter((r) => r.shown).map((r) => [r.key, r.custom_name, r.custom_icon]).sort(), library });
     // Rooms without a chosen icon follow their name, as the bridge does (room_icons.guess).
     const guesses = data.icon_guesses.map(([pattern, icon]) => [new RegExp(pattern), icon]);
@@ -204,35 +205,36 @@ views.speakers = {
       const shown = rows.filter((r) => r.shown).sort(byName), hidden = rows.filter((r) => !r.shown).sort(byName);
       main.innerHTML = '';
       main.append(el(`<p class="lede">These are the rooms the controller lists, sorted by name as it always sorts them. Switch a speaker off to hide it from the controller; nothing changes on the speaker itself.</p>`));
-      if (!data.ha_connected) {
-        main.append(el(`<div class="popup"><h3>Home Assistant is not connected</h3><p>The list may be out of date. Check the Home Assistant page.</p></div>`));
+      if (!data.source_connected) {
+        const problem = data.source === 'sonos' ? 'The Sonos speakers are not answering' : 'Home Assistant is not connected';
+        main.append(el(`<div class="popup"><h3>${problem}</h3><p>The list may be out of date. Check the Speaker source page.</p></div>`));
       }
       main.append(el(`<h2 class="group-title">On the controller</h2>`));
       if (!shown.length) main.append(el(`<p class="empty">No speakers are shown. Switch one on below.</p>`));
       shown.forEach((row) => main.append(line(row)));
       main.append(el(`<h2 class="group-title">Not on the controller</h2>`));
-      if (!hidden.length) main.append(el(`<p class="empty">Every speaker Home Assistant knows is on the controller.</p>`));
+      if (!hidden.length) main.append(el(`<p class="empty">Every speaker ${data.source === 'sonos' ? 'in your Sonos system' : 'Home Assistant knows'} is on the controller.</p>`));
       hidden.forEach((row) => main.append(line(row)));
 
       const sonos = shown.filter((r) => r.sonos);
       const panel = el(`<div class="popup"><h3>Music library</h3>
-        <p>Favourites, Sonos playlists and your music library are the same on every Sonos speaker. Pick which one the controller reads them from; it matters for speakers that are not Sonos.</p>
+        <p>Favourites, Sonos playlists and your music library are the same on every Sonos speaker. Pick which one the controller reads them from${data.source === 'sonos' ? '.' : '; it matters for speakers that are not Sonos.'}</p>
         <label class="field"><span>Read the Music menu from</span><select id="library"></select></label></div>`);
       const select = $('#library', panel);
       select.append(new Option('Each speaker itself', ''));
-      sonos.forEach((r) => select.append(new Option(r.name, r.entity)));
-      select.value = sonos.some((r) => r.entity === library) ? library : '';
+      sonos.forEach((r) => select.append(new Option(r.name, r.key)));
+      select.value = sonos.some((r) => r.key === library) ? library : '';
       select.addEventListener('change', () => { library = select.value; changed(); });
       main.append(el('<h2 class="group-title">Music menu</h2>'), panel);
       changed();
     };
 
     const describe = (row) => {
-      if (row.missing) return { main: 'Not found in Home Assistant', sub: row.entity };
+      if (row.missing) return { main: `Not found in ${data.source === 'sonos' ? 'your Sonos system' : data.source_label}`, sub: row.sub };
       if (row.simulated) return { main: 'Simulated room', sub: 'Not connected to a speaker' };
       const state = { playing: 'Playing', paused: 'Paused', idle: 'Idle', off: 'Off', unavailable: 'Unavailable',
         on: 'On', standby: 'Standby', buffering: 'Buffering' }[row.state] || (row.state || 'Unknown');
-      return { main: row.playing && row.state === 'playing' ? `${state}: ${row.playing}` : state, sub: row.entity };
+      return { main: row.playing && row.state === 'playing' ? `${state}: ${row.playing}` : state, sub: row.sub };
     };
 
     const line = (row) => {
@@ -309,15 +311,15 @@ views.speakers = {
 
     const startRename = (node, row) => {
       const tile = $('.tile', node);
-      const input = el(`<input type="text" maxlength="30" aria-label="Room name for ${escapeHtml(row.entity || row.name)}">`);
+      const input = el(`<input type="text" maxlength="30" aria-label="Room name for ${escapeHtml(row.source_name || row.name)}">`);
       input.value = row.name;
       $('.name', tile).replaceWith(input);
       input.focus(); input.select();
       const finish = (keep) => {
         if (keep) {
           const name = input.value.trim();
-          row.custom_name = !name || name === row.ha_name ? '' : name;
-          row.name = row.custom_name || row.ha_name || row.name;
+          row.custom_name = !name || name === row.source_name ? '' : name;
+          row.name = row.custom_name || row.source_name || row.name;
           if (!row.custom_icon) row.icon = guessIcon(row.name);
         }
         render();
@@ -343,7 +345,7 @@ views.speakers = {
     const save = async () => {
       const shown = rows.filter((r) => r.shown).sort(byName);
       const result = await api('PUT', '/api/speakers', {
-        rooms: shown.map((r) => ({ key: r.key, name: r.custom_name, icon: r.custom_icon })), library_entity: library || null });
+        rooms: shown.map((r) => ({ key: r.key, name: r.custom_name, icon: r.custom_icon })), library: library || null });
       baseline = saved();
       changed();
       toast('Saved', result.message);
@@ -511,41 +513,88 @@ views.spotify = {
   },
 };
 
-// Home Assistant ---------------------------------------------------------------------------
-views['home-assistant'] = {
-  title: 'Home Assistant',
+// Speaker source ---------------------------------------------------------------------------
+views.source = {
+  title: 'Speaker source',
   async open(main) {
-    const data = await api('GET', '/api/home-assistant');
+    const data = await api('GET', '/api/source');
+    const labels = Object.fromEntries(data.sources.map((s) => [s.name, s.label]));
+    let chosen = data.source;
     main.innerHTML = '';
-    main.append(el(`<p class="lede">The bridge reads your speakers, what they are playing and your music from Home Assistant, and sends the controller's commands back through it.</p>`));
-    const dot = data.connected ? 'good' : 'bad';
-    const status = data.connected
-      ? `Connected${data.version ? ` to Home Assistant ${escapeHtml(data.version)}` : ''}. ${data.media_players} media players.`
-      : escapeHtml(data.error || 'Not connected.');
-    main.append(el(`<div class="popup"><div class="state-line"><span class="dot ${dot}"></span>${status}</div></div>`));
-    const form = el(`<div class="popup"><h3>Connection</h3>
-      <label class="field"><span>Address</span><input type="url" id="ha-url" value="${escapeHtml(data.url)}" placeholder="http://homeassistant.local:8123" spellcheck="false"></label>
-      <label class="field"><span>Long-lived access token</span><input type="password" id="ha-token" autocomplete="off" placeholder="${data.token_saved ? 'Saved. Paste a new token to replace it.' : 'Paste a token'}">
-        <div class="hint">Create one in Home Assistant under your profile, Security, Long-lived access tokens. The bridge never shows a saved token.</div></label>
-      <p class="error" id="ha-error" role="alert"></p></div>`);
-    main.append(form);
-    const values = () => ({ url: $('#ha-url', form).value.trim(), token: $('#ha-token', form).value.trim() });
-    const baseline = JSON.stringify(values());
+    main.append(el(`<p class="lede">The controller's rooms are speakers from one source. Choose where the bridge finds them, what they are playing and your music.</p>`));
+    const choices = el(`<div class="popup" role="radiogroup" aria-labelledby="source-title"><h3 id="source-title">Where speakers come from</h3>
+      <label class="choice"><input type="radio" name="source" value="ha"><span class="what">
+        <span class="main">Home Assistant${data.source === 'ha' ? '<span class="chip">In use</span>' : ''}</span>
+        <span class="sub">Any media player Home Assistant knows, Sonos or not. Needs its address and an access token.</span></span></label>
+      <label class="choice"><input type="radio" name="source" value="sonos"><span class="what">
+        <span class="main">Sonos speakers directly${data.source === 'sonos' ? '<span class="chip">In use</span>' : ''}</span>
+        <span class="sub">The bridge talks to the Sonos speakers on its network itself. No Home Assistant needed.</span></span></label>
+      </div>`);
+    choices.querySelector(`input[value="${chosen}"]`).checked = true;
+    const settings = el('<div></div>');
+    main.append(choices, settings);
+
+    const ha = data.home_assistant, sonos = data.sonos;
+    const haForm = el(`<div class="popup"><h3>Home Assistant</h3>
+      <label class="field"><span>Address</span><input type="url" id="ha-url" value="${escapeHtml(ha.url)}" placeholder="http://homeassistant.local:8123" spellcheck="false"></label>
+      <label class="field"><span>Long-lived access token</span><input type="password" id="ha-token" autocomplete="off" placeholder="${ha.token_saved ? 'Saved. Paste a new token to replace it.' : 'Paste a token'}">
+        <div class="hint">Create one in Home Assistant under your profile, Security, Long-lived access tokens. The bridge never shows a saved token.</div></label></div>`);
+    const sonosForm = el(`<div class="popup"><h3>Sonos</h3>
+      <label class="field"><span>Speaker addresses</span><input type="text" id="sonos-hosts" value="${escapeHtml(sonos.hosts.join(', '))}" placeholder="Found automatically" spellcheck="false" autocomplete="off">
+        <div class="hint">Leave this empty to find the speakers automatically. If they are on another part of your network, enter the address of one or more of them, like 192.168.1.30.</div></label></div>`);
+    const haValues = () => ({ url: $('#ha-url', haForm).value.trim(), token: $('#ha-token', haForm).value.trim() });
+    const sonosValues = () => ({ hosts: $('#sonos-hosts', sonosForm).value.trim() });
+    const baseline = JSON.stringify([haValues(), sonosValues()]);
+
+    const status = (name) => {
+      if (name === 'sonos') {
+        if (!sonos.connected) return { dot: 'bad', text: escapeHtml(sonos.error || 'The Sonos speakers are not answering.') };
+        const count = sonos.speakers.length;
+        return { dot: 'good', text: `${count} Sonos speaker${count === 1 ? '' : 's'}: ${escapeHtml(sonos.speakers.join(', '))}.` };
+      }
+      if (ha.connected) return { dot: 'good', text: `Connected${ha.version ? ` to Home Assistant ${escapeHtml(ha.version)}` : ''}. ${ha.media_players} media players.` };
+      if (data.source !== 'ha') return { dot: 'bad', text: 'Not in use. The bridge connects once you choose Home Assistant.' };
+      return { dot: 'bad', text: escapeHtml(ha.error || 'Not connected.') };
+    };
+
+    const render = () => {
+      settings.innerHTML = '';
+      const state = status(chosen);
+      settings.append(el(`<div class="popup"><div class="state-line"><span class="dot ${state.dot}"></span><span>${state.text}</span></div></div>`));
+      settings.append(chosen === 'sonos' ? sonosForm : haForm);
+      update();
+    };
+
     const update = () => {
-      const isDirty = JSON.stringify(values()) !== baseline;
+      const isDirty = chosen !== data.source || JSON.stringify([haValues(), sonosValues()]) !== baseline;
       setDirty(isDirty);
       softkeys([
         { label: 'Test connection', run: async () => {
-            const result = await api('POST', '/api/home-assistant/test', values());
+            const result = chosen === 'sonos' ? await api('POST', '/api/sonos/test', sonosValues())
+              : await api('POST', '/api/home-assistant/test', haValues());
             toast(result.ok ? 'Connection works' : 'Connection failed', result.message, !result.ok); } },
         null,
-        { label: 'Save changes', disabled: !isDirty, run: async () => {
-            const result = await api('PUT', '/api/home-assistant', values()); setDirty(false); toast('Saved', result.message);
-            setTimeout(() => show('home-assistant'), 2500); } },
+        { label: chosen !== data.source ? `Use ${labels[chosen]}` : 'Save changes', disabled: !isDirty, run: save },
       ]);
     };
-    form.addEventListener('input', update);
-    update();
+
+    const save = async () => {
+      const [haNow, sonosNow] = [haValues(), sonosValues()];
+      const [haThen, sonosThen] = JSON.parse(baseline);
+      if (chosen !== data.source && !confirm(`Take the controller's rooms from ${labels[chosen]}? Your ${labels[data.source]} rooms are kept for when you switch back.`)) return;
+      let result = null;
+      if (JSON.stringify(haNow) !== JSON.stringify(haThen)) result = await api('PUT', '/api/home-assistant', haNow);
+      if (JSON.stringify(sonosNow) !== JSON.stringify(sonosThen)) result = await api('PUT', '/api/sonos', sonosNow);
+      if (chosen !== data.source) result = await api('PUT', '/api/source', { source: chosen });
+      setDirty(false);
+      toast('Saved', result ? result.message : '');
+      setTimeout(() => show('source'), 1500);
+    };
+
+    choices.addEventListener('change', (event) => { chosen = event.target.value; render(); });
+    haForm.addEventListener('input', update);
+    sonosForm.addEventListener('input', update);
+    render();
   },
 };
 
@@ -586,10 +635,11 @@ async function refreshStatus() {
     const badge = $('#badge-controller');
     badge.innerHTML = bars(lit, o.controller === 'searching' ? '#f3c24a' : '#a6d84a');
     badge.setAttribute('aria-label', controllerText); badge.title = controllerText;
-    const ha = $('#badge-ha');
-    ha.innerHTML = houseBadge(o.home_assistant);
-    const haText = o.home_assistant ? 'Home Assistant connected' : 'Home Assistant not connected';
-    ha.setAttribute('aria-label', haText); ha.title = haText;
+    const source = $('#badge-source');
+    source.innerHTML = houseBadge(o.source_connected);
+    const sourceText = o.source === 'Sonos' ? (o.source_connected ? 'Sonos speakers answering' : 'Sonos speakers not answering')
+      : (o.source_connected ? 'Home Assistant connected' : 'Home Assistant not connected');
+    source.setAttribute('aria-label', sourceText); source.title = sourceText;
     $('#status').hidden = false;
   } catch { /* the next refresh tries again */ }
 }

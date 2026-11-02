@@ -1,8 +1,9 @@
 # CR100 Bridge
 
-Use a Sonos CR100 controller with modern Sonos speakers through Home Assistant.
-A Raspberry Pi presents a SonosNet link and virtual rooms to the CR100. Home
-Assistant supplies the real speakers, playback controls, and music library.
+Use a Sonos CR100 controller with modern Sonos speakers, directly or through Home
+Assistant. A Raspberry Pi presents a SonosNet link and virtual rooms to the CR100.
+The speaker source, Sonos players on the home network or Home Assistant, supplies
+the real speakers, playback controls, and music library.
 
 This repository contains the runtime, virtual player implementation, protocol
 fixtures, web interface, installer, and systemd units. An emulator checkout,
@@ -15,8 +16,9 @@ Sonos firmware image, and the author's configuration are not needed.
   The built-in `wlan0` is dedicated to the CR100; ordinary Wi-Fi on that radio
   cannot be the installation/SSH connection or upstream connection.
 - Internet access to Kali's package repositories and PyPI; root/sudo access.
-- Home Assistant with the desired media players. For Sonos queue/library features,
-  configure the Sonos integration in Home Assistant first.
+- Sonos speakers (S1 or S2) on the home network, or Home Assistant with the desired
+  media players. Through Home Assistant, the Sonos queue and library need its Sonos
+  integration.
 
 Raspberry Pi OS, 32-bit Kali, and other Pi models are not supported by this installer.
 The recorded working radio setup is Pi 4/Kali 2026.3, kernel
@@ -46,7 +48,8 @@ the enabled services will start automatically. It never reboots the Pi itself.
 Open the printed **`http://<pi-address>:8080`** URL from your home network:
 
 1. Set the web interface password.
-2. Add your Home Assistant URL and long-lived access token under Home Assistant.
+2. Under Speaker source, choose Sonos speakers directly or Home Assistant. For
+   Home Assistant, add its URL and a long-lived access token.
 3. Choose the speakers to show on the CR100 under Speakers.
 4. Under Controllers, choose **Pair controller**, then put the CR100 into its
    add-to-household setup mode. Pairing waits up to three minutes and the bridge
@@ -142,6 +145,34 @@ tokens, research captures, logs, and caches. Extract it and run `install.sh` on
 the Pi. The same builder prepares the installed release. Tests use local fake
 Home Assistant/Spotify services. An optional private radio capture regression
 is skipped when its capture is absent; synthetic link tests still run.
+
+### Playback backends
+
+Each virtual room is played by a backend: Home Assistant (`tools/ha_backend.py`) or
+Sonos players over their local UPnP (`tools/sonos_backend.py`, `sonos_content.py`,
+`sonos_upnp.py`; tests against `fake_sonos.py`). The web interface's Speaker source
+page switches between them (config `backend`); the other source's rooms are kept
+under `stashed_sources` and return when it is chosen again.
+`tools/backends.py` defines what a backend provides: a `Backend` (one connection,
+with optional album art and Music menu content) and a `Room` per player, which
+reports state and carries out plain actions (play, seek, join, ...). The shared
+code turns those into the CR100's UPnP, so a backend never handles SOAP or DIDL
+itself. `tools/content.py` holds the Music menu's paging and object registry.
+
+To add a backend: subclass `Backend` and `Room` in a new module with a
+`load(settings, config_dir, log)` function, register it in `backends.BACKENDS`
+under its name and config section, and add the module to `distribution.py`.
+Rooms then name it as `{"backend": "<name>", "id": "<room id>"}`; the existing
+`{"entity": ...}` form still means Home Assistant. `tools/test_backends.py`
+drives a household through an in-memory backend and is a template for tests.
+The web interface knows the two sources by name (`webui.SOURCES`); a new backend
+also needs its speaker listing there.
+
+The Sonos backend reads state itself after every action and every 30 s, besides
+events: a ZP80 on S1 11.16 sends its events 2-8 s late and merged. It needs the
+Pi to accept incoming connections from the players (event callbacks, an ephemeral
+TCP port unless `sonos.event_port` is set); without them it polls every 3 s.
+Spotify through Sonos needs the account linked in the Sonos app.
 
 The bundled player under `tools/zp80/` originated in the local CR100 emulator
 project. It includes the software player, Netstart helper, synthetic public key,

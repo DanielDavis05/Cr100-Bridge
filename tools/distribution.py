@@ -7,9 +7,10 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME = '''bridge_service.py sonosnet_link.py frames.py ccmp.py zoneplayers.py
-ha_backend.py ha_client.py ha_content.py room_icons.py music_service_events.py
+backends.py content.py ha_backend.py ha_client.py ha_content.py room_icons.py music_service_events.py
 smapi_stub.py sonos_queue_art.py spotify_auth.py spotify_client.py spotify_playback.py
 spotify_service.py webui.py netstart_pair.py synthetic_public_key.bin fake_ha.py
+sonos_backend.py sonos_content.py sonos_upnp.py fake_sonos.py
 distribution.py'''.split()
 
 

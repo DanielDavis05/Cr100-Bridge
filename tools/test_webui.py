@@ -243,6 +243,83 @@ class HomeAssistantSettings(Fixture):
         self.assertEqual(oct((self.dir / 'ha-token').stat().st_mode & 0o777), '0o600')
 
 
+class SpeakerSource(Fixture):
+    """Switching the controller's rooms between Home Assistant and Sonos (fake_sonos.py)."""
+    KITCHEN, BEDROOM = 'RINCON_000E58AAAAAA01400', 'RINCON_000E58CCCCCC01400'
+
+    def setUp(self):
+        super().setUp()
+        import fake_sonos
+        self.sonos = fake_sonos.FakeHousehold()
+        self.sonos.add(self.KITCHEN, 'Kitchen')
+        self.sonos.add(self.BEDROOM, 'Bedroom').transport = 'PLAYING'
+        self.host = self.sonos.players[self.KITCHEN].base[len('http://'):]
+        self.addCleanup(self.sonos.close)
+
+    def test_sonos_settings_are_checked_tested_and_saved(self):
+        for bad in ('http://x', 'a b; rm', ['ok'] * 17):
+            with self.assertRaises(webui.ApiError):
+                self.bridge.save_sonos(bad)
+        self.assertIn('Found 2 Sonos speakers: Bedroom, Kitchen.', self.bridge.test_sonos(self.host)['message'])
+        self.assertFalse(self.bridge.test_sonos('127.0.0.1:9')['ok'])
+        result = self.bridge.save_sonos(self.host + ', ')
+        self.assertFalse(result['applied'])   # Home Assistant is still the source
+        self.assertEqual(self.saved()['sonos'], {'hosts': [self.host]})
+        self.assertEqual(self.bridge.sonos()['speakers'], ['Bedroom', 'Kitchen'])
+
+    def test_switching_sets_rooms_aside_and_brings_them_back(self):
+        ha_rooms = self.saved()['rooms']
+        self.bridge.save_sonos([self.host])
+        with self.assertRaises(webui.ApiError):
+            self.bridge.switch_source('spotify')
+        with patch('webui.os.kill'):
+            self.bridge.save_speakers({'rooms': [{'key': 'media_player.kitchen'}, {'key': 'media_player.patio'}],
+                                       'library_entity': 'media_player.patio'})
+            ha_rooms = self.saved()['rooms']
+            self.bridge.switch_source('sonos')
+        config = self.saved()
+        self.assertEqual(config['backend'], 'sonos')
+        self.assertEqual([(r['backend'], r['id']) for r in config['rooms']],
+                         [('sonos', self.KITCHEN), ('sonos', self.BEDROOM)])   # every Sonos speaker, first time
+        self.assertEqual(config['stashed_sources']['ha'], {'rooms': ha_rooms,
+                                                           'music_menu': {'library_entity': 'media_player.patio'}})
+        self.assertNotIn('music_menu', config)
+        ha_slots = {r['entity']: r['slot'] for r in ha_rooms}
+        self.assertEqual({k: v for k, v in config['player_slots'].items() if k in ha_slots}, ha_slots)
+        self.assertFalse({r['slot'] for r in config['rooms']} & set(ha_slots.values()))   # Sonos takes unused slots
+        listed = self.bridge.speakers()
+        rows = {r['key']: r for r in listed['speakers']}
+        self.assertEqual((listed['source'], listed['source_connected']), ('sonos', True))
+        bedroom = rows['sonos:' + self.BEDROOM]
+        self.assertEqual((bedroom['name'], bedroom['shown'], bedroom['state'], bedroom['sub']),
+                         ('Bedroom', True, 'playing', '127.0.0.1'))
+        # Rename one, hide the other, read the Music menu from it.
+        with patch('webui.os.kill'):
+            self.bridge.save_speakers({'rooms': [{'key': 'sonos:' + self.BEDROOM, 'name': 'Den'}],
+                                       'library': 'sonos:' + self.BEDROOM})
+        config = self.saved()
+        self.assertEqual(config['rooms'], [{'backend': 'sonos', 'id': self.BEDROOM, 'name': 'Den',
+                                            'slot': config['player_slots']['sonos:' + self.BEDROOM]}])
+        self.assertEqual(config['music_menu'], {'library': {'backend': 'sonos', 'id': self.BEDROOM}})
+        with self.assertRaises(webui.ApiError):   # a Home Assistant speaker is not on offer now
+            self.bridge.save_speakers({'rooms': [{'key': 'media_player.kitchen'}]})
+        self.assertEqual(self.bridge.overview()['source'], 'Sonos')
+        # Back to Home Assistant: its rooms and library return; Sonos's are kept aside.
+        with patch('webui.os.kill'):
+            self.bridge.switch_source('ha')
+        config = self.saved()
+        self.assertEqual((config['backend'], config['rooms']), ('ha', ha_rooms))
+        self.assertEqual(config['music_menu'], {'library_entity': 'media_player.patio'})
+        self.assertEqual(config['stashed_sources']['sonos']['music_menu'],
+                         {'library': {'backend': 'sonos', 'id': self.BEDROOM}})
+        # The players read the same config.
+        names, refs, _, connected = zoneplayers.load_rooms(self.config, lambda record: None)
+        try:
+            self.assertEqual(refs, [('ha', 'media_player.kitchen'), ('ha', 'media_player.patio')])
+        finally:
+            for backend in connected.values(): backend.close()
+
+
 class Http(Fixture):
     def setUp(self):
         super().setUp()
@@ -317,14 +394,14 @@ class Listening(unittest.TestCase):
 
 class PlayerSide(unittest.TestCase):
     """zoneplayers: slots fix each room's player identity; the library speaker browses."""
-    def test_slots_fix_identity_and_library_entity(self):
+    def test_slots_fix_identity_and_library(self):
         directory = Path(tempfile.mkdtemp())
         config = directory / 'config.json'
         write(config, {'rooms': [{'name': 'Den', 'slot': 4}, {'name': 'Spare'}],
                        'music_menu': {'library_entity': 'media_player.kitchen'}})
-        names, entities, slots, ha = zoneplayers.load_rooms(config, lambda r: None)
-        self.assertEqual((names, entities, slots, ha), (['Den', 'Spare'], [None, None], [4, 1], None))
-        self.assertEqual(zoneplayers.library_entity(config), 'media_player.kitchen')
+        names, refs, slots, connected = zoneplayers.load_rooms(config, lambda r: None)
+        self.assertEqual((names, refs, slots, connected), (['Den', 'Spare'], [None, None], [4, 1], {}))
+        self.assertEqual(zoneplayers.library_ref(config), ('ha', 'media_player.kitchen'))
         house = zoneplayers.Household(zp, HOUSEHOLD, names, ['127.0.0.1'] * 2, lambda r: None, port=0, slots=slots)
         self.assertEqual([p.config.udn for p in house.players],
                          ['RINCON_02690000000501400', 'RINCON_02690000000201400'])

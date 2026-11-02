@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web interface for the CR100 bridge: speakers, controllers, Spotify and Home Assistant.
+"""Web interface for the CR100 bridge: speakers, controllers, Spotify and the speaker source.
 
 Served on port 8080 of every IPv4 interface behind a password; requests from the
 CR100's own network (sonos0) are refused.
@@ -11,6 +11,10 @@ its stats lines), the DHCP leases, and each CR100's own /status pages.
 
 Built for several controllers: the state file may list them under "controllers"
 (today the link and pairing handle one, "cr100_mac").
+
+Speaker source: the controller's rooms come from Home Assistant or straight from Sonos
+players (config "backend", see backends.py). Switching keeps the other source's rooms aside
+("stashed_sources"), so switching back restores them.
 
 Usage: sudo python3 webui.py --config bridge-config.json --state bridge-state.json --run-dir <bridge_run dir>
 """
@@ -57,6 +61,10 @@ AWAY_AFTER = 120               # s searching or silent: asleep (standby) or out 
 DETAILS_POLL = 30              # s between /status reads of each connected CR100
 STATUS_TIMEOUT = 3
 HA_TEST_WAIT = 8
+SONOS_FRESH = 10               # s a read of the Sonos household is reused
+SOURCES = {'ha': 'Home Assistant', 'sonos': 'Sonos'}
+LIBRARY_KEYS = ('library', 'library_entity')   # music_menu keys naming where the Music menu is read
+MAX_HOSTS = 16
 SPOTIFY_SIGN_IN_TTL = 900
 LINK_EVENTS = ('associated', 'resumed', 'cr100-searching', 'link-heard', 'link-silent', 'radio-lost',
                'radio-reopened', 'disassoc', 'deauth')
@@ -169,6 +177,7 @@ class Bridge:
         self.token_exchange = token_exchange or default_token_exchange
         self.profile_fetch = profile_fetch or default_profile_fetch
         self.ha, self.ha_info, self.registry = None, {}, (None, {})
+        self.sonos_cache, self.sonos_lock = (0, None), threading.Lock()
         self.details, self.known_ips = {}, {}
         self.spotify_pending = None
         self.stop = threading.Event()
@@ -197,7 +206,7 @@ class Bridge:
         return {'applied': True, 'message': 'Saved. The controller shows the change in a few seconds.'}
 
     def start(self):
-        self.connect_ha()
+        if self.source() == 'ha': self.connect_ha()
         threading.Thread(target=self.poll_controllers, name='controller-poll', daemon=True).start()
 
     def close(self):
@@ -291,24 +300,158 @@ class Bridge:
         self.connect_ha()
         return self.reload_players()
 
+    # speaker source ----------------------------------------------------------------
+    def source(self, config=None):
+        """Where the controller's rooms come from (config "backend"): 'ha', the default, or 'sonos'."""
+        name = (config if config is not None else self.config()).get('backend') or 'ha'
+        return name if name in SOURCES else 'ha'
+
+    def source_connected(self, source=None, wait=True):
+        """Whether the source answers; without wait, from what is known now (the status badge)."""
+        source = source or self.source()
+        if source != 'sonos': return self.ha_connected()
+        return not (self.sonos_household() if wait else self.sonos_known())['error']
+
+    def source_status(self):
+        source = self.source()
+        return {'source': source, 'sources': [{'name': n, 'label': l} for n, l in SOURCES.items()],
+                'home_assistant': self.home_assistant(), 'sonos': self.sonos()}
+
+    def switch_source(self, source):
+        """Take the controller's rooms from another source. The current source's rooms and Music
+        menu choice are set aside in the config and come back when it is chosen again; a source
+        chosen for the first time shows its Sonos speakers."""
+        if source not in SOURCES: raise ApiError(400, 'Choose Home Assistant or Sonos.')
+        current = self.source()
+        if source == current: return {'applied': False, 'message': 'The controller already uses %s.' % SOURCES[source]}
+        listing = self.listing(source)
+        platforms = self.platforms() if source == 'ha' else {}
+        defaults = [key for key in listing if source == 'sonos' or platforms.get(key) == 'sonos'][:MAX_SLOTS]
+
+        def change(config):
+            # Remember the outgoing rooms' slots, so the new source's speakers take unused ones
+            # and every speaker keeps its player identity on the controller across switches.
+            slots = config.setdefault('player_slots', {})
+            for index, room in enumerate(config.get('rooms', [])):
+                if room_key_ref(room): slots.setdefault(room_key(room), int(room.get('slot', index)))
+            stash = config.setdefault('stashed_sources', {})
+            menu = config.get('music_menu') or {}
+            stash[current] = {'rooms': config.get('rooms', []), 'music_menu': {k: menu[k] for k in LIBRARY_KEYS if k in menu}}
+            restored = stash.pop(source, None)
+            for key in LIBRARY_KEYS: menu.pop(key, None)
+            config['backend'] = source
+            if restored:
+                config['rooms'] = restored['rooms']
+                menu.update(restored['music_menu'])
+                if menu: config['music_menu'] = menu
+                else: config.pop('music_menu', None)
+            else:
+                config['rooms'] = []
+                if menu: config['music_menu'] = menu
+                else: config.pop('music_menu', None)
+                self.apply_rooms(config, [{'key': key} for key in defaults], None, source, listing, platforms)
+
+        self.update_config(change)
+        if source == 'ha': self.connect_ha()
+        elif self.ha: self.ha.close(); self.ha = None
+        self.log({'event': 'source-switched', 'from': current, 'to': source})
+        return self.reload_players()
+
+    # Sonos -------------------------------------------------------------------------
+    def sonos_hosts(self, config=None):
+        hosts = ((config if config is not None else self.config()).get('sonos') or {}).get('hosts') or []
+        return [hosts] if isinstance(hosts, str) else list(hosts)
+
+    def sonos_household(self, fresh=False, hosts=None):
+        """The Sonos household as this page shows it: zones with what each group plays. The
+        configured one is re-read at most every SONOS_FRESH s; other hosts (a test) every time."""
+        import sonos_upnp
+        with self.sonos_lock:
+            cached_at, cached = self.sonos_cache
+            if hosts is None and not fresh and cached is not None and time.monotonic() - cached_at < SONOS_FRESH:
+                return cached
+            try:
+                _, groups, zones = sonos_upnp.household(self.sonos_hosts() if hosts is None else hosts, STATUS_TIMEOUT)
+            except sonos_upnp.UPnPFault as error:
+                result = {'error': 'No Sonos speakers answered (%s). Check that the bridge is on their network, '
+                                   'or add a speaker\'s address.' % error, 'zones': []}
+            else:
+                listed = []
+                for coordinator, members in groups:
+                    state, playing = sonos_playing(zones[coordinator]['base'])
+                    for uuid in members:
+                        listed.append({'uuid': uuid, 'name': zones[uuid]['name'], 'base': zones[uuid]['base'],
+                                       'state': state, 'playing': playing,
+                                       'group': [zones[u]['name'] for u in members] if len(members) > 1 else []})
+                result = {'error': None, 'zones': listed}
+            if hosts is None: self.sonos_cache = (time.monotonic(), result)
+            return result
+
+    def sonos_known(self):
+        """The last read of the Sonos household without waiting for the network; a stale one
+        starts a fresh read in the background."""
+        cached_at, cached = self.sonos_cache
+        if (cached is None or time.monotonic() - cached_at >= SONOS_FRESH) and not self.sonos_lock.locked():
+            threading.Thread(target=self.sonos_household, name='sonos-read', daemon=True).start()
+        return cached or {'error': 'The Sonos speakers have not been read yet.', 'zones': []}
+
+    def sonos(self):
+        hosts, household = self.sonos_hosts(), self.sonos_household()
+        return {'hosts': hosts, 'connected': not household['error'], 'error': household['error'],
+                'speakers': sorted(z['name'] for z in household['zones'])}
+
+    def test_sonos(self, hosts):
+        household = self.sonos_household(hosts=check_hosts(hosts))
+        if household['error']: return {'ok': False, 'message': household['error']}
+        names = sorted(z['name'] for z in household['zones'])
+        return {'ok': True, 'message': 'Found %d Sonos speaker%s: %s.' % (len(names), '' if len(names) == 1 else 's',
+                                                                         ', '.join(names))}
+
+    def save_sonos(self, hosts):
+        hosts = check_hosts(hosts)
+        self.update_config(lambda config: config.setdefault('sonos', {}).update(hosts=hosts))
+        self.sonos_cache = (0, None)
+        if self.source() == 'sonos': return self.reload_players()
+        return {'applied': False, 'message': 'Saved. Sonos is used once you choose it as the speaker source.'}
+
     # speakers --------------------------------------------------------------------
+    def listing(self, source):
+        """key -> the source's own name, for every speaker the source knows now."""
+        if source == 'sonos':
+            return {'sonos:' + zone['uuid']: zone['name'] for zone in self.sonos_household()['zones']}
+        return {entity: friendly(state) for entity, state in self.media_players().items()}
+
     def speakers(self):
         config = self.config()
-        states, platforms = self.media_players(), self.platforms()
+        source = self.source(config)
         rows, shown = [], set()
-        for room in config.get('rooms', []):
-            entity = room.get('entity')
-            key = room_key(room)
-            shown.add(key)
-            rows.append(self.speaker_row(key, entity, states.get(entity), platforms, room.get('name'), True,
-                                         room.get('icon')))
         hidden_icons = config.get('room_icons') or {}   # chosen while shown, kept while hidden
-        for entity in sorted(states, key=lambda e: friendly(states[e]).lower()):
-            if entity not in shown:
-                rows.append(self.speaker_row(entity, entity, states[entity], platforms, None, False,
-                                             hidden_icons.get(entity)))
-        library = (config.get('music_menu') or {}).get('library_entity')
-        return {'speakers': rows, 'library_entity': library, 'ha_connected': self.ha_connected(),
+        menu = config.get('music_menu') or {}
+        if source == 'sonos':
+            zones = {'sonos:' + z['uuid']: z for z in self.sonos_household()['zones']}
+            for room in config.get('rooms', []):
+                key = room_key(room)
+                shown.add(key)
+                rows.append(sonos_row(key, zones.get(key), room, True, room.get('icon')))
+            for key in sorted(zones, key=lambda k: zones[k]['name'].lower()):
+                if key not in shown: rows.append(sonos_row(key, zones[key], {}, False, hidden_icons.get(key)))
+            library = 'sonos:' + menu['library']['id'] if (menu.get('library') or {}).get('backend') == 'sonos' else None
+        else:
+            states, platforms = self.media_players(), self.platforms()
+            for room in config.get('rooms', []):
+                entity = room.get('entity')
+                key = room_key(room)
+                shown.add(key)
+                rows.append(self.speaker_row(key, entity, states.get(entity), platforms, room.get('name'), True,
+                                             room.get('icon')))
+            for entity in sorted(states, key=lambda e: friendly(states[e]).lower()):
+                if entity not in shown:
+                    rows.append(self.speaker_row(entity, entity, states[entity], platforms, None, False,
+                                                 hidden_icons.get(entity)))
+            library = menu.get('library_entity')
+        return {'speakers': rows, 'library': library, 'library_entity': library, 'source': source,
+                'source_label': SOURCES[source], 'source_connected': self.source_connected(source),
+                'ha_connected': self.ha_connected(),
                 'max_shown': MAX_SLOTS, 'icons': [{'name': n, 'label': l} for n, l, _ in room_icons.PICTURES],
                 'icon_guesses': room_icons.GUESSES, 'default_icon': room_icons.DEFAULT}
 
@@ -318,86 +461,92 @@ class Bridge:
         ha_name = attributes.get('friendly_name') or (entity.split('.', 1)[-1].replace('_', ' ').title()
                                                       if entity else None)
         title, artist = attributes.get('media_title'), attributes.get('media_artist')
-        name = custom_name or ha_name or key[4:]
-        custom_icon = room_icons.picture(custom_icon) or ''   # older configs may name a same-picture room
-        return {'key': key, 'entity': entity, 'name': name, 'custom_name': custom_name or '',
-                'icon': custom_icon or room_icons.guess(name), 'custom_icon': custom_icon,
-                'ha_name': ha_name, 'shown': shown, 'simulated': entity is None,
-                'missing': entity is not None and state is None,
-                'state': (state or {}).get('state'), 'playing': ' – '.join(x for x in (title, artist) if x) or None,
-                'platform': platforms.get(entity) if entity else None,
-                'sonos': platforms.get(entity) == 'sonos' if entity else False}
+        return row(key, ha_name, custom_name, shown, custom_icon, entity=entity, simulated=entity is None,
+                   missing=entity is not None and state is None, state=(state or {}).get('state'),
+                   playing=' – '.join(x for x in (title, artist) if x) or None, sub=entity or '',
+                   platform=platforms.get(entity) if entity else None,
+                   sonos=platforms.get(entity) == 'sonos' if entity else False)
 
     def save_speakers(self, payload):
         wanted = payload.get('rooms')
         if not isinstance(wanted, list): raise ApiError(400, 'Expected a list of rooms.')
         if len(wanted) > MAX_SLOTS: raise ApiError(400, 'The controller can show at most %d speakers.' % MAX_SLOTS)
-        states, platforms = self.media_players(), self.platforms()
-
-        def change(config):
-            rooms = config.get('rooms', [])
-            existing = {room_key(r): r for r in rooms}
-            slots = dict(config.get('player_slots') or {})
-            for index, room in enumerate(rooms):   # rooms from before slots keep their position
-                slots.setdefault(room_key(room), int(room.get('slot', index)))
-            new_rooms, names, keys = [], set(), set()
-            for item in wanted:
-                key = item.get('key') if isinstance(item, dict) else None
-                if not isinstance(key, str) or key in keys: raise ApiError(400, 'Each speaker can appear once.')
-                keys.add(key)
-                if key.startswith('media_player.'):
-                    if key not in states and key not in existing:
-                        raise ApiError(400, '%s is not a Home Assistant media player.' % key)
-                    entity = key
-                elif key in existing and not existing[key].get('entity'):
-                    entity = None   # a simulated room from the config file
-                else:
-                    raise ApiError(400, 'Unknown speaker %s.' % key)
-                custom = (item.get('name') or '').strip()
-                if len(custom) > MAX_ROOM_NAME:
-                    raise ApiError(400, 'Keep room names to %d characters.' % MAX_ROOM_NAME)
-                default = friendly(states.get(entity)) if entity else existing[key].get('name')
-                if custom == default: custom = ''
-                name = custom or default or entity.split('.', 1)[-1].replace('_', ' ').title()
-                if name.lower() in names: raise ApiError(400, 'Two rooms are both named %s.' % name)
-                names.add(name.lower())
-                room = {'entity': entity} if entity else {}
-                if custom or not entity: room['name'] = name
-                icon = item.get('icon') or ''
-                if icon and icon not in room_icons.ICONS: raise ApiError(400, 'Unknown room icon %s.' % icon)
-                icon = room_icons.picture(icon)
-                if icon and icon != room_icons.guess(name): room['icon'] = icon   # else follow the name
-                new_rooms.append((key, room))
-            # A speaker keeps the slot it had (its player identity on the controller); a new one
-            # takes a slot no speaker has used, or failing that one no shown speaker uses.
-            assigned = {}
-            for key, _ in new_rooms:
-                if key in slots and slots[key] not in assigned.values(): assigned[key] = slots[key]
-            for key, _ in new_rooms:
-                if key in assigned: continue
-                free = [s for s in range(MAX_SLOTS) if s not in assigned.values() and s not in slots.values()] \
-                    or [s for s in range(MAX_SLOTS) if s not in assigned.values()]
-                assigned[key] = slots[key] = free[0]
-            for key, room in new_rooms: room['slot'] = assigned[key]
-            config['rooms'] = [room for _, room in new_rooms]
-            # Icons of speakers hidden now are kept, so showing one again restores it.
-            kept = dict(config.get('room_icons') or {})
-            for room in rooms:
-                if room.get('entity') and room.get('icon'): kept[room['entity']] = room['icon']
-            for key, room in new_rooms:
-                if room.get('entity'): kept.pop(room['entity'], None)
-            if kept: config['room_icons'] = kept
-            else: config.pop('room_icons', None)
-            config['player_slots'] = {k: v for k, v in slots.items() if k.startswith('media_player.')}
-            library = payload.get('library_entity') or None
-            if library is not None and (library not in keys or platforms.get(library, 'sonos') != 'sonos'):
-                raise ApiError(400, 'Choose a Sonos speaker that is shown on the controller for the library.')
-            if library: config['music_menu'] = {**(config.get('music_menu') or {}), 'library_entity': library}
-            elif config.get('music_menu'): config['music_menu'].pop('library_entity', None)
-
-        self.update_config(change)
+        source = self.source()
+        listing, platforms = self.listing(source), self.platforms() if source == 'ha' else {}
+        library = payload.get('library', payload.get('library_entity')) or None
+        self.update_config(lambda config: self.apply_rooms(config, wanted, library, source, listing, platforms))
         self.log({'event': 'speakers-saved', 'rooms': [r.get('key') for r in wanted]})
         return self.reload_players()
+
+    @staticmethod
+    def apply_rooms(config, wanted, library, source, listing, platforms):
+        """Make the config's rooms the wanted ones ({'key', 'name', 'icon'}), in order, and the
+        Music menu read from library (a shown speaker's key, or None)."""
+        prefix = 'sonos:' if source == 'sonos' else 'media_player.'
+        rooms = config.get('rooms', [])
+        existing = {room_key(r): r for r in rooms}
+        slots = dict(config.get('player_slots') or {})
+        for index, room in enumerate(rooms):   # rooms from before slots keep their position
+            slots.setdefault(room_key(room), int(room.get('slot', index)))
+        new_rooms, names, keys = [], set(), set()
+        for item in wanted:
+            key = item.get('key') if isinstance(item, dict) else None
+            if not isinstance(key, str) or key in keys: raise ApiError(400, 'Each speaker can appear once.')
+            keys.add(key)
+            if key.startswith(prefix):
+                if key not in listing and key not in existing:
+                    raise ApiError(400, '%s is not a %s.' % (key, 'Sonos speaker on this network' if source == 'sonos'
+                                                              else 'Home Assistant media player'))
+                ref = key
+            elif key in existing and not room_key_ref(existing[key]):
+                ref = None   # a simulated room from the config file
+            else:
+                raise ApiError(400, 'Unknown speaker %s.' % key)
+            custom = (item.get('name') or '').strip()
+            if len(custom) > MAX_ROOM_NAME:
+                raise ApiError(400, 'Keep room names to %d characters.' % MAX_ROOM_NAME)
+            default = listing.get(ref) if ref else existing[key].get('name')
+            if not default and ref in existing: default = existing[ref].get('name')
+            if custom == default: custom = ''
+            name = custom or default or (ref.split('.', 1)[-1].replace('_', ' ').title() if source == 'ha' else ref)
+            if name.lower() in names: raise ApiError(400, 'Two rooms are both named %s.' % name)
+            names.add(name.lower())
+            room = room_for(ref) if ref else {}
+            if custom or not ref or not listing.get(ref): room['name'] = name
+            icon = item.get('icon') or ''
+            if icon and icon not in room_icons.ICONS: raise ApiError(400, 'Unknown room icon %s.' % icon)
+            icon = room_icons.picture(icon)
+            if icon and icon != room_icons.guess(name): room['icon'] = icon   # else follow the name
+            new_rooms.append((key, room))
+        # A speaker keeps the slot it had (its player identity on the controller); a new one
+        # takes a slot no speaker has used, or failing that one no shown speaker uses.
+        assigned = {}
+        for key, _ in new_rooms:
+            if key in slots and slots[key] not in assigned.values(): assigned[key] = slots[key]
+        for key, _ in new_rooms:
+            if key in assigned: continue
+            free = [s for s in range(MAX_SLOTS) if s not in assigned.values() and s not in slots.values()] \
+                or [s for s in range(MAX_SLOTS) if s not in assigned.values()]
+            assigned[key] = slots[key] = free[0]
+        for key, room in new_rooms: room['slot'] = assigned[key]
+        config['rooms'] = [room for _, room in new_rooms]
+        # Icons of speakers hidden now are kept, so showing one again restores it.
+        kept = dict(config.get('room_icons') or {})
+        for room in rooms:
+            if room_key_ref(room) and room.get('icon'): kept[room_key(room)] = room['icon']
+        for key, room in new_rooms:
+            if room_key_ref(room): kept.pop(key, None)
+        if kept: config['room_icons'] = kept
+        else: config.pop('room_icons', None)
+        config['player_slots'] = {k: v for k, v in slots.items() if k.startswith(('media_player.', 'sonos:'))}
+        if library is not None and (library not in keys or not library.startswith(prefix)
+                                    or (source == 'ha' and platforms.get(library, 'sonos') != 'sonos')):
+            raise ApiError(400, 'Choose a Sonos speaker that is shown on the controller for the library.')
+        menu = config.get('music_menu') or {}
+        for name in LIBRARY_KEYS: menu.pop(name, None)
+        if library and source == 'sonos': menu['library'] = room_for(library)
+        elif library: menu['library_entity'] = library
+        if menu or 'music_menu' in config: config['music_menu'] = menu
 
     # controllers -----------------------------------------------------------------
     def state(self):
@@ -580,9 +729,11 @@ class Bridge:
     def overview(self):
         controllers = self.controllers()['controllers']
         best = min((c['status'] for c in controllers), key=STATUS_ORDER.index, default='none')
+        source = self.source()
         return {'controller': best, 'controllers_connected': sum(c['status'] in ('connected', 'dozing')
                                                                   for c in controllers),
-                'controllers': len(controllers), 'home_assistant': self.ha_connected()}
+                'controllers': len(controllers), 'home_assistant': self.ha_connected(),
+                'source': SOURCES[source], 'source_connected': self.source_connected(source, wait=False)}
 
 
 STATUS_ORDER = ['connected', 'dozing', 'searching', 'away', 'radio-off', 'none']
@@ -641,7 +792,71 @@ def parse_uptime(text):
 
 
 def room_key(room):
-    return room.get('entity') or 'sim:' + room.get('name', '')
+    """The web interface's key for a config room: its entity, sonos:<UUID>, or sim:<name>."""
+    if room.get('entity'): return room['entity']
+    if room.get('backend'): return '%s:%s' % (room['backend'], room.get('id', ''))
+    return 'sim:' + room.get('name', '')
+
+
+def room_key_ref(room):
+    """Whether a config room plays through a source (not simulated)."""
+    return bool(room.get('entity') or room.get('backend'))
+
+
+def room_for(key):
+    """The config room for a source speaker's key."""
+    if key.startswith('sonos:'): return {'backend': 'sonos', 'id': key[len('sonos:'):]}
+    return {'entity': key}
+
+
+def row(key, source_name, custom_name, shown, custom_icon, entity=None, simulated=False, missing=False, state=None,
+        playing=None, sub='', platform=None, sonos=False):
+    """One line of the speakers page."""
+    name = custom_name or source_name or key.split(':', 1)[-1]
+    custom_icon = room_icons.picture(custom_icon) or ''   # older configs may name a same-picture room
+    return {'key': key, 'entity': entity, 'name': name, 'custom_name': custom_name or '',
+            'icon': custom_icon or room_icons.guess(name), 'custom_icon': custom_icon,
+            'source_name': source_name, 'ha_name': source_name, 'shown': shown, 'simulated': simulated,
+            'missing': missing, 'state': state, 'playing': playing, 'sub': sub, 'platform': platform, 'sonos': sonos}
+
+
+SONOS_STATES = {'PLAYING': 'playing', 'PAUSED_PLAYBACK': 'paused', 'TRANSITIONING': 'buffering', 'STOPPED': 'idle'}
+
+
+def sonos_row(key, zone, room, shown, custom_icon=None):
+    if not room_key_ref(room) and shown:   # a simulated room alongside Sonos speakers
+        return row(key, None, room.get('name'), True, custom_icon, simulated=True)
+    sub = urllib.parse.urlsplit(zone['base']).hostname if zone else key[len('sonos:'):]
+    if zone and zone['group']: sub += ' · grouped with ' + ', '.join(n for n in zone['group'] if n != zone['name'])
+    return row(key, zone['name'] if zone else None, room.get('name'), shown, custom_icon, missing=zone is None,
+               state=zone['state'] if zone else None, playing=zone['playing'] if zone else None, sub=sub,
+               platform='sonos', sonos=True)
+
+
+def sonos_playing(base):
+    """('playing' | 'paused' | ..., 'title – artist' or None) for a group coordinator."""
+    from sonos_upnp import UPnPFault, parse_didl, soap
+    try:
+        state = soap(base, 'AVTransport', 'GetTransportInfo', [('InstanceID', 0)], STATUS_TIMEOUT)
+        position = soap(base, 'AVTransport', 'GetPositionInfo', [('InstanceID', 0)], STATUS_TIMEOUT)
+    except UPnPFault:
+        return 'unavailable', None
+    track = next(iter(parse_didl(position.get('TrackMetaData'))), {})
+    stream = track.get('stream_content', '')
+    title = stream if stream and not stream.startswith('ZPSTR_') else track.get('title')
+    playing = ' – '.join(x for x in (title, None if stream else track.get('artist')) if x) or None
+    return SONOS_STATES.get(state.get('CurrentTransportState'), 'idle'), playing
+
+
+def check_hosts(value):
+    """Sonos speaker addresses from the page: a list or one comma/space separated string."""
+    hosts = value if isinstance(value, list) else re.split(r'[\s,]+', value or '')
+    hosts = [h.strip() for h in hosts if isinstance(h, str) and h.strip()]
+    if len(hosts) > MAX_HOSTS: raise ApiError(400, 'List at most %d speaker addresses.' % MAX_HOSTS)
+    for host in hosts:
+        if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}(:\d{1,5})?', host):
+            raise ApiError(400, '%s is not a speaker address. Use an address like 192.168.1.30.' % host)
+    return hosts
 
 
 def friendly(state):
@@ -736,6 +951,11 @@ def make_handler(bridge, auth, log):
     route('GET', '/api/home-assistant')(lambda h, b, m: bridge.home_assistant())
     route('POST', '/api/home-assistant/test')(lambda h, b, m: bridge.test_home_assistant(b.get('url'), b.get('token')))
     route('PUT', '/api/home-assistant')(lambda h, b, m: bridge.save_home_assistant(b.get('url'), b.get('token')))
+    route('GET', '/api/source')(lambda h, b, m: bridge.source_status())
+    route('PUT', '/api/source')(lambda h, b, m: bridge.switch_source(b.get('source')))
+    route('GET', '/api/sonos')(lambda h, b, m: bridge.sonos())
+    route('POST', '/api/sonos/test')(lambda h, b, m: bridge.test_sonos(b.get('hosts')))
+    route('PUT', '/api/sonos')(lambda h, b, m: bridge.save_sonos(b.get('hosts')))
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = 'CR100Bridge'

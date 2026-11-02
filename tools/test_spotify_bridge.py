@@ -8,6 +8,7 @@ from urllib.parse import quote
 from unittest.mock import patch
 
 import fake_ha
+import ha_backend
 from ha_client import HomeAssistant
 from spotify_service import SpotifyService
 from test_ha_backend import AVT, field, wait_for
@@ -68,7 +69,8 @@ class SpotifyBridge(unittest.TestCase):
         self.service.start()
         self.house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio', 'Spare'],
             ['127.0.0.1'] * 3, self.logs.append, port=0, music_service=self.service,
-            ha=self.ha, entities=['media_player.kitchen', 'media_player.patio', None])
+            backends=[ha_backend.HABackend(self.ha, self.logs.append)],
+            refs=[('ha', 'media_player.kitchen'), ('ha', 'media_player.patio'), None])
         self.house.start('127.0.0.1', ssdp=False)
         self.kitchen, self.patio, self.spare = self.house.players
 

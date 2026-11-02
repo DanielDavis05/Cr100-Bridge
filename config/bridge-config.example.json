@@ -1,4 +1,8 @@
 {
+  "backend": "sonos",
+  "sonos": {
+    "hosts": []
+  },
   "home_assistant": {
     "url": "",
     "token_file": "ha-token"

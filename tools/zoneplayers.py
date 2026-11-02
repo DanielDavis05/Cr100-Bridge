@@ -17,11 +17,11 @@ Netstart is not used here: the radio side (`netstart_pair.py`) already paired th
 CR100 with the bridge household. Players report the '7.1' profile, a copy of the
 physical ZP80 this CR100 (4.3.2) runs against.
 
-Rooms can be backed by Home Assistant media_player entities (`ha_backend.py`):
-transport, volume, mute, grouping and now-playing with album art then follow the
-real speakers. Rooms without an entity stay simulated. The Music menu (favourites,
-library, Sonos playlists, radio, each room's queue) comes from Home Assistant's media
-browser (`ha_content.py`).
+Rooms can be backed by real players through a backend (`backends.py`; Home Assistant
+media_player entities in `ha_backend.py`): transport, volume, mute, grouping and
+now-playing with album art then follow the real speakers. Rooms without one stay
+simulated. The Music menu (favourites, library, Sonos playlists, radio, each room's
+queue) comes from the backend's content (`ha_content.py` for Home Assistant).
 
 Usage: sudo python3 zoneplayers.py --state bridge-state.json --rooms "Living Room" Kitchen
        sudo python3 zoneplayers.py --state bridge-state.json --config bridge-config.json
@@ -42,9 +42,10 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import backends
 import room_icons
-from ha_backend import PLAY_MODES, ArtStore, BackendError, HARoom
-from ha_content import Content, ContentError
+from backends import PLAY_MODES, BackendError
+from content import ContentError
 
 _HERE = Path(__file__).resolve().parent
 # The player implementation and protocol fixtures ship with this distribution.
@@ -52,8 +53,7 @@ DEFAULT_PEER_DIR = _HERE / 'zp80'
 SSDP_PORT = 1900
 ALIVE_INTERVAL = 600   # the CR100 finds players by M-SEARCH; each alive round is a burst to it
 DUPLICATE_WINDOW = 0.5   # the CR100 sends each M-SEARCH to multicast and broadcast
-HA_STARTUP_WAIT = 15   # s to wait for Home Assistant before naming rooms
-PUBLISH_DELAY = 0.2      # s; Home Assistant often reports one change as several state updates
+PUBLISH_DELAY = 0.2      # s; backends (Home Assistant) often report one change as several updates
 MAX_SLOTS = 38           # player addresses .11-.48, below the DHCP range (.50-.99)
 
 
@@ -79,7 +79,7 @@ def build_classes(zp):
         def __init__(self, config, household, backend=None):
             super().__init__(config)
             self.household = household
-            self.backend = backend   # an ha_backend.HARoom, or None for a simulated room
+            self.backend = backend   # a backends.Room, or None for a simulated room
 
         def topology(self):
             return self.household.topology()
@@ -147,29 +147,30 @@ def build_classes(zp):
                 if backend is None:
                     raise zp.UPnPError(501, 'Action Failed: this room has no Sonos playback backend')
                 try:
-                    provider_uri, media_type = resolver(uri, metadata)
+                    provider_uri, kind = resolver(uri, metadata)
                     if action == 'AddURIToQueue':
-                        return backend.enqueue_uri(provider_uri, media_type,
-                                                   args.get('EnqueueAsNext') in ('1', 'true'))
-                    backend.play_uri(provider_uri, media_type, 'replace')
-                    backend.queue_edited()
+                        return backend.enqueue_provider(provider_uri, kind,
+                                                        args.get('EnqueueAsNext') in ('1', 'true'))
+                    backend.play_provider(provider_uri, kind)
                     return {}
                 except (ValueError, BackendError) as error:
                     raise zp.UPnPError(501, 'Action Failed: %s' % error) from error
             return None
 
         def browse(self, args):
-            """ContentDirectory Browse from Home Assistant; a simulated room shows the
+            """ContentDirectory Browse from the backend's content; a simulated room shows the
             household's content but has no queue of its own. The Music menu comes from the
             configured library speaker when there is one (a non-Sonos room has no Sonos
             library of its own); each room's queue always comes from its own speaker."""
-            content, object_id = self.household.content, args['ObjectID']
-            own = self.backend.entity_id if self.backend else None
-            if object_id.startswith('Q:'): entity = own
-            else: entity = self.household.library_entity or own or self.household.default_entity
-            if not content or not entity: return None
+            object_id = args['ObjectID']
+            own = self.backend.ref if self.backend else None
+            if object_id.startswith('Q:'): ref = own
+            else: ref = self.household.library or own or self.household.default_ref
+            backend = self.household.backends.get(ref[0]) if ref else None
+            content = backend.content if backend else None
+            if not content: return None
             try:
-                result, returned, total = content.browse(entity, self.config.udn, object_id, args['BrowseFlag'],
+                result, returned, total = content.browse(ref[1], self.config.udn, object_id, args['BrowseFlag'],
                                                          int(args['StartingIndex'] or 0), int(args['RequestedCount'] or 0))
             except ContentError as error:
                 raise zp.UPnPError(error.code, str(error))
@@ -220,9 +221,10 @@ def build_classes(zp):
     class ArtHandler(zp.PeerHandler):
         def do_GET(self):
             path = urlsplit(self.path).path
-            art = self.peer.household.art
-            if not (path.startswith('/art/') and path.endswith('.jpg') and art): return super().do_GET()
-            image = art.get(path[len('/art/'):-len('.jpg')])
+            stores = [backend.art for backend in self.peer.household.backends.values() if backend.art]
+            if not (path.startswith('/art/') and path.endswith('.jpg') and stores): return super().do_GET()
+            key = path[len('/art/'):-len('.jpg')]
+            image = next((image for image in (store.get(key) for store in stores) if image), None)
             if image: self.reply(200, image, 'image/jpeg', headers={'Cache-Control': 'max-age=86400'})
             else: self.reply(404, b'Not found', 'text/plain')
 
@@ -253,14 +255,16 @@ def build_classes(zp):
 
 class Household:
     def __init__(self, zp, household, rooms, addresses, log=print, port=1400, ssdp_port=SSDP_PORT,
-                 entities=None, ha=None, music_service=None, boot_sequence=1, slots=None, library_entity=None,
+                 backends=None, refs=None, music_service=None, boot_sequence=1, slots=None, library=None,
                  icons=None):
-        """rooms: names; entities: a Home Assistant media_player per room, or None for a simulated room;
-        music_service: a smapi_stub.SmapiStub to advertise, or None; slots: each room's fixed
-        player number (its UUID), default its position; library_entity: the speaker the Music
-        menu browses, default each room's own; icons: each room's room_icons name, default
-        guessed from its name."""
-        self.zp, self.log, self.ssdp_port, self.ha = zp, log, ssdp_port, ha
+        """rooms: names; backends: the connected backends.Backend objects; refs: each room's
+        (backend name, room id), or None for a simulated room; music_service: a
+        smapi_stub.SmapiStub to advertise, or None; slots: each room's fixed player number
+        (its UUID), default its position; library: the (backend name, room id) whose Music
+        menu every room browses, default each room's own; icons: each room's room_icons name,
+        default guessed from its name."""
+        self.zp, self.log, self.ssdp_port = zp, log, ssdp_port
+        self.backends = {backend.name: backend for backend in backends or ()}
         self.music_service = music_service
         self.music_service_accounts = None
         if music_service:
@@ -269,37 +273,36 @@ class Household:
             self.music_service_accounts = encode_media_servers(music_service.media_servers(), household)
         self.lock = threading.RLock()
         self.coordinator = {}   # player UDN -> its group coordinator's UDN
-        entities = entities or [None] * len(rooms)
-        if any(entities) and ha is None: raise ValueError('Rooms with entities need Home Assistant')
-        self.art = ArtStore(ha, log) if ha else None
-        self.content = Content(ha, self.art, log) if ha else None
-        self.default_entity = next((e for e in entities if e), None)   # browses for simulated rooms
-        self.library_entity = library_entity
+        refs = refs or [None] * len(rooms)
+        for ref in refs:
+            if ref and ref[0] not in self.backends: raise ValueError('Rooms of backend %r need it connected' % ref[0])
+        self.default_ref = next((ref for ref in refs if ref), None)   # browses for simulated rooms
+        self.library = library
         slots = list(range(len(rooms))) if slots is None else slots
         icons = icons or [None] * len(rooms)
         _, VirtualPlayer = build_classes(zp)
         self.players = []
-        if not len(rooms) == len(addresses) == len(entities) == len(slots): raise ValueError('Need one address per room')
+        if not len(rooms) == len(addresses) == len(refs) == len(slots): raise ValueError('Need one address per room')
         if len(set(slots)) != len(slots): raise ValueError('Room slots must be unique')
-        for room, ip, entity, slot, icon in zip(rooms, addresses, entities, slots, icons):
+        for room, ip, ref, slot, icon in zip(rooms, addresses, refs, slots, icons):
             config = zp.Config(bind=ip, advertise_ip=ip, port=port, household=household,
                                mac=player_mac(slot), room=room, boot_sequence=boot_sequence)
-            backend = HARoom(ha, entity, self.art, log, self.content) if entity else None
+            backend = self.backends[ref[0]].room(ref[1]) if ref else None
             player = VirtualPlayer(config, self, backend)
             player.icon = room_icons.effective(room, icon)
             self.players.append(player)
             self.coordinator[config.udn] = config.udn
         self.by_udn = {p.config.udn: p for p in self.players}
-        self.by_entity = {p.state.backend.entity_id: p for p in self.players if p.state.backend}
+        self.by_ref = {p.state.backend.ref: p for p in self.players if p.state.backend}
         self.dirty, self.flush_timer = set(), None
-        if ha:
-            ha.listeners.append(self.on_ha_state)
-            self.sync_groups()
+        for name, backend in self.backends.items():
+            backend.listeners.append(lambda key, name=name: self.on_change((name, key)))
+        if self.backends: self.sync_groups()
 
-    # --- Home Assistant ---------------------------------------------------------
-    def on_ha_state(self, entity_id, state):
-        """Runs on the client thread: collect changes, publish them together shortly after."""
-        player = self.by_entity.get(entity_id)
+    # --- backends -----------------------------------------------------------------
+    def on_change(self, ref):
+        """Runs on the backend's thread: collect changes, publish them together shortly after."""
+        player = self.by_ref.get(ref)
         if player is None: return
         with self.lock:
             self.dirty.add(player.config.udn)
@@ -320,13 +323,14 @@ class Household:
         for udn in dirty | coordinators: self.by_udn[udn].publish('GroupRenderingControl')
 
     def sync_groups(self):
-        """Take Home Assistant's groups for HA rooms. A group's coordinator is its first
-        member that is also a room here (Home Assistant lists the coordinator first)."""
+        """Take the backends' groups for their rooms. A group's coordinator is its first
+        member that is also a room here (backends list the coordinator first)."""
         changed = False
         with self.lock:
-            for entity, player in self.by_entity.items():
-                members = [m for m in player.state.backend.group_members() if m in self.by_entity] or [entity]
-                coordinator = self.by_entity[members[0]].config.udn
+            for ref, player in self.by_ref.items():
+                members = [(ref[0], m) for m in player.state.backend.group_members()
+                           if (ref[0], m) in self.by_ref] or [ref]
+                coordinator = self.by_ref[members[0]].config.udn
                 if self.coordinator[player.config.udn] != coordinator:
                     self.coordinator[player.config.udn] = coordinator; changed = True
         if changed: self.log({'event': 'groups', 'coordinators': {self.by_udn[u].config.room: self.by_udn[c].config.room
@@ -378,9 +382,10 @@ class Household:
         if player and player.state.backend:
             if not (other and other.state.backend) or target == udn: return False
             coordinator = self.by_udn[self.coordinator[target]].state.backend
-            # Home Assistant reports the new group; flush() then publishes the topology.
-            coordinator.ha_call('join', {'group_members': [player.state.backend.entity_id]})
-            self.log({'event': 'join', 'player': udn, 'coordinator': coordinator.entity_id})
+            if coordinator.backend is not player.state.backend.backend: return False   # no groups across backends
+            # The backend reports the new group; flush() then publishes the topology.
+            coordinator.join(player.state.backend)
+            self.log({'event': 'join', 'player': udn, 'coordinator': coordinator.key})
             return False
         if other and other.state.backend: return False
         with self.lock:
@@ -396,7 +401,7 @@ class Household:
     def leave(self, udn):
         player = self.by_udn.get(udn)
         if player and player.state.backend:
-            if self.coordinator.get(udn) != udn: player.state.backend.ha_call('unjoin')
+            if self.coordinator.get(udn) != udn: player.state.backend.unjoin()
             return False
         with self.lock:
             if self.coordinator.get(udn) == udn: return False
@@ -462,13 +467,16 @@ class Household:
 
 
 def load_rooms(config_path, log):
-    """Rooms from the config file. Returns (names, entities, slots, Home Assistant client or None).
+    """Rooms from the config file. Returns (names, refs, slots, {backend name: Backend}).
 
     {"home_assistant": {"url": "http://192.168.1.148:8123", "token_file": "/home/kali/ha-token"},
      "rooms": [{"entity": "media_player.kitchen", "slot": 0}, {"name": "Den", "entity": "media_player.den", "icon": "den"},
                {"name": "Spare"}],
      "music_menu": {"library_entity": "media_player.kitchen"}}
-    A room without "name" takes the entity's friendly name; one without "entity" is simulated.
+    A room names its backend and id there ({"backend": "ha", "id": "media_player.den"}; "entity"
+    is shorthand for Home Assistant, see backends.room_ref) and only the backends rooms use are
+    connected. A room without "name" takes the backend's name for it; one without a backend is
+    simulated.
     "slot" fixes the room's player address and UUID, so hiding or reordering other rooms
     (the web interface does both) never changes which player the CR100 knows it as; a room
     without one takes its position, as before slots existed. "icon" is a room_icons name
@@ -476,28 +484,19 @@ def load_rooms(config_path, log):
     """
     config = json.loads(Path(config_path).read_text())
     rooms = config['rooms']
-    ha = None
-    if any(room.get('entity') for room in rooms):
-        from ha_client import HomeAssistant
-        settings = config['home_assistant']
-        token_file = Path(settings['token_file']).expanduser()
-        if not token_file.is_absolute(): token_file = Path(config_path).resolve().parent / token_file
-        ha = HomeAssistant(settings['url'], token_file.read_text().strip(), log)
-        ha.start()
-        if not ha.connected.wait(HA_STARTUP_WAIT):
-            log({'event': 'ha-not-connected', 'detail': 'starting anyway; rooms update when it connects'})
+    refs = [backends.room_ref(room) for room in rooms]
+    connected = backends.load(config, Path(config_path).resolve().parent,
+                              sorted({ref[0] for ref in refs if ref}), log)
     names = []
-    for room in rooms:
-        entity = room.get('entity')
-        name = room.get('name') or (ha.state(entity).get('attributes', {}).get('friendly_name') if entity else None) \
-            or (entity.split('.', 1)[-1].replace('_', ' ').title() if entity else None)
-        if not name: raise ValueError('Room needs a name or an entity: %r' % room)
+    for room, ref in zip(rooms, refs):
+        name = room.get('name') or (connected[ref[0]].display_name(ref[1]) if ref else None)
+        if not name: raise ValueError('Room needs a name or a backend: %r' % room)
         names.append(name)
     if len(set(names)) != len(names): raise ValueError('Room names must be unique: %s' % names)
     slots = [int(room.get('slot', index)) for index, room in enumerate(rooms)]
     if len(set(slots)) != len(slots): raise ValueError('Room slots must be unique: %s' % slots)
     if any(not 0 <= slot < MAX_SLOTS for slot in slots): raise ValueError('Room slots run 0-%d' % (MAX_SLOTS - 1))
-    return names, [room.get('entity') for room in rooms], slots, ha
+    return names, refs, slots, connected
 
 
 def configured_icons(config_path):
@@ -506,10 +505,12 @@ def configured_icons(config_path):
     return [room.get('icon') for room in json.loads(Path(config_path).read_text()).get('rooms', [])]
 
 
-def library_entity(config_path):
-    """The speaker the Music menu browses (music_menu.library_entity), or None."""
+def library_ref(config_path):
+    """The (backend name, room id) whose Music menu every room browses, or None: music_menu.library
+    as a room ({"backend": ..., "id": ...}), or music_menu.library_entity for Home Assistant."""
     if config_path is None: return None
-    return (json.loads(Path(config_path).read_text()).get('music_menu') or {}).get('library_entity') or None
+    menu = json.loads(Path(config_path).read_text()).get('music_menu') or {}
+    return backends.room_ref(menu.get('library') or {'entity': menu.get('library_entity')})
 
 
 def load_music_service(config_path, listen_ip, log):
@@ -538,7 +539,7 @@ def load_music_service(config_path, listen_ip, log):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--state', default='bridge-state.json', help='household comes from the pairing')
-    parser.add_argument('--config', type=Path, help='rooms and Home Assistant settings (JSON); overrides --rooms')
+    parser.add_argument('--config', type=Path, help='rooms and backend settings (JSON); overrides --rooms')
     parser.add_argument('--rooms', nargs='+', default=['Living Room'], help='one simulated ZonePlayer per room')
     parser.add_argument('--iface', default='sonos0')
     parser.add_argument('--listen-ip', default='192.168.69.1', help="the TAP's own address (SSDP membership)")
@@ -557,10 +558,10 @@ def main():
     household = json.loads(Path(args.state).read_text())['household']
     log = lambda record: print(json.dumps({'time': round(time.time(), 3), **record}), flush=True)
     if args.config:
-        try: rooms, entities, slots, ha = load_rooms(args.config, log)
+        try: rooms, refs, slots, connected = load_rooms(args.config, log)
         except (ValueError, KeyError, OSError) as error: parser.error(str(error))
     else:
-        rooms, entities, ha = args.rooms, None, None
+        rooms, refs, connected = args.rooms, None, {}
         slots = list(range(len(rooms)))
         if len(set(rooms)) != len(rooms): parser.error('Room names must be unique')
     first = ipaddress.IPv4Address(args.base_ip)
@@ -577,14 +578,14 @@ def main():
 
     stub = load_music_service(args.config, args.listen_ip, log)
     if stub: stub.start()
-    house = Household(zp, household, rooms, addresses, log, entities=entities, ha=ha, music_service=stub,
-                      boot_sequence=args.boot_sequence, slots=slots, library_entity=library_entity(args.config),
-                      icons=configured_icons(args.config))
+    house = Household(zp, household, rooms, addresses, log, backends=connected.values(), refs=refs,
+                      music_service=stub, boot_sequence=args.boot_sequence, slots=slots,
+                      library=library_ref(args.config), icons=configured_icons(args.config))
     house.start(args.listen_ip, iface=args.iface)
     for player in house.players:
         log({'event': 'player', 'room': player.config.room, 'uuid': player.config.udn, 'icon': player.icon,
              'location': player.state.location,
-             'entity': player.state.backend.entity_id if player.state.backend else None})
+             'backend': player.state.backend.ref if player.state.backend else None})
     # SIGHUP (the web interface after saving the config) restarts this process in place: same
     # PID for bridge_run.sh, rooms and music service re-read, the radio link untouched.
     reload = threading.Event()
@@ -596,7 +597,7 @@ def main():
     finally:
         house.close()
         if stub: stub.close()
-        if ha: ha.close()
+        for backend in connected.values(): backend.close()
     if reload.is_set():
         log({'event': 'reload'})
         argv = list(sys.argv)   # drop any --boot-sequence: the restarted players are a new generation

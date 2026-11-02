@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backends
 import fake_ha
 import ha_backend
 import zoneplayers
@@ -88,8 +89,8 @@ class HABackend(unittest.TestCase):
         self.ha.start()
         self.assertTrue(self.ha.connected.wait(5), self.logs)
         self.house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio', 'Spare'], ['127.0.0.1'] * 3,
-                                           self.logs.append, port=0, ha=self.ha,
-                                           entities=['media_player.kitchen', 'media_player.patio', None])
+                                           self.logs.append, port=0, backends=[ha_backend.HABackend(self.ha, self.logs.append)],
+                                           refs=[('ha', 'media_player.kitchen'), ('ha', 'media_player.patio'), None])
         self.house.start('127.0.0.1', ssdp=False)
         self.kitchen, self.patio, self.spare = self.house.players
         self.events = Events()
@@ -176,7 +177,7 @@ class HABackend(unittest.TestCase):
              '<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>1</DesiredMute>')
         self.assertTrue(wait_for(lambda: self.fake.states['media_player.kitchen']['attributes']['is_volume_muted']))
         # A change made elsewhere shows up once the CR100's own change has settled.
-        time.sleep(ha_backend.VOLUME_HOLD + 0.1)
+        time.sleep(backends.VOLUME_HOLD + 0.1)
         self.fake.set('media_player.kitchen', volume_level=0.55)
         self.assertTrue(wait_for(lambda: self.kitchen.state.backend.volume == 55))
 

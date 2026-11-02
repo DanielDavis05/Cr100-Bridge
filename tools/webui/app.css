@@ -337,6 +337,25 @@ main { min-width: 0; outline: none; }
 }
 .inline-button:disabled { opacity: 0.5; cursor: default; }
 
+.choice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  margin: 0 0 10px;
+  border: 1px solid #d5dce6;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+}
+.choice:last-child { margin-bottom: 0; }
+.choice:has(input:checked) { border-color: #2f73cb; background: #f3f8fe; box-shadow: 0 0 0 2px rgba(47, 115, 203, 0.22); }
+.choice input { flex: none; width: 18px; height: 18px; margin: 3px 0 0; accent-color: #2f73cb; }
+.choice input:focus-visible { outline: 3px solid rgba(47, 115, 203, 0.45); outline-offset: 2px; }
+.choice .what { min-width: 0; }
+.choice .main { display: block; font-weight: 700; }
+.choice .sub { display: block; font-size: 14px; color: var(--muted); }
+
 .state-line { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; margin-bottom: 12px; }
 .dot { width: 13px; height: 13px; border-radius: 50%; flex: none; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.12); }
 .dot.good { background: #6fbf2a; }

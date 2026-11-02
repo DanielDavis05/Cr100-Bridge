@@ -11,8 +11,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import content
 import fake_ha
-import ha_content
+import ha_backend
 import zoneplayers
 from fake_ha import media
 from ha_client import HomeAssistant
@@ -70,8 +71,8 @@ class Content(unittest.TestCase):
         self.ha.start()
         self.assertTrue(self.ha.connected.wait(5), self.logs)
         self.house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio', 'Spare'], ['127.0.0.1'] * 3,
-                                           self.logs.append, port=0, ha=self.ha,
-                                           entities=['media_player.kitchen', 'media_player.patio', None])
+                                           self.logs.append, port=0, backends=[ha_backend.HABackend(self.ha, self.logs.append)],
+                                           refs=[('ha', 'media_player.kitchen'), ('ha', 'media_player.patio'), None])
         self.house.start('127.0.0.1', ssdp=False)
         self.kitchen, self.patio, self.spare = self.house.players
         self.events = Events()
@@ -99,7 +100,7 @@ class Content(unittest.TestCase):
 
     def test_long_lists_are_paged_from_one_home_assistant_answer(self):
         returned, total, entries = browse(self.kitchen, 'R:0/0')
-        self.assertEqual((returned, total, title(entries[0])), (ha_content.PAGE_LIMIT, 250, 'Station 0'))
+        self.assertEqual((returned, total, title(entries[0])), (content.PAGE_LIMIT, 250, 'Station 0'))
         returned, total, entries = browse(self.kitchen, 'R:0/0', start=200)
         self.assertEqual((returned, total, title(entries[0]), title(entries[-1])), (50, 250, 'Station 200', 'Station 249'))
         self.assertEqual(self.fake.browses.count(('media-source://radio_browser', 'music')), 1)
@@ -175,7 +176,7 @@ class Content(unittest.TestCase):
         uri = self.fake.queues['media_player.kitchen'][0]['media_content_id']
         registry = HA()
         opener = Opener(response([(1, uri, '/getaa?u=track-one&v=1')]))
-        self.house.content.queue_art = SonosQueueArt(registry, self.logs.append, opener)
+        self.house.backends['ha'].content.queue_art = SonosQueueArt(registry, self.logs.append, opener)
         returned, total, (entry,) = browse(self.kitchen, 'Q:0/1', 'BrowseMetadata')
         self.assertEqual((returned, total, entry.get('id'), res(entry)), (1, 1, 'Q:0/1', uri))
         path = entry.findtext('upnp:albumArtURI', namespaces=DIDL)
@@ -195,7 +196,7 @@ class Content(unittest.TestCase):
                 self.assertFalse(image.info.get('progressive') or image.info.get('progression'))
 
     def test_queue_art_looks_up_only_visible_rows_and_not_the_queue_header(self):
-        helper = self.house.content.queue_art = Mock()
+        helper = self.house.backends['ha'].content.queue_art = Mock()
         helper.lookup.return_value = {0: 'http://192.168.1.164:1400/getaa?u=first&v=1'}
         browse(self.kitchen, 'Q:0', 'BrowseMetadata')
         helper.lookup.assert_not_called()
@@ -207,17 +208,17 @@ class Content(unittest.TestCase):
         self.assertIsNone(entries[1].findtext('upnp:albumArtURI', namespaces=DIDL))
 
     def test_queue_keeps_home_assistant_provided_per_item_art(self):
-        helper = self.house.content.queue_art = Mock()
+        helper = self.house.backends['ha'].content.queue_art = Mock()
         source = '/api/media_player_proxy/media_player.kitchen?token=queue-item&cache=1'
         self.fake.queues['media_player.kitchen'][0]['thumbnail'] = source
         _, _, (entry,) = browse(self.kitchen, 'Q:0/1', 'BrowseMetadata')
         path = entry.findtext('upnp:albumArtURI', namespaces=DIDL)
         self.assertTrue(path.startswith('/art/'))
-        self.assertEqual(self.house.art.sources[path[len('/art/'):-len('.jpg')]], source)
+        self.assertEqual(self.house.backends['ha'].art.sources[path[len('/art/'):-len('.jpg')]], source)
         helper.lookup.assert_not_called()
 
     def test_current_track_fallback_requires_matching_uri_and_does_not_leak_to_other_rows(self):
-        helper = self.house.content.queue_art = Mock()
+        helper = self.house.backends['ha'].content.queue_art = Mock()
         helper.lookup.return_value = {}
         tracks = self.fake.queues['media_player.kitchen']
         self.fake.set('media_player.kitchen', media_content_id=tracks[2]['media_content_id'])

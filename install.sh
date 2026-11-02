@@ -120,7 +120,7 @@ chmod -R go-w "$RELEASE"
 python3 -m venv "$RELEASE/.venv"
 "$RELEASE/.venv/bin/python" -m pip install --disable-pip-version-check -r "$RELEASE/requirements.txt"
 (cd "$RELEASE/tools" && "$RELEASE/.venv/bin/python" -c \
- 'import ccmp, ha_client, spotify_service, netstart_pair, scapy.all, zoneplayers; zoneplayers.load_peer_module(zoneplayers.DEFAULT_PEER_DIR)')
+ 'import ccmp, ha_client, sonos_backend, spotify_service, netstart_pair, scapy.all, zoneplayers; zoneplayers.load_peer_module(zoneplayers.DEFAULT_PEER_DIR)')
 
 # Existing configuration, tokens, passwords and pairing state are never overwritten.
 if [[ ! -e /var/lib/cr100-bridge/bridge-config.json ]]; then
@@ -171,5 +171,5 @@ PY
   fi
 fi
 ip -o -4 addr show scope global | awk '$2 != "wlan0" && $2 != "mon0" && $2 != "sonos0" {split($4,a,"/"); print "Web UI: http://" a[1] ":8080"}'
-echo 'Set your web password, connect Home Assistant, select speakers, then pair from Controllers.'
+echo 'Set your web password, choose the speaker source, select speakers, then pair from Controllers.'
 echo 'CLI pairing: sudo cr100-bridge pair'
