@@ -52,26 +52,72 @@ class Services(unittest.TestCase):
         with patch.object(service.subprocess, 'check_output', side_effect=lambda command, **kw: outputs[command[0]]):
             self.assertTrue(service.nexmon_loaded())
 
-    def test_child_failure_cleans_up_group_and_player_pid(self):
-        started = []
+    def run_bridge(self, script, seconds):
+        """supervise() on a fake clock for `seconds`. script(name, n, now) gives the exit
+        status, or None while running, for the n-th start (0-based) of 'link', 'dhcp' or
+        'players' at fake time now. Returns the started processes by name."""
+        clock = {'now': 0.0}
+        started = {'link': [], 'dhcp': [], 'players': []}
+        class Stop:
+            def is_set(self): return clock['now'] >= seconds
+            def wait(self, delay):
+                clock['now'] += delay
+                return self.is_set()
         def spawn(args, **kwargs):
-            process = Process(args, 7 if 'zoneplayers.py' in ' '.join(args) else None)
-            started.append(process)
+            joined = ' '.join(args)
+            name = 'link' if 'sonosnet_link' in joined else 'dhcp' if args[0] == 'dnsmasq' else 'players'
+            process = Process(args)
+            process.pid = 1000 + sum(len(v) for v in started.values())
+            process.name, process.number, process.born = name, len(started[name]), clock['now']
+            process.poll = lambda p=process: p.returncode if p.terminated else script(p.name, p.number, clock['now'] - p.born)
+            started[name].append(process)
             return process
         with patch.object(service, 'check_routes'), patch.object(service, 'prepare_radio'), \
                 patch.object(service.subprocess, 'Popen', side_effect=spawn), \
                 patch.object(service.subprocess, 'run', return_value=Mock(stdout='inet 192.168.69.1/24')), \
-                patch.object(service.threading, 'Event', return_value=Mock(is_set=lambda: False, wait=lambda _: False)):
-            with self.assertRaisesRegex(RuntimeError, 'Essential bridge process exited'):
-                service.supervise(self.state, self.folder / 'config.json', self.run)
-        self.assertEqual(len(started), 3)
-        self.assertTrue(all(p.terminated for p in started[:2]))
+                patch.object(service.time, 'monotonic', side_effect=lambda: clock['now']), \
+                patch.object(service, 'log', side_effect=lambda **record: self.logs.append(record)):
+            self.logs, self.pids = [], []
+            original = Path.write_text
+            def record_pid(path, text, *args, **kwargs):
+                if path.name == 'players.pid': self.pids.append(int(text))
+                return original(path, text, *args, **kwargs)
+            with patch.object(Path, 'write_text', record_pid):
+                service.supervise(self.state, self.folder / 'config.json', self.run, stop=Stop())
+        return started
+
+    def test_players_crash_restarts_them_alone_with_backoff(self):
+        # A bad config: the players exit at once, every time.
+        started = self.run_bridge(lambda name, n, age: 2 if name == 'players' else None, 20)
+        self.assertEqual((len(started['link']), len(started['dhcp'])), (1, 1))   # the CR100's link stays up
+        delays = [r['restart_in'] for r in self.logs if r['event'] == 'helper-exited']
+        self.assertEqual(delays, [1.0, 2.0, 4.0, 8.0, 16.0])
+        self.assertEqual(len(started['players']), 5)          # at 0, ~1, ~3, ~7, ~15 s; the next waits 16 s
+        self.assertEqual(self.pids, [p.pid for p in started['players']])   # each live player's PID
         self.assertFalse((self.run / 'players.pid').exists())
-        dhcp = started[1].args
+
+    def test_a_helper_that_ran_a_while_starts_its_backoff_again(self):
+        # DHCP dies at once twice, then runs 90 s and dies again: the wait is back to 1 s.
+        lives = {0: 0, 1: 0, 2: 90}
+        started = self.run_bridge(lambda name, n, age: 1 if name == 'dhcp' and age >= lives.get(n, 1e9) else None, 100)
+        delays = [r['restart_in'] for r in self.logs if r['event'] == 'helper-exited' and r['helper'] == 'dhcp']
+        self.assertEqual(delays, [1.0, 2.0, 1.0])
+        self.assertEqual(len(started['dhcp']), 4)
+        self.assertEqual(len(started['players']), 1)
+
+    def test_radio_link_exit_stops_the_group(self):
+        with self.assertRaisesRegex(RuntimeError, 'Radio link exited'):
+            self.run_bridge(lambda name, n, age: 3 if name == 'link' and age >= 5 else None, 60)
+        self.assertFalse((self.run / 'players.pid').exists())
+
+    def test_child_processes_have_the_expected_arguments(self):
+        started = self.run_bridge(lambda name, n, age: None, 1)
+        dhcp = started['dhcp'][0].args
         self.assertIn('--interface=sonos0', dhcp)
         self.assertIn('--dhcp-option=3', dhcp)
         self.assertIn('--dhcp-option=6', dhcp)
-        self.assertNotIn('--seconds', started[0].args)
+        self.assertNotIn('--seconds', started['link'][0].args)
+        self.assertTrue(all(p.terminated for group in started.values() for p in group))   # stopped on the way out
 
     def test_tap_timeout_stops_radio_before_starting_dhcp(self):
         link = Process(['link'])

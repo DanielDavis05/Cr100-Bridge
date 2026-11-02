@@ -88,8 +88,20 @@ def children():
                 process.wait()
 
 
+RESTART_FIRST = 1.0      # s before a crashed helper (DHCP, players) is started again; doubles
+RESTART_MAX = 30.0       # s, the longest wait between restarts
+STABLE_AFTER = 60.0      # s a helper must run before its next crash counts as the first again
+
+
+def log(**record):
+    print(json.dumps({'time': round(time.time(), 3), **record}), flush=True)
+
+
 def supervise(state_path, config_path, run_dir, stop=None):
-    """Fail as a unit if any essential child dies; systemd restarts the group."""
+    """Run the radio link and, on its TAP, DHCP and the virtual players. Only the link is
+    fatal (systemd restarts the group): restarting it resets the beacon clock and drops the
+    CR100. DHCP or the players exiting (a bad config, a crash) restarts just that helper,
+    after RESTART_FIRST s doubling to RESTART_MAX, while the CR100 stays associated."""
     stop = stop or threading.Event()
     state = validate_state(state_path)
     check_routes()
@@ -98,6 +110,7 @@ def supervise(state_path, config_path, run_dir, stop=None):
     # Old wall-clock samples must not make a new, failed start look healthy.
     for name in ('link.jsonl', 'link.jsonl.1', 'players.pid'):
         (run_dir / name).unlink(missing_ok=True)
+    pid_path = run_dir / 'players.pid'
     with children() as processes:
         def launch(command):
             process = subprocess.Popen(command, cwd=HERE)
@@ -115,20 +128,41 @@ def supervise(state_path, config_path, run_dir, stop=None):
             if time.monotonic() >= deadline: raise RuntimeError('Timed out waiting for sonos0')
             stop.wait(0.1)
         if stop.is_set(): return
-        launch(['dnsmasq', '--keep-in-foreground', '--conf-file=/dev/null', '--interface=sonos0',
-                '--bind-interfaces', '--port=0', '--dhcp-range=192.168.69.50,192.168.69.99,255.255.255.0,1h',
-                '--dhcp-authoritative', '--no-ping', '--dhcp-option=3', '--dhcp-option=6',
-                '--dhcp-leasefile=' + str(run_dir / 'leases'), '--log-dhcp', '--log-facility=-', '--pid-file='])
-        players = launch([sys.executable, '-u', str(HERE / 'zoneplayers.py'), '--state', str(state_path),
-                          '--config', str(config_path), '--iface', 'sonos0', '--listen-ip', '192.168.69.1',
-                          '--base-ip', '192.168.69.11'])
-        pid_path = run_dir / 'players.pid'
-        pid_path.write_text(str(players.pid) + '\n')
+        helpers = {   # name -> command; each restarts on its own
+            'dhcp': ['dnsmasq', '--keep-in-foreground', '--conf-file=/dev/null', '--interface=sonos0',
+                     '--bind-interfaces', '--port=0', '--dhcp-range=192.168.69.50,192.168.69.99,255.255.255.0,1h',
+                     '--dhcp-authoritative', '--no-ping', '--dhcp-option=3', '--dhcp-option=6',
+                     '--dhcp-leasefile=' + str(run_dir / 'leases'), '--log-dhcp', '--log-facility=-', '--pid-file='],
+            'players': [sys.executable, '-u', str(HERE / 'zoneplayers.py'), '--state', str(state_path),
+                        '--config', str(config_path), '--iface', 'sonos0', '--listen-ip', '192.168.69.1',
+                        '--base-ip', '192.168.69.11'],
+        }
+        running = {}   # name -> {'process', 'started', 'failures', 'due' (restart time while down)}
+
+        def start(name, failures=0):
+            process = launch(helpers[name])
+            running[name] = {'process': process, 'started': time.monotonic(), 'failures': failures, 'due': None}
+            # The web interface signals the players to reload; it must reach the live process.
+            if name == 'players': pid_path.write_text(str(process.pid) + '\n')
+
+        for name in helpers: start(name)
         try:
             while not stop.wait(0.25):
-                for process in processes:
-                    if process.poll() is not None:
-                        raise RuntimeError(f'Essential bridge process exited: {process.args[0:3]} (status {process.returncode})')
+                if link.poll() is not None:
+                    raise RuntimeError(f'Radio link exited (status {link.returncode})')
+                now = time.monotonic()
+                for name, helper in running.items():
+                    process = helper['process']
+                    if helper['due'] is None and process.poll() is not None:
+                        failures = 1 if now - helper['started'] >= STABLE_AFTER else helper['failures'] + 1
+                        delay = min(RESTART_MAX, RESTART_FIRST * 2 ** (failures - 1))
+                        helper.update(failures=failures, due=now + delay)
+                        if name == 'players': pid_path.unlink(missing_ok=True)
+                        log(event='helper-exited', helper=name, status=process.returncode, restart_in=delay)
+                    elif helper['due'] is not None and now >= helper['due']:
+                        processes.remove(process)
+                        start(name, helper['failures'])
+                        log(event='helper-restarted', helper=name, attempt=helper['failures'])
         finally:
             pid_path.unlink(missing_ok=True)
 
