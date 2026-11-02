@@ -44,6 +44,14 @@ class Services(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Reboot'): service.prepare_radio()
             command.assert_not_called()
 
+    def test_nexmon_is_recognised_from_the_kernel_log(self):
+        # Kali's brcmfmac-nexmon 6.12.2 (Pi 4, 2026-11): ethtool shows only the version.
+        outputs = {'ethtool': 'driver: brcmfmac\nversion: 7.45.206\nfirmware-version: 01-88ee44ea',
+                   'journalctl': 'brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4345/6 wl0: Jan 12 2025 20:03:13 '
+                                 'version 7.45.206 (nexmon.org: 2.2.2-552-gb8c6-2) FWID 01-88ee44ea'}
+        with patch.object(service.subprocess, 'check_output', side_effect=lambda command, **kw: outputs[command[0]]):
+            self.assertTrue(service.nexmon_loaded())
+
     def test_child_failure_cleans_up_group_and_player_pid(self):
         started = []
         def spawn(args, **kwargs):

@@ -45,11 +45,21 @@ def check_routes():
             raise RuntimeError('The upstream network overlaps 192.168.69.0/24; use a different upstream subnet.')
 
 
+def nexmon_loaded():
+    """Whether wlan0 runs Nexmon firmware. Kali's brcmfmac-nexmon reports only the version
+    (7.45.206) to ethtool; the banner with nexmon.org reaches the kernel log at load."""
+    for command in (['ethtool', '-i', 'wlan0'], ['journalctl', '-k', '-b', '-q', '--no-pager', '--grep', 'Firmware: BCM'],
+                    ['dmesg']):
+        try: text = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError): continue
+        if 'nexmon' in text.lower(): return True
+    return False
+
+
 def prepare_radio(channel=6):
     """Use the driver's current PHY; never unload a driver during normal startup."""
     from sonosnet_link import open_radio
-    info = subprocess.check_output(['ethtool', '-i', 'wlan0'], text=True)
-    if 'nexmon' not in info.lower():
+    if not nexmon_loaded():
         raise RuntimeError('Nexmon firmware is not loaded. Reboot after installing the Kali Nexmon packages.')
     subprocess.run(['rfkill', 'unblock', 'wifi'], check=True)
     subprocess.run(['modprobe', 'tun'], check=True)
