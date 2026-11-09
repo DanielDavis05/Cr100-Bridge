@@ -289,18 +289,18 @@ Pairing state remains in its separate file. State updates use locking and atomic
 replacement so the web UI and player process share one selection. Failed or
 corrupt state cannot permanently raise controller compatibility requirements.
 
-Implementation entry points are [webui.py](../tools/webui.py),
-[online_updates.py](../tools/online_updates.py),
-[update_service.py](../tools/update_service.py),
-[update_transport.py](../tools/update_transport.py), and the managed DNS command
-in [bridge_service.py](../tools/bridge_service.py). The offline tests cover
+Implementation entry points are [webui.py](../../tools/webui.py),
+[online_updates.py](../../tools/online_updates.py),
+[update_service.py](../../tools/update_service.py),
+[update_transport.py](../../tools/update_transport.py), and the managed DNS command
+in [bridge_service.py](../../tools/bridge_service.py). The offline tests cover
 authenticated HTTP staging, signature/model/version validation, controller
 isolation, lifecycle/expiry, temporary-prompt recovery, update protocol framing,
-and serialized bridge jobs. See [test_webui_updates.py](../tools/test_webui_updates.py),
-[test_online_updates.py](../tools/test_online_updates.py), and the update service
+and serialized bridge jobs. See [test_webui_updates.py](../../tools/test_webui_updates.py),
+[test_online_updates.py](../../tools/test_online_updates.py), and the update service
 and transport tests beside them.
 
-The disposable [update_acceptance_fixture.py](../tools/update_acceptance_fixture.py)
+The disposable [update_acceptance_fixture.py](../../tools/update_acceptance_fixture.py)
 supports production-handler host regressions and a native emulator peer. Run
 `python3 tools/update_acceptance_fixture.py --self-test` for the host matrix.
 Serving requires a dedicated `--state-dir`; it creates simulated rooms plus the

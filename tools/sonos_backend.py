@@ -11,8 +11,8 @@ ContentDirectory (`sonos_content.py`), and album art comes from the players.
 Music services: Sonos must have the account linked. Provider playback adapters
 prepare native queue URIs and metadata; the room executes the prepared plan.
 
-Config: {"sonos": {"hosts": ["10.0.0.130"], "event_port": 0}}, rooms {"backend": "sonos",
-"id": "RINCON_000E5820ACB601400"}. Without hosts the players are found by SSDP.
+Config: {"sonos": {"hosts": ["192.168.1.50"], "event_port": 0}}, rooms {"backend": "sonos",
+"id": "RINCON_000E5800000A01400"}. Without hosts the players are found by SSDP.
 """
 from __future__ import annotations
 

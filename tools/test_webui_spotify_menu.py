@@ -16,7 +16,7 @@ from spotify_client import SpotifyError, write_token_file
 from spotify_folders import FOLDER_CLIENT_ID, FOLDER_REDIRECT_URI
 from spotify_menu import default_items
 
-CR1 = '00:0e:58:02:6f:a9'
+CR1 = '00:0e:58:12:34:56'
 CR2 = '00:0e:58:02:6f:aa'
 PLAYLIST = '0123456789ABCDEFGHIJKL'
 ALBUM = 'ABCDEFGHIJKLMNOPQRSTUV'

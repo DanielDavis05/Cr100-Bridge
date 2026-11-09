@@ -21,7 +21,7 @@ import zoneplayers
 from ha_client import HomeAssistant
 from test_zoneplayers import HOUSEHOLD, zp
 
-CR = '00:0e:58:02:6f:a9'
+CR = '00:0e:58:12:34:56'
 
 
 def write(path, value):

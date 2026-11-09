@@ -13,7 +13,7 @@ through the finite Sonos queue.
 ## What was actually tested
 
 All commands originated on the bridge Pi. The only target was Bedroom. Its
-physical UUID was `RINCON_000E5820ACB601400`; its separate Spotify receiver ID was
+physical UUID was `RINCON_000E5800000A01400`; its separate Spotify receiver ID was
 `901b97f3d7c6940b4b8f2d6a16c9858f3baffa73`.
 
 | Experiment | Observed result |
@@ -158,7 +158,7 @@ ineffective play/transfer requests made before receiver activation.
 
 ## Reproducing the experiment
 
-Local prototype: [native_probe.py](runs/spotify-autoplay-2026-11-03/native_probe.py).
+Local prototype: [native_probe.py](../../../../research/bridge-runs/spotify-autoplay-2026-11-03/native_probe.py).
 The tested remote copy is `/tmp/cr100-native-probe.py`; its disposable environment
 is `/tmp/cr100-native-venv`. They are not installed bridge services. Example
 commands on the Pi, using the fixed Bedroom identity guards in that script:
@@ -364,7 +364,7 @@ and authorization-code values were neither exported nor included in evidence.
 ## Evidence and primary references
 
 Sanitized request results are in
-[runs/spotify-autoplay-2026-11-03](runs/spotify-autoplay-2026-11-03/README.md),
+[runs/spotify-autoplay-2026-11-03](../../../../research/bridge-runs/spotify-autoplay-2026-11-03/README.md),
 especially `native-zeroconf-activation.json`, `native-start-after-activation.json`,
 `native-activated-session-next*.json`, `native-seed-natural-completion.json`, and
 `native-cleanup.json`.

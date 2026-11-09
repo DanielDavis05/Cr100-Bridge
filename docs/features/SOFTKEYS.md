@@ -27,11 +27,11 @@ No other emulator disk, physical controller, Pi, account or speaker was modified
 | Custom search category Enter code | Custom heading; Shift / Cancel / Search controls |
 | Type a, press Search | Actual SMAPI `search(id="sk:input", term="a", ...)` received |
 
-![Custom service with a playable selection](runs/softkeys-2026-11-03/browse-playable-selected.png)
+![Custom service with a playable selection](../../../../research/bridge-runs/softkeys-2026-11-03/browse-playable-selected.png)
 
-![Middle key named through the advertised service name](runs/softkeys-2026-11-03/fresh-nowplaying.png)
+![Middle key named through the advertised service name](../../../../research/bridge-runs/softkeys-2026-11-03/fresh-nowplaying.png)
 
-![Custom search heading and stock keyboard controls](runs/softkeys-2026-11-03/keyboard-with-input.png)
+![Custom search heading and stock keyboard controls](../../../../research/bridge-runs/softkeys-2026-11-03/keyboard-with-input.png)
 
 ## Firmware explanation
 
@@ -52,7 +52,7 @@ and changing that name does not change the handler.
 
 The ratings branch uses a fixed bottom caption, `STR_PandoraRatingsKey`, with
 `sonosApiRatings`. Presentation strings supply choices inside its menu. The
-previous [working ratings experiment](runs/interactive-emulator-2026-11-01/README.md)
+previous [working ratings experiment](../../../../research/bridge-runs/interactive-emulator-2026-11-01/README.md)
 was repeated successfully in this new instance, using a new service ID 244 and
 the name Softkey Ratings. Both strings and presentation documents were fetched.
 The working hierarchy includes `PresentationMap > Match > Ratings`; both reported
@@ -66,9 +66,9 @@ earlier independently written fixture did not expose Ratings; its missing Match
 wrapper and inconsistent source/track state make those failed attempts unsuitable
 as evidence that stock ratings are unavailable.
 
-![Stock Ratings softkey with service-defined choices](runs/softkeys-2026-11-03/ratings-menu.png)
+![Stock Ratings softkey with service-defined choices](../../../../research/bridge-runs/softkeys-2026-11-03/ratings-menu.png)
 
-![Service-defined rating result](runs/softkeys-2026-11-03/rating-result.png)
+![Service-defined rating result](../../../../research/bridge-runs/softkeys-2026-11-03/rating-result.png)
 
 All ten examined label setters, custom-service node builders and softkey policy
 functions match 4.3.2 after normalizing function-relative branch targets. The new
@@ -76,7 +76,7 @@ runtime test itself used 4.3. See `version-comparison.json` below.
 
 ## Evidence and instance
 
-All files are in [runs/softkeys-2026-11-03](runs/softkeys-2026-11-03/): screenshots,
+All files are in [runs/softkeys-2026-11-03](../../../../research/bridge-runs/softkeys-2026-11-03): screenshots,
 synthetic packet capture, fixture versions, requests, original runtime SWF,
 native disassembly and `version-comparison.json`. Read-only hardware-breakpoint
 inspection confirmed a program-radio source returned `SONOS_PROGRADIO`; the

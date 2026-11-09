@@ -30,7 +30,7 @@ that access on the actual device.
 
 ## Update trust and the owner's earlier successful update
 
-The existing [physical 4.3-to-4.3.2 record](../update-analysis/7.1-access/cr100/update-to-4.3.2.md)
+The existing [physical 4.3-to-4.3.2 record](../../../../research/update-analysis/7.1-access/cr100/update-to-4.3.2.md)
 shows that a local HTTP mirror and TLS 1.0 stand-in delivered the authentic signed
 model-2 package successfully. The controller's update-message/manifest exchange
 and final package authentication are separate layers. That earlier success does
@@ -122,9 +122,9 @@ selected and extracted on the host between runs; automatic physical bootloader
 bank loading is not claimed.
 
 Receipts and reproduction details:
-[native test results](runs/controller-native-install-2026-11-02/RESULTS.md).
+[native test results](../../../../research/bridge-runs/controller-native-install-2026-11-02/RESULTS.md).
 The serial-model correction is documented in
-[SCIF receive regression](runs/controller-native-install-2026-11-02/scif-rx-fix.md).
+[SCIF receive regression](../../../../research/bridge-runs/controller-native-install-2026-11-02/scif-rx-fix.md).
 
 ## Software-only initial-access follow-up
 
@@ -151,7 +151,7 @@ maintenance procedure. This leaves initial software access unresolved; the
 deeper entry-point audit remains incomplete after an automatic cybersecurity
 review rejection. The complete firmware-loading goal is not achieved.
 
-[Software-only audit and owner-run commands](runs/controller-native-install-2026-11-02/initial-access-audit/README.md)
+[Software-only audit and owner-run commands](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/README.md)
 contain bounded physical receipts and exact loader/startup evidence. The owner
 also supplied case FCC ID **SBVCR002**; its filing covers the radio module and
 does not uniquely identify the host flash or service wiring.
@@ -161,7 +161,7 @@ physical controller and its credential is the stored device identity key
 record, obtainable from the same external NAND backup that provides owner
 recovery. The strongest current route is that hardware-first composite; the
 missing facts are the F3 board/chip identification gates. See
-[unlock-route follow-up](runs/unlock-access-route-2026-11-03/README.md).
+[unlock-route follow-up](../../../../research/bridge-runs/unlock-access-route-2026-11-03/README.md).
 
 ## Stock-firmware menu alternative
 
@@ -189,7 +189,7 @@ The matching 4.3.2 browse-action function was compared statically; it is not a
 dynamic stock-4.3.2 or physical result. The fixture used OK-button menu prompting.
 Negative `OkMenuSelection` can bypass the action menu for direct Play Now/Add End;
 both preferences need acceptance tests. The exact evidence and preference caveat
-are in [the stock-service notes](runs/controller-deployment-2026-11-02/bridge-only-options.md).
+are in [the stock-service notes](../../../../research/bridge-runs/controller-deployment-2026-11-02/bridge-only-options.md).
 
 Production integration should expose each room's actual capability-supported
 settings, include the explicit room identity in issued action IDs, use absolute
@@ -226,7 +226,7 @@ unknown. Public CR100 teardown/FCC photographs identify board/connector leads,
 including J8004, without a verified serial or recovery procedure. Details and
 primary source links are in `hardware-recovery-references.md` in the run.
 
-An [external-flash investigation](runs/controller-native-install-2026-11-02/external-flash-route.md)
+An [external-flash investigation](../../../../research/bridge-runs/controller-native-install-2026-11-02/external-flash-route.md)
 also identifies programmer profiles for documented Samsung NAND variants and
 ways to preserve physical-page/OOB data. The owner's full chip marking,
 package, voltage, isolated access and independently verified read/restore path

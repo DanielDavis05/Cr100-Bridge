@@ -1,6 +1,6 @@
 # Restoring the original CR100 settings UI
 
-This remains a laboratory prototype. [Consolidated findings and open items](RESEARCH.md)
+This remains a laboratory prototype. [Consolidated findings and open items](../research/RESEARCH.md)
 record the adopted next production route: a separate **Music > Speaker Settings**
 service on unchanged controller firmware. That service is not yet implemented
 or deployed; the native-UI and firmware-loading work below retain separate limits.
@@ -56,7 +56,7 @@ were switched off and read back. A follow-up now runs the rebuilt 4.3.2
 filesystem with the unchanged exact 4.3.2 native executable and version-specific
 emulator helpers. All four native controls pass SOAP readback there too: Bass
 +1, Treble −1, Loudness Off and LED Off. See the
-[deployment investigation](CONTROLLER-DEPLOYMENT.md) for current validation and
+[deployment investigation](../research/CONTROLLER-DEPLOYMENT.md) for current validation and
 the distinction between application runtime and firmware installation.
 
 ## Backend integration
@@ -119,7 +119,7 @@ omits these menus, so downgrading to that image does not restore them. Detailed
 evidence is in `physical-install-research.txt` and
 `physical-overlay-next-experiment.txt` in the run directory.
 
-The later [native NAND test](CONTROLLER-DEPLOYMENT.md#native-nand-installation-and-cold-boot)
+The later [native NAND test](../research/CONTROLLER-DEPLOYMENT.md#native-nand-installation-and-cold-boot)
 now verifies the original updater writing the custom image to synthetic NAND,
 completing post-install and mounting the installed bank on a separate cold boot
 of the original kernel. Automatic reset remains unmodeled and returns error 17.

@@ -6,7 +6,7 @@ CR100's actions into Home Assistant service calls. The Music menu comes from Hom
 Assistant's media browser (`ha_content.py`), and album art from the entity's picture,
 fetched from Home Assistant.
 
-Config: {"home_assistant": {"url": "http://192.168.1.148:8123", "token_file": "ha-token"}},
+Config: {"home_assistant": {"url": "http://homeassistant.local:8123", "token_file": "ha-token"}},
 rooms {"entity": "media_player.kitchen"} (or {"backend": "ha", "id": ...}).
 """
 from __future__ import annotations

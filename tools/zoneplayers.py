@@ -1418,7 +1418,7 @@ class Household:
 def load_rooms(config_path, log):
     """Rooms from the config file. Returns (names, refs, slots, {backend name: Backend}).
 
-    {"home_assistant": {"url": "http://192.168.1.148:8123", "token_file": "/home/kali/ha-token"},
+    {"home_assistant": {"url": "http://homeassistant.local:8123", "token_file": "ha-token"},
      "rooms": [{"entity": "media_player.kitchen", "slot": 0}, {"name": "Den", "entity": "media_player.den", "icon": "den"},
                {"name": "Spare"}],
      "music_menu": {"library_entity": "media_player.kitchen"}}

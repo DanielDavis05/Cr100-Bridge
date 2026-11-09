@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ccmp
 import frames
+import workspace
 import sonosnet_link as sl
 from sonosnet_link import Link
 
@@ -48,11 +49,11 @@ def pcap_packets(path):
 def test_radiotap_on_pi_capture():
     import json
     # Private capture credentials are supplied locally, never embedded in the distribution.
-    private = json.loads((HERE / 'bridge-state.json').read_text())
+    private = json.loads((workspace.CAPTURES / 'bridge-state.json').read_text())
     capture_cr = frames.mac_bytes(private['cr100_mac'])
     capture_key = bytes.fromhex(private['network_key'])
     # Pi captures carry TSFT, flags with FCS, rate, channel, antenna signal.
-    capture = HERE / 'Pi T4 CR100 associated, encrypted data (channel 6).pcap'
+    capture = workspace.CAPTURES / 'Pi T4 CR100 associated, encrypted data (channel 6).pcap'
     checked = 0
     for packet in pcap_packets(capture):
         raw, rssi = frames.parse_radiotap(packet)
@@ -386,8 +387,8 @@ def test_radio_loss_and_reopen():
 
 
 if __name__ == '__main__':
-    if ((HERE / 'Pi T4 CR100 associated, encrypted data (channel 6).pcap').exists()
-            and (HERE / 'bridge-state.json').exists()):
+    if ((workspace.CAPTURES / 'Pi T4 CR100 associated, encrypted data (channel 6).pcap').exists()
+            and (workspace.CAPTURES / 'bridge-state.json').exists()):
         print('radiotap: decrypted', test_radiotap_on_pi_capture(), 'CR100 frames from the Pi capture')
     else:
         print('Private on-air capture is absent; running synthetic link tests.')

@@ -9,11 +9,18 @@ This repository contains the runtime, virtual player implementation, protocol
 fixtures, web interface, installer, and systemd units. An emulator checkout,
 Sonos firmware image, and the author's configuration are not needed.
 
-The [consolidated findings, evidence index and open items](RESEARCH.md) distinguish
+The [consolidated findings, evidence index and open items](docs/research/RESEARCH.md) distinguish
 deployed features, stock-controller tests, patched-UI and synthetic-NAND results,
 and physical validation gaps. Custom controller firmware uses **System Settings
 > Room Settings**. The older **Music > Speaker Settings** workaround is disabled
 by default and remains an explicit compatibility option for stock firmware.
+
+## Guides
+
+- [Deploying and updating](docs/guides/deploying.md): build an archive, install it on the Pi, roll back
+- [Health checks](docs/guides/health-checks.md): confirm the Pi, radio, controller link and speakers are working
+- [Troubleshooting](docs/guides/troubleshooting.md): known symptoms and their fixes
+- Feature notes are in [docs/features](docs/features/); research records are in [docs/research](docs/research/).
 
 ## Supported installation
 
@@ -158,7 +165,7 @@ diagnostic logs retain a fixed number of loss entries, so compare their event
 timestamps rather than their count when testing for new drops.
 
 The same control is available over SSH with
-`sudo cr100-bridge controller-search 00:0e:58:02:3a:d9 pause`; use `resume`
+`sudo cr100-bridge controller-search <controller-mac> pause`; use `resume`
 in place of `pause` to enable automatic acquisition again.
 
 ```sh
@@ -220,7 +227,7 @@ compatibility requirement.
 
 With no armed controller firmware, Online Updates runs the bridge's full native
 update demonstration with custom confirmation text and progress. Bridge release
-download and installation remain a stub. See [Online Updates](docs/ONLINE-UPDATES.md)
+download and installation remain a stub. See [Online Updates](docs/features/ONLINE-UPDATES.md)
 for staging, recovery, supported UI customization, and validation limits.
 
 ## Updates and existing manual installations
@@ -232,7 +239,7 @@ Previous releases remain under `/opt/cr100-bridge/releases/` for recovery.
 Only one installer may run at a time; do not update during pairing.
 
 For an existing manual setup, stop its launcher before starting these services.
-The installer deliberately does not import `/home/kali` configuration or secrets.
+The installer deliberately does not import configuration or secrets from a home directory.
 To retain an existing pairing/configuration, install with `--no-start`, then copy
 the intended files into `/var/lib/cr100-bridge/` as root. Update token paths in
 `bridge-config.json` (relative paths resolve beside that file), apply mode 0600,
@@ -349,7 +356,7 @@ and support on both rooms. A cached About model or IP never enables native
 commands. HA disconnects disable controls while retaining identity, and reconnects
 refresh controls even when the entity state is unchanged.
 
-See [package 1 implementation and pending live checks](BACKEND-FEASIBILITY.md#package-1-implementation)
+See [package 1 implementation and pending live checks](docs/research/BACKEND-FEASIBILITY.md#package-1-implementation)
 for the supported routes, assumptions and validation details.
 
 `NativeSettingsRoom` shares native settings dispatch and fixed-output capability
@@ -432,7 +439,7 @@ Clock edits preserve the remaining duration of sleep timers and running alarms.
 
 Existing Spotify Autoplay settings and playback hooks are preserved. Radio
 selection, including an alarm, releases the previous Spotify continuation;
-selecting Spotify again retains its normal autoplay behavior. See [RADIO.md](RADIO.md)
+selecting Spotify again retains its normal autoplay behavior. See [RADIO.md](docs/features/RADIO.md)
 for configuration, the supported native menu adaptation, and verification.
 
 ### Room Settings and stock-controller compatibility
@@ -468,7 +475,7 @@ fixed-mode writes block volume/EQ changes until readback confirms the mode.
 Line-In gain writes use explicit native ranges when provided. Verified ZP80
 inputs also support the controller's ten native gain choices when their service
 description omits those ranges; other unknown input ranges remain unavailable.
-See [package 2 details and live checks](BACKEND-FEASIBILITY.md#package-2-implementation).
+See [package 2 details and live checks](docs/research/BACKEND-FEASIBILITY.md#package-2-implementation).
 
 The Sonos backend reads state itself after every action and every 30 s, besides
 events: a ZP80 on S1 11.16 sends its events 2-8 s late and merged. It needs the

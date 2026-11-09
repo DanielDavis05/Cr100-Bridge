@@ -21,8 +21,8 @@ import zoneplayers
 from test_ha_backend import wait_for
 from test_zoneplayers import HOUSEHOLD, groups, soap, zp
 
-TECHSERV = 'sonos:RINCON_000E5820209001400'
-BEDROOM = 'sonos:RINCON_000E5820ACB601400'
+TECHSERV = 'sonos:RINCON_000E5800000B01400'
+BEDROOM = 'sonos:RINCON_000E5800000A01400'
 
 
 def config():

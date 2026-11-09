@@ -1,7 +1,7 @@
 # TuneIn Radio feature and implementation plan
 
 Status: implemented in the development build. Date: November 3, 2026.
-See [RADIO.md](RADIO.md) for operation and [RADIO-ACCEPTANCE.md](RADIO-ACCEPTANCE.md)
+See [RADIO.md](../features/RADIO.md) for operation and [RADIO-ACCEPTANCE.md](RADIO-ACCEPTANCE.md)
 for validation evidence and hardware/deployment boundaries.
 
 Restore the CR100's original Radio experience using the public RadioTime/TuneIn API. Keep **Music > Radio** as the entry point, preserve the manual's workflows, and add current album artwork, richer metadata, practical discovery tools, and Radio settings. Radio must work without a TuneIn account or another Music-menu service.
@@ -241,9 +241,9 @@ References use the manual's printed page numbers. Desktop-only workflows are pro
 
 Public RadioTime browsing, playback resolution, local favorites, metadata, and artwork are the integration basis. TuneIn account synchronization and Premium entitlements are separate capabilities and are not assumed. Live rewind/recording and universal song recognition are not provided by directory browsing. Format, archive availability, and seek support follow actual source/backend capabilities.
 
-- [Supplied Sonos manual](/Users/daniel/Downloads/405f03ac9afb32c597dc53bb316ec5fa88d4d2b4f360ca087b165e69cfb836af.pdf), especially the printed pages in the coverage table.
+- The Sonos Controller (CR100) user manual, especially the printed pages in the coverage table.
 - [Public RadioTime Music directory](https://opml.radiotime.com/Browse.ashx?c=music&render=json), [Jazz popularity](https://opml.radiotime.com/Browse.ashx?id=c57944&filter=s:popular&render=json), and [station profile example](https://opml.radiotime.com/Describe.ashx?id=s34682&render=json).
 - [Archived original RadioTime Browse documentation](https://github.com/skarl/bose-soundtouch-resurrect/blob/main/docs/reference/radiotime/methods/browse.md) and [Describe documentation](https://github.com/skarl/bose-soundtouch-resurrect/blob/main/docs/reference/radiotime/methods/describe.md), mirrored for reference; live behavior takes precedence.
 - [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API) and [Cover Art Archive API](https://musicbrainz.org/doc/Cover_Art_Archive/API). Supplementary matching uses public metadata/art lookups, a proper client identity, provider limits, and caching.
-- Existing bridge architecture and native UI findings: [content.py](tools/content.py), [backends.py](tools/backends.py), [sonos_backend.py](tools/sonos_backend.py), [zoneplayers.py](tools/zoneplayers.py), [CONTROLLER-UI.md](CONTROLLER-UI.md), [DIALOGS.md](DIALOGS.md), and [MUSIC-SERVICES.md](MUSIC-SERVICES.md).
-- [Measured Radio directory survey](../tmp/radiotime-survey-2026-11-03.json): observed station counts and local ZIP-area responses, with explicitly bounded scan scope.
+- Existing bridge architecture and native UI findings: [content.py](../../tools/content.py), [backends.py](../../tools/backends.py), [sonos_backend.py](../../tools/sonos_backend.py), [zoneplayers.py](../../tools/zoneplayers.py), [CONTROLLER-UI.md](../features/CONTROLLER-UI.md), [DIALOGS.md](../features/DIALOGS.md), and [MUSIC-SERVICES.md](../../../../research/bridge-notes/MUSIC-SERVICES.md).
+- [Measured Radio directory survey](../../../../scratch/radiotime-survey-2026-11-03.json): observed station counts and local ZIP-area responses, with explicitly bounded scan scope.

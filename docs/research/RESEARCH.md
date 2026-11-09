@@ -22,26 +22,26 @@ and excluded from portable runtime archives. Links identify retained evidence;
 an installed Pi does not necessarily contain those files. The [October 31 MVP
 note](RESEARCH-MVP-2026-10-31.md) preserves the earlier radio observations and
 corrected cipher interpretation. Its old scope, hardware candidates and open
-choices are historical; current support is described in [README](README.md).
+choices are historical; current support is described in [README](../../README.md).
 
 ## Documentation and evidence index
 
 | Topic | Summary and detailed evidence |
 |---|---|
-| Installation, Pi/radio, services, backends, Spotify, About and Line-In | [README](README.md) |
-| Backend coverage, package 1 routing and package 2 settings, deployments and live checks | [BACKEND-FEASIBILITY](BACKEND-FEASIBILITY.md); [direct Sonos](runs/backend-feasibility-2026-11-02/sonos.md), [HA Sonos](runs/backend-feasibility-2026-11-02/ha-sonos.md), [generic HA](runs/backend-feasibility-2026-11-02/ha-generic.md) |
-| Stock text messages, search keyboard, choices, ratings, confirmations, playlists and alarms | [DIALOGS](DIALOGS.md), [original-runtime results](runs/interactive-emulator-2026-11-01/README.md), [native/parser notes](runs/interactive-research-2026-11-01/native/NOTES.md) |
-| Original native settings UI, units, guards and reversible loading | [CONTROLLER-UI](CONTROLLER-UI.md), [prototype receipt](runs/settings-ui-prototype-2026-11-02/validation-summary.json), [overlay rollback](runs/settings-ui-prototype-2026-11-02/overlay-validation.json) |
-| Stock Music action, custom package/signature tests, physical loading boundary | [CONTROLLER-DEPLOYMENT](CONTROLLER-DEPLOYMENT.md), [stock design/exact gates](runs/controller-deployment-2026-11-02/bridge-only-options.md), [stock runtime receipt](runs/controller-deployment-2026-11-02/stock-menu-validation.json), [patched 4.3.2 runtime](runs/controller-deployment-2026-11-02/custom-runtime-validation.json) |
-| Native synthetic NAND install, cold boot and specific fallback test | [RESULTS](runs/controller-native-install-2026-11-02/RESULTS.md), [installer contract](runs/controller-native-install-2026-11-02/installer-contract.md), [NAND selector](runs/controller-native-install-2026-11-02/NAND-SELECTOR.md), [JFFS audit](runs/controller-native-install-2026-11-02/jffs-preinstall-audit.md), [SCIF correction](runs/controller-native-install-2026-11-02/scif-rx-fix.md) |
-| Native emulator hardware/boot boundaries | [board compatibility](runs/controller-native-install-2026-11-02/board-compatibility.md), [independent boot ABI](runs/controller-native-install-2026-11-02/boot-abi/BOOT-ABI.md), [minimal HH/MCU model](runs/controller-native-install-2026-11-02/hh-mcu-contract.md), [boot-ROM provenance](runs/controller-native-install-2026-11-02/cr100-bootrom-provenance-audit.md) |
-| Physical read-only diagnostics, startup/loader boundaries and blocked audit | [initial-access audit](runs/controller-native-install-2026-11-02/initial-access-audit/README.md), [entry points](runs/controller-native-install-2026-11-02/initial-access-audit/software-entrypoints.md), [SWF loading](runs/controller-native-install-2026-11-02/initial-access-audit/ordinary-swf-loading.md), [diagnostic UI](runs/controller-native-install-2026-11-02/initial-access-audit/diagnostic-ui.md), [maintenance search](runs/controller-native-install-2026-11-02/initial-access-audit/first-party-maintenance-documentary-check.md) |
-| Owner hardware/FCC, conditional external backup and recovery | [external-flash route](runs/controller-native-install-2026-11-02/external-flash-route.md), [owner/teardown comparison](runs/controller-native-install-2026-11-02/initial-access-audit/owner-fcc-teardown-cross-check.md), [FCC exhibits](runs/controller-native-install-2026-11-02/initial-access-audit/sbvcr002-photo-findings.md), [hardware references](runs/controller-deployment-2026-11-02/hardware-recovery-references.md) |
-| Older firmware/media | [findings](BACKEND-FEASIBILITY.md#native-menu-restoration-and-older-firmware-research), [image receipts](runs/settings-restore-2026-11-02/older-cr100-firmware-findings.json), [media receipts](runs/settings-restore-2026-11-02/historical-media-receipt.json) |
-| Spotify discovery/playback, paging and queue art | [initial service](runs/spotify-sonos-2026-10-31/README.md), [paging diagnosis/fix](runs/spotify-fixes-2026-10-31/README.md), [discovery](runs/stub-discovery-2026-10-31/README.md) |
-| Per-controller Spotify menus/locks and folders | [current behavior](README.md#updates-and-existing-manual-installations), [menu deployment](runs/spotify-menu-2026-11-02/deployment.json), [live folder proof](runs/spotify-folder-read-2026-11-02/README.md) |
-| About/capability/native-settings deployments | [About](runs/about-system-2026-11-02/deployment.json), [package 1](runs/package1-2026-11-02/deployment.log), [package 2](runs/package2-2026-11-02/deployment.log), [read-only ZP80 contracts](runs/package2-2026-11-02/zp80-contracts-readonly.json) |
-| Line-In and Spotify Connect Now Playing | [stock 4.3 Line-In UI](runs/line-in-validation/validation.json), [Now Playing diagnosis/live verification](runs/now-playing-sync-2026-11-02/README.md) |
+| Installation, Pi/radio, services, backends, Spotify, About and Line-In | [README](../../README.md) |
+| Backend coverage, package 1 routing and package 2 settings, deployments and live checks | [BACKEND-FEASIBILITY](BACKEND-FEASIBILITY.md); [direct Sonos](../../../../research/bridge-runs/backend-feasibility-2026-11-02/sonos.md), [HA Sonos](../../../../research/bridge-runs/backend-feasibility-2026-11-02/ha-sonos.md), [generic HA](../../../../research/bridge-runs/backend-feasibility-2026-11-02/ha-generic.md) |
+| Stock text messages, search keyboard, choices, ratings, confirmations, playlists and alarms | [DIALOGS](../features/DIALOGS.md), [original-runtime results](../../../../research/bridge-runs/interactive-emulator-2026-11-01/README.md), [native/parser notes](../../../../research/bridge-runs/interactive-research-2026-11-01/native/NOTES.md) |
+| Original native settings UI, units, guards and reversible loading | [CONTROLLER-UI](../features/CONTROLLER-UI.md), [prototype receipt](../../../../research/bridge-runs/settings-ui-prototype-2026-11-02/validation-summary.json), [overlay rollback](../../../../research/bridge-runs/settings-ui-prototype-2026-11-02/overlay-validation.json) |
+| Stock Music action, custom package/signature tests, physical loading boundary | [CONTROLLER-DEPLOYMENT](CONTROLLER-DEPLOYMENT.md), [stock design/exact gates](../../../../research/bridge-runs/controller-deployment-2026-11-02/bridge-only-options.md), [stock runtime receipt](../../../../research/bridge-runs/controller-deployment-2026-11-02/stock-menu-validation.json), [patched 4.3.2 runtime](../../../../research/bridge-runs/controller-deployment-2026-11-02/custom-runtime-validation.json) |
+| Native synthetic NAND install, cold boot and specific fallback test | [RESULTS](../../../../research/bridge-runs/controller-native-install-2026-11-02/RESULTS.md), [installer contract](../../../../research/bridge-runs/controller-native-install-2026-11-02/installer-contract.md), [NAND selector](../../../../research/bridge-runs/controller-native-install-2026-11-02/NAND-SELECTOR.md), [JFFS audit](../../../../research/bridge-runs/controller-native-install-2026-11-02/jffs-preinstall-audit.md), [SCIF correction](../../../../research/bridge-runs/controller-native-install-2026-11-02/scif-rx-fix.md) |
+| Native emulator hardware/boot boundaries | [board compatibility](../../../../research/bridge-runs/controller-native-install-2026-11-02/board-compatibility.md), [independent boot ABI](../../../../research/bridge-runs/controller-native-install-2026-11-02/boot-abi/BOOT-ABI.md), [minimal HH/MCU model](../../../../research/bridge-runs/controller-native-install-2026-11-02/hh-mcu-contract.md), [boot-ROM provenance](../../../../research/bridge-runs/controller-native-install-2026-11-02/cr100-bootrom-provenance-audit.md) |
+| Physical read-only diagnostics, startup/loader boundaries and blocked audit | [initial-access audit](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/README.md), [entry points](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/software-entrypoints.md), [SWF loading](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/ordinary-swf-loading.md), [diagnostic UI](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/diagnostic-ui.md), [maintenance search](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/first-party-maintenance-documentary-check.md) |
+| Owner hardware/FCC, conditional external backup and recovery | [external-flash route](../../../../research/bridge-runs/controller-native-install-2026-11-02/external-flash-route.md), [owner/teardown comparison](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/owner-fcc-teardown-cross-check.md), [FCC exhibits](../../../../research/bridge-runs/controller-native-install-2026-11-02/initial-access-audit/sbvcr002-photo-findings.md), [hardware references](../../../../research/bridge-runs/controller-deployment-2026-11-02/hardware-recovery-references.md) |
+| Older firmware/media | [findings](BACKEND-FEASIBILITY.md#native-menu-restoration-and-older-firmware-research), [image receipts](../../../../research/bridge-runs/settings-restore-2026-11-02/older-cr100-firmware-findings.json), [media receipts](../../../../research/bridge-runs/settings-restore-2026-11-02/historical-media-receipt.json) |
+| Spotify discovery/playback, paging and queue art | [initial service](../../../../research/bridge-runs/spotify-sonos-2026-10-31/README.md), [paging diagnosis/fix](../../../../research/bridge-runs/spotify-fixes-2026-10-31/README.md), [discovery](../../../../research/bridge-runs/stub-discovery-2026-10-31/README.md) |
+| Per-controller Spotify menus/locks and folders | [current behavior](../../README.md#updates-and-existing-manual-installations), [menu deployment](../../../../research/bridge-runs/spotify-menu-2026-11-02/deployment.json), [live folder proof](../../../../research/bridge-runs/spotify-folder-read-2026-11-02/README.md) |
+| About/capability/native-settings deployments | [About](../../../../research/bridge-runs/about-system-2026-11-02/deployment.json), [package 1](../../../../research/bridge-runs/package1-2026-11-02/deployment.log), [package 2](../../../../research/bridge-runs/package2-2026-11-02/deployment.log), [read-only ZP80 contracts](../../../../research/bridge-runs/package2-2026-11-02/zp80-contracts-readonly.json) |
+| Line-In and Spotify Connect Now Playing | [stock 4.3 Line-In UI](../../../../research/bridge-runs/line-in-validation/validation.json), [Now Playing diagnosis/live verification](../../../../research/bridge-runs/now-playing-sync-2026-11-02/README.md) |
 
 ## Findings and their limits
 
@@ -113,7 +113,7 @@ does nothing, makes no playback request and sends no setter. There is no
 separate Options softkey. Users must select **Music > System Settings >
 Controller Settings > OK Button > Show Menu** for this route; the bridge cannot
 override it. Applying settings causes zero playback calls. See the
-[exact gates/acceptance recipe](runs/controller-deployment-2026-11-02/bridge-only-options.md).
+[exact gates/acceptance recipe](../../../../research/bridge-runs/controller-deployment-2026-11-02/bridge-only-options.md).
 
 ## Open items and completion criteria
 
@@ -131,7 +131,7 @@ route. Physical acceptance and firmware loading retain their own status.
 | M7 | Partial physical acceptance | User navigated the physical 4.3.2 controller and applied Status Light Off to the Bedroom ZP80; createItem returned 200 and native LED readback is Off. Other settings/audio remain untested. Temporary AP loss/search/reconnect occurred; both bridge and controller application PIDs stayed unchanged. |
 | U1 | Prototype only | Native patched UI capability/error handling and live bridge/HA, multiroom, fixed-output/disappearance tests; balance/output/input/extended sleep/alarms UI is separate. |
 | U2 | Physical dependency | Legitimate controller access and owner backup/recovery before temporary loading; stock-kernel bind/space, controlled restart, original-hash rollback and reboot test before persistence. |
-| F1 | Blocked/unachieved | No software-only initial access/custom-firmware route. Deeper audit was rejected by automated cybersecurity review; requires newly documented legitimate service access/route or approved review environment. November 3: `/unlock` is now live-confirmed reachable on the physical unit and its credential is identified as the stored device identity key record; authenticated-access acquisition now converges on the F3 hardware-backup dependency. See the [unlock-route follow-up](runs/unlock-access-route-2026-11-03/README.md). |
+| F1 | Blocked/unachieved | No software-only initial access/custom-firmware route. Deeper audit was rejected by automated cybersecurity review; requires newly documented legitimate service access/route or approved review environment. November 3: `/unlock` is now live-confirmed reachable on the physical unit and its credential is identified as the stored device identity key record; authenticated-access acquisition now converges on the F3 hardware-backup dependency. See the [unlock-route follow-up](../../../../research/bridge-runs/unlock-access-route-2026-11-03/README.md). |
 | F2 | Emulator boundary | Automatic MCU reset/programming, OTP acceptance, host-independent bank loading, actual geometry and full native UI/radio/display/power remain unverified. Error 17 is not automatic update success. |
 | F3 | Hardware facts missing | Owner-board/chip/package/voltage identification, passive UART pinout, isolated access, repeated full page/OOB reads, immutable original backup and independent restore demonstration. Preserve OTP separately; synthetic media is never an owner backup/image. |
 | F4 | Research open | Pre-4.3 model-2 donors/public service package search bounded. Model-1 images, old account flags and FCC lab telnet provide no owner loading procedure. |
@@ -170,8 +170,8 @@ physical controller. The reported return to Searching was a temporary AP loss,
 with no process restart; radio reliability remains open. Real HA and other
 hands-on physical setting/audio checks remain open items.
 
-Receipts: [deployment and validation report](runs/speaker-settings-2026-11-02/README.md),
-[stock 4.3.2 acceptance](runs/speaker-settings-2026-11-02/emulator/acceptance-receipt.json).
+Receipts: [deployment and validation report](../../../../research/bridge-runs/speaker-settings-2026-11-02/README.md),
+[stock 4.3.2 acceptance](../../../../research/bridge-runs/speaker-settings-2026-11-02/emulator/acceptance-receipt.json).
 The deployed documentation is the source-freeze snapshot; this local addendum
 records the subsequent rollout outcome. Runtime source hashes match that snapshot.
 
@@ -203,11 +203,11 @@ depends on the preserved rejected-audit scope plus an undocumented CR100
 key-file source; it needs the approved review environment. Bounded community
 documentation search supplied no published CR100 unlock credential or owner
 service procedure. Downgrade validation closed separately in
-[cr100-emulator/research_update](../cr100-emulator/research_update/README.md)
+[cr100-emulator/research_update](../../../../research/cr100-emulator/research_update/README.md)
 (stock 4.3.2 accepted a modified manifest with automatic `-F`; authentic 4.3
 package passed `-t -F`), strengthening the post-access recovery position.
 Full assessment and probe receipts:
-[unlock-route follow-up](runs/unlock-access-route-2026-11-03/README.md).
+[unlock-route follow-up](../../../../research/bridge-runs/unlock-access-route-2026-11-03/README.md).
 
 ## Flash geometry and credential-storage follow-up (November 3, 2026, later)
 
@@ -232,5 +232,5 @@ case of 20 (zero spare). Separate cold boots selected bank 1/generation 2 and
 exposed the modified 901,555-byte MainUI. Bad blocks, MDP, table and bank 0 were
 byte-unchanged. The updater still ends with error 17 (unmodeled MCU reset).
 Details, hashes and reproduction:
-[flash-geometry run](runs/flash-geometry-16mib-2026-11-03/README.md). The owner's
+[flash-geometry run](../../../../research/bridge-runs/flash-geometry-16mib-2026-11-03/README.md). The owner's
 actual chip/voltage/package (F3) remains the first physical dependency.

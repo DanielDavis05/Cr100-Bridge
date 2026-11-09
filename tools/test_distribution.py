@@ -26,7 +26,7 @@ class Distribution(unittest.TestCase):
         self.assertIn('tools/nexmon_power.py', selected)
         self.assertIn('tools/nexmon_clock.py', selected)
         self.assertTrue({'tools/online_updates.py', 'tools/update_service.py',
-                         'tools/update_transport.py', 'docs/ONLINE-UPDATES.md'} <= selected)
+                         'tools/update_transport.py', 'docs/features/ONLINE-UPDATES.md'} <= selected)
         self.assertIn('firmware/nexmon-ownership/apply.py', selected)
         self.assertIn('firmware/nexmon-ownership/status.py', selected)
         self.assertIn('firmware/nexmon-ownership/manifest.json', selected)

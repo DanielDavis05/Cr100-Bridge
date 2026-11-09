@@ -10,8 +10,8 @@ import backends
 import webui
 import zoneplayers
 
-BEDROOM = 'RINCON_000E5820ACB601400'
-TECHSERV = 'RINCON_000E5820209001400'
+BEDROOM = 'RINCON_000E5800000A01400'
+TECHSERV = 'RINCON_000E5800000B01400'
 
 
 class SpeakerHealth(unittest.TestCase):

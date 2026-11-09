@@ -4,18 +4,18 @@ The bridge serves TuneIn/RadioTime through the controller's existing **Music > R
 
 ## Accepted views
 
-- [Music menu](docs/radio-validation/music-menu.png): the existing Radio entry.
-- [Radio menu](docs/radio-validation/radio-root.png): Favorites, Search, Local Radio, Music, Talk, Sports, Location; Podcasts and Radio Settings continue below the visible rows.
-- [Radio Settings](docs/radio-validation/radio-settings.png): native location, station information, ordering, language, stream quality and reconnect controls.
-- [Now Playing](docs/radio-validation/now-playing.png): station, current programme, matching artist/title and album cover.
-- [Enlarged artwork](docs/radio-validation/enlarged-artwork.png): the original native artwork view and matching caption.
+- [Music menu](../features/radio-validation/music-menu.png): the existing Radio entry.
+- [Radio menu](../features/radio-validation/radio-root.png): Favorites, Search, Local Radio, Music, Talk, Sports, Location; Podcasts and Radio Settings continue below the visible rows.
+- [Radio Settings](../features/radio-validation/radio-settings.png): native location, station information, ordering, language, stream quality and reconnect controls.
+- [Now Playing](../features/radio-validation/now-playing.png): station, current programme, matching artist/title and album cover.
+- [Enlarged artwork](../features/radio-validation/enlarged-artwork.png): the original native artwork view and matching caption.
 
 Native interaction checks also confirmed:
 
-- [Search](docs/radio-validation/search-types.png) preserves Stations, Shows and Hosts.
-- [Favorites](docs/radio-validation/favorites.png) separates Radio Stations and Radio Shows; recent and continue-listening extensions appear below them.
-- [City picker](docs/radio-validation/city-picker.png) reuses the original popup. Selecting Boston sent the actual `R_RadioLocation` write and durably saved region `r102`; [Local Radio (Boston)](docs/radio-validation/local-radio-boston.png) reflects that selection.
-- An explicit Stream Quality choice sent `SystemProperties.SetString` with the dedicated action token, changed the durable store from `auto` to `low`, survived a peer restart, changed to `best`, and returned to `low`. The final explicit write invalidated the exact native Settings root; Back immediately displayed `Stream Quality: low`. The [settings screen](docs/radio-validation/radio-settings.png) shows the refreshed value. Favorites remained empty throughout these settings writes.
+- [Search](../features/radio-validation/search-types.png) preserves Stations, Shows and Hosts.
+- [Favorites](../features/radio-validation/favorites.png) separates Radio Stations and Radio Shows; recent and continue-listening extensions appear below them.
+- [City picker](../features/radio-validation/city-picker.png) reuses the original popup. Selecting Boston sent the actual `R_RadioLocation` write and durably saved region `r102`; [Local Radio (Boston)](../features/radio-validation/local-radio-boston.png) reflects that selection.
+- An explicit Stream Quality choice sent `SystemProperties.SetString` with the dedicated action token, changed the durable store from `auto` to `low`, survived a peer restart, changed to `best`, and returned to `low`. The final explicit write invalidated the exact native Settings root; Back immediately displayed `Stream Quality: low`. The [settings screen](../features/radio-validation/radio-settings.png) shows the refreshed value. Favorites remained empty throughout these settings writes.
 
 The normal and enlarged views use the production `RadioPlayback.play`, `refresh` and `values` paths and the production native protocol adapter. The guest serves the resulting real JPEG through the bridge artwork route. Metadata XML was not authored separately to imitate the result.
 

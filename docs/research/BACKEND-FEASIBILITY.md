@@ -11,9 +11,9 @@ findings and all remaining work, including the adopted, not-yet-implemented
 stock **Music > Speaker Settings** service.
 
 Detailed source notes:
-[direct Sonos](runs/backend-feasibility-2026-11-02/sonos.md),
-[HA with Sonos](runs/backend-feasibility-2026-11-02/ha-sonos.md), and
-[HA with other speakers](runs/backend-feasibility-2026-11-02/ha-generic.md).
+[direct Sonos](../../../../research/bridge-runs/backend-feasibility-2026-11-02/sonos.md),
+[HA with Sonos](../../../../research/bridge-runs/backend-feasibility-2026-11-02/ha-sonos.md), and
+[HA with other speakers](../../../../research/bridge-runs/backend-feasibility-2026-11-02/ha-generic.md).
 
 ## Conclusion and the meaning of HA support
 
@@ -327,7 +327,7 @@ real installations:
 
 ### Validation record
 
-The Pi at `10.0.0.170` was already running the latest About-info release. Candidate
+The test Pi was already running the latest About-info release. Candidate
 tests run from a separate `/tmp/cr100-package1-*` tree using the installed Python
 environment; the installed release, configuration and production services have
 not been changed. A candidate household listens on loopback with discovery
@@ -513,7 +513,7 @@ sliders and choice menus with SOAP readback. This
 requires reconstructing bindings and navigation, rather than changing one feature
 flag or merely re-enabling a single array item.
 
-Follow-up prototype: [restoring the original controller UI](CONTROLLER-UI.md) now
+Follow-up prototype: [restoring the original controller UI](../features/CONTROLLER-UI.md) now
 adds Speaker Settings inside System Settings in an isolated 4.3 emulator. Bass,
 Treble, Loudness and Status Light use retained native widgets and have passed
 SOAP dispatch plus direct simulated-player readback. The native EQ widget API

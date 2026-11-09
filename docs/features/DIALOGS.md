@@ -5,21 +5,21 @@ new-instance tests distinguish metadata-selected stock actions, the service-name
 caption of the Now Playing library key, and labels inside service menus.
 
 Current cross-project status and remaining work are indexed in
-[RESEARCH.md](RESEARCH.md). The adopted settings route is a separate stock Music
+[RESEARCH.md](../research/RESEARCH.md). The adopted settings route is a separate stock Music
 service using explicit nonplayable-item library actions; it is not implemented
 or deployed at this documentation checkpoint. Its [4.3 runtime proof and 4.3.2
-static comparison](CONTROLLER-DEPLOYMENT.md#stock-firmware-menu-alternative) are
+static comparison](../research/CONTROLLER-DEPLOYMENT.md#stock-firmware-menu-alternative) are
 separate from the patched native-settings UI.
 
 Research reviewed November 1, 2026. Claude completed an emulator proof of concept;
 this follow-up checked its screenshots, Flash actions, native disassembly, and the
 corresponding 4.3.2 firmware. No production hook or physical-controller test was
-performed. Evidence is in [runs/dialog-research-2026-11-01](runs/dialog-research-2026-11-01/).
+performed. Evidence is in [runs/dialog-research-2026-11-01](../../../../research/bridge-runs/dialog-research-2026-11-01).
 
 **Emulator follow-up, November 2:** custom search input, browse choices, ratings
 with a custom result popup, library add/remove, playlist save/rename/delete, and
 alarm submission have now been exercised in the original 4.3 runtime. See the
-[runtime results and fixtures](runs/interactive-emulator-2026-11-01/README.md).
+[runtime results and fixtures](../../../../research/bridge-runs/interactive-emulator-2026-11-01/README.md).
 The tested library-removal confirmation retained fixed firmware wording.
 
 ## Result
@@ -29,7 +29,7 @@ sending an **AVTransport `LastChange` event** from the selected virtual player.
 This is a player transport-error notification, not a custom SMAPI response type.
 A service hosted separately from the player needs a bridge-side callback to use it.
 
-![Custom text over the playlist browser](runs/dialog-research-2026-11-01/click-dialog.png)
+![Custom text over the playlist browser](../../../../research/bridge-runs/dialog-research-2026-11-01/click-dialog.png)
 
 Claude sent the event manually after selecting Spotify > My Playlists. The
 screenshot proves custom text renders over the browser; it does **not** demonstrate
@@ -184,7 +184,7 @@ is not naturally tied to selecting a service entry.
 ## Further stock interaction routes
 
 A follow-up static audit found more useful UI flows. Evidence and decoded actions
-are under [runs/interactive-research-2026-11-01](runs/interactive-research-2026-11-01/).
+are under [runs/interactive-research-2026-11-01](../../../../research/bridge-runs/interactive-research-2026-11-01).
 The analysis below records the initial leads. The subsequent emulator run
 confirmed several of them; its runtime results linked above take precedence
 over the initial uncertainty. No physical-controller test or production bridge
@@ -225,7 +225,7 @@ the popup.
 The service descriptor's `Presentation` section can point to `Strings` and
 `PresentationMap` documents using their `Uri` and `Version` attributes. Candidate
 XML fragments, native disassembly, and 4.3.2 parser comparisons are saved in
-[native/NOTES.md](runs/interactive-research-2026-11-01/native/NOTES.md). The
+[native/NOTES.md](../../../../research/bridge-runs/interactive-research-2026-11-01/native/NOTES.md). The
 fragments were derived statically and still need a real fixture test.
 The later emulator run corrected the required nesting to include outer
 `Presentation` and inner `Match` elements; use its tested XML rather than the

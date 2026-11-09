@@ -91,7 +91,7 @@ The tool accepts the examined original 4.3 and 4.3.2 hashes, verifies unrelated
 functions/resources remain unchanged, and writes a receipt beside the output.
 It never overwrites the original or installs firmware. This is not a signed
 Sonos update. Controller installation and laboratory loader constraints are
-documented in [CONTROLLER-DEPLOYMENT.md](CONTROLLER-DEPLOYMENT.md).
+documented in [CONTROLLER-DEPLOYMENT.md](../research/CONTROLLER-DEPLOYMENT.md).
 
 ## Global alarms
 
@@ -183,7 +183,7 @@ node --check tools/webui/app.js
 
 Native visual validation uses an independent emulator disk/overlay, ports,
 process files, logs, and private network identities. It does not modify or stop
-the user's other emulator instance. See [TUNEIN-RADIO-PLAN.md](TUNEIN-RADIO-PLAN.md)
+the user's other emulator instance. See [TUNEIN-RADIO-PLAN.md](../research/TUNEIN-RADIO-PLAN.md)
 for the full feature and acceptance checklist.
 The native screenshots and test boundaries are recorded in
-[RADIO-ACCEPTANCE.md](RADIO-ACCEPTANCE.md).
+[RADIO-ACCEPTANCE.md](../research/RADIO-ACCEPTANCE.md).

@@ -27,7 +27,7 @@ class RoomConfig(unittest.TestCase):
     def test_offline_sonos_starts_http_players_and_preserves_target_and_slot(self):
         backend = sonos_backend.SonosBackend(log=self.logs.append)
         self.addCleanup(backend.listener.server.server_close)
-        target = 'RINCON_000E5820ACB601400'
+        target = 'RINCON_000E5800000A01400'
         names, refs, slots, connected = self.load(
             [{'backend': 'sonos', 'id': target, 'slot': 10}], {'sonos': backend})
         self.assertEqual(refs, [('sonos', target)])

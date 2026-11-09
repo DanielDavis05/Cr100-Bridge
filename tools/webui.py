@@ -1197,7 +1197,7 @@ def check_url(url):
     url = (url or '').strip().rstrip('/')
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-        raise ApiError(400, 'Enter the Home Assistant address, like http://192.168.1.148:8123.')
+        raise ApiError(400, 'Enter the Home Assistant address, like http://homeassistant.local:8123.')
     return url
 
 

@@ -9,8 +9,9 @@ from __future__ import annotations
 import argparse, base64, hashlib, json, os, secrets, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
-WORKSPACE = Path(__file__).resolve().parents[2]
-EMULATOR = WORKSPACE / 'cr100-emulator'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workspace
+EMULATOR = workspace.EMULATOR
 DEFAULT_BASE = EMULATOR / 'vm/sh4-fallback/rootfs-fast-input-ready.ext4'
 
 
