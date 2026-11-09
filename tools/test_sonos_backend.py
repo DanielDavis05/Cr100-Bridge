@@ -8,9 +8,13 @@ import json
 import re
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_sonos
@@ -22,6 +26,9 @@ from fake_sonos import entry
 from sonos_upnp import DIDL_OPEN
 from test_ha_backend import AVT, field, wait_for
 from test_zoneplayers import HOUSEHOLD, groups, soap, zp
+from backends import ArtStore
+from backends import BackendError
+from provider_playback import QueueItem
 
 KITCHEN, PATIO = 'RINCON_000E58AAAAAA01400', 'RINCON_000E58BBBBBB01400'
 RC = '/MediaRenderer/RenderingControl/Control'
@@ -67,6 +74,21 @@ class SonosHousehold(unittest.TestCase):
         self.house.close()
         self.backend.close()
         self.fake.close()
+
+    def test_all_sonos_players_unreachable_exposes_bridge_until_a_player_recovers(self):
+        house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio'], ['127.0.0.1'] * 2,
+            lambda _: None, port=0, backends=[self.backend], refs=[('sonos', KITCHEN), ('sonos', PATIO)])
+        try:
+            self.assertNotIn(['CR100 Bridge'], groups(house.topology()))
+            with self.backend.lock:
+                for speaker in self.backend.speakers.values(): speaker.available = False
+                house.refresh_identities()
+                self.assertIn(['CR100 Bridge'], groups(house.topology()))
+                self.backend.speakers[KITCHEN].available = True
+                house.refresh_identities()
+                self.assertNotIn(['CR100 Bridge'], groups(house.topology()))
+        finally:
+            house.close()
 
     def test_now_playing_from_the_player_with_its_art(self):
         self.kitchen.transport, self.kitchen.uri = 'PLAYING', 'x-rincon-queue:%s#0' % KITCHEN
@@ -171,6 +193,60 @@ class SonosHousehold(unittest.TestCase):
         self.assertIn('SA_RINCON3079_', tried[1]['EnqueuedURIMetaData'])
         self.assertEqual(result['NewQueueLength'], '2')
 
+    def test_another_provider_plays_and_enqueues_through_its_registered_adapter(self):
+        prepared = []
+        class LibraryAdapter:
+            def prepare(self, uri, kind):
+                prepared.append((uri, kind))
+                if not uri.startswith('library:album:') or kind != 'album':
+                    raise BackendError('Expected a library album')
+                return [QueueItem('x-library:' + uri.removeprefix('library:'),
+                                  '<library-account>example</library-account>')]
+
+        self.backend.playback_adapters.register('library', LibraryAdapter())
+        room = self.vkitchen.state.backend
+        self.kitchen.queue = [('http://music.invalid/existing.mp3', '')]
+        room.play_provider('library:album:blue', 'album')
+        self.assertEqual(self.kitchen.queue, [('x-library:album:blue',
+                                              '<library-account>example</library-account>')])
+        self.assertEqual(self.kitchen.transport, 'PLAYING')
+        result = room.enqueue_provider('library:album:green', 'album', as_next=True)
+        self.assertEqual(result, {'FirstTrackNumberEnqueued': '2', 'NumTracksAdded': '1', 'NewQueueLength': '2'})
+        self.assertEqual(calls(self.kitchen, 'AddURIToQueue')[-1]['EnqueueAsNext'], '1')
+        self.assertEqual(self.kitchen.queue[-1][0], 'x-library:album:green')
+        self.assertEqual(prepared, [('library:album:blue', 'album'), ('library:album:green', 'album')])
+
+    def test_invalid_or_unsupported_provider_items_preserve_the_existing_queue(self):
+        room = self.vkitchen.state.backend
+        original = [('http://music.invalid/existing.mp3', 'existing metadata')]
+        self.kitchen.queue = list(original)
+        self.kitchen.transport = 'PAUSED_PLAYBACK'
+        mutations = {'RemoveAllTracksFromQueue', 'AddURIToQueue', 'SetAVTransportURI', 'Seek', 'Play'}
+        for uri, kind, message in (
+                ('unknown:album:blue', 'album', 'not supported'),
+                ('spotify:artist:example', 'music', 'Not a supported Spotify item'),
+                ('spotify:album:example', 'music', 'does not match')):
+            for operation in (room.play_provider, room.enqueue_provider):
+                with self.subTest(uri=uri, operation=operation.__name__):
+                    with self.assertRaisesRegex(BackendError, message): operation(uri, kind)
+                    self.assertEqual(self.kitchen.queue, original)
+                    self.assertEqual(self.kitchen.transport, 'PAUSED_PLAYBACK')
+        self.assertEqual([name for name, _ in self.kitchen.calls if name in mutations], [])
+
+    def test_adapter_validation_finishes_before_replacing_the_queue(self):
+        class BrokenAdapter:
+            def prepare(self, uri, kind):
+                yield QueueItem('http://music.invalid/first.mp3', '')
+                raise BackendError('The rest of this album cannot be resolved')
+
+        self.backend.playback_adapters.register('broken', BrokenAdapter())
+        self.kitchen.queue = [('http://music.invalid/existing.mp3', '')]
+        with self.assertRaisesRegex(BackendError, 'cannot be resolved'):
+            self.vkitchen.state.backend.play_provider('broken:album:example', 'album')
+        self.assertEqual(self.kitchen.queue, [('http://music.invalid/existing.mp3', '')])
+        self.assertEqual(calls(self.kitchen, 'RemoveAllTracksFromQueue'), [])
+        self.assertEqual(calls(self.kitchen, 'AddURIToQueue'), [])
+
     def test_changes_made_elsewhere_arrive_as_events(self):
         self.kitchen.volume = 44
         self.kitchen.notify('RenderingControl')
@@ -181,6 +257,203 @@ class SonosHousehold(unittest.TestCase):
         self.kitchen.queue_update += 1
         self.kitchen.notify('ContentDirectory')
         self.assertTrue(wait_for(lambda: self.vkitchen.state.backend.queue_version() > version, timeout=3))
+
+    def connect_line_in(self):
+        self.kitchen.line_in_connected = True
+        self.kitchen.line_in_name = 'Turntable & CD'
+        self.backend.speaker(KITCHEN).audio_checked = False
+        self.backend.read_audio_in(self.backend.speaker(KITCHEN))
+        self.assertTrue(wait_for(lambda: len(self.backend.line_in_sources()) == 1), self.logs)
+
+    def test_line_in_discovery_tracks_the_connection_and_name(self):
+        self.connect_line_in()
+        self.assertEqual(self.backend.line_in_sources(), [
+            {'id': KITCHEN, 'name': 'Turntable & CD', 'room_name': 'Kitchen',
+             'icon': 'AudioComponent', 'uri': 'x-rincon-stream:' + KITCHEN}])
+        self.kitchen.line_in_name = 'Tape Deck'
+        self.kitchen.notify('AudioIn')
+        self.assertTrue(wait_for(lambda: self.backend.line_in_sources()[0]['name'] == 'Tape Deck'))
+        # A Browse item and a named input still exist after unplugging; GENA is authoritative.
+        self.kitchen.line_in_connected = False
+        self.kitchen.notify('AudioIn')
+        self.assertTrue(wait_for(lambda: self.backend.line_in_sources() == []))
+        self.assertTrue(sonos_upnp.read_line_in(self.kitchen.base)['name'])
+
+    def test_line_in_browsing_and_playback_translate_the_source_uuid(self):
+        self.connect_line_in()
+        uri = 'x-rincon-stream:' + self.vkitchen.config.udn
+        status, body = browse(self.vkitchen, 'AI:')
+        self.assertEqual((status, field(body, 'NumberReturned'), field(body, 'TotalMatches')), (200, '1', '1'))
+        node = sonos_upnp.parse_didl(field(body, 'Result'))[0]
+        self.assertEqual(node['res'], uri)
+        self.assertEqual(node['id'], 'AI:0')
+        self.assertEqual(node['title'], 'Turntable & CD')
+        self.assertEqual(node['class'], 'object.item.audioItem')
+        status, body = browse(self.vpatio, 'AI:')
+        self.assertEqual((status, field(body, 'TotalMatches')), (200, '0'))
+        for player in (self.vkitchen, self.vpatio):
+            status, _ = soap(player, AVT, 'AVTransport', 'SetAVTransportURI',
+                             '<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI><CurrentURIMetaData/>' % uri)
+            self.assertEqual(status, 200)
+            real = self.kitchen if player is self.vkitchen else self.patio
+            self.assertEqual(calls(real, 'SetAVTransportURI')[-1]['CurrentURI'], 'x-rincon-stream:' + KITCHEN)
+            self.backend.read(self.backend.speaker(real.uuid))
+            _, position = soap(player, AVT, 'AVTransport', 'GetPositionInfo', '<InstanceID>0</InstanceID>')
+            self.assertEqual(field(position, 'TrackURI'), uri)
+            self.assertEqual(field(position, 'RelTime'), 'NOT_IMPLEMENTED')
+            self.assertEqual(sonos_upnp.parse_didl(field(position, 'TrackMetaData'))[0]['title'], 'Turntable & CD')
+        self.assertEqual(self.vkitchen.state.event_values('AudioIn')['Playing'], '1')
+        self.assertEqual(self.vpatio.state.event_values('AudioIn')['LineInConnected'], '0')
+
+    def test_line_in_pause_key_stops_and_play_resumes_the_selected_input(self):
+        self.connect_line_in()
+        uri = 'x-rincon-stream:' + self.vkitchen.config.udn
+        status, body = soap(self.vpatio, AVT, 'AVTransport', 'SetAVTransportURI',
+                            '<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI><CurrentURIMetaData/>' % uri)
+        self.assertEqual(status, 200, body)
+        self.backend.read(self.backend.speaker(PATIO))
+        status, body = soap(self.vpatio, AVT, 'AVTransport', 'GetCurrentTransportActions', '<InstanceID>0</InstanceID>')
+        self.assertEqual(status, 200, body)
+        self.assertIn('Pause', field(body, 'Actions').split(','))
+        status, body = soap(self.vpatio, AVT, 'AVTransport', 'Pause', '<InstanceID>0</InstanceID>')
+        self.assertEqual(status, 200, body)
+        self.assertTrue(calls(self.patio, 'Stop'))
+        self.assertEqual(calls(self.patio, 'Pause'), [])
+        self.backend.read(self.backend.speaker(PATIO))
+        self.assertEqual(self.vpatio.state.backend.transport, 'STOPPED')
+        self.assertEqual(self.vpatio.state.backend.line_in_source(), KITCHEN)
+        status, body = soap(self.vpatio, AVT, 'AVTransport', 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>')
+        self.assertEqual(status, 200, body)
+        self.assertTrue(calls(self.patio, 'Play'))
+        self.assertEqual(calls(self.patio, 'RemoveAllTracksFromQueue'), [])
+
+    def test_expired_audio_in_subscription_hides_the_source_until_recovered(self):
+        self.connect_line_in()
+        subscription = self.backend.speaker(KITCHEN).audio_subscription
+        subscription.expires = time.monotonic() - 1
+        self.assertEqual(self.backend.line_in_sources(), [])
+        subscription.expires = time.monotonic() + 1800
+        self.assertEqual(len(self.backend.line_in_sources()), 1)
+
+    def test_line_in_without_track_metadata_and_playing_on_another_player(self):
+        self.connect_line_in()
+        for player, room in ((self.kitchen, self.vkitchen.state.backend),
+                             (self.patio, self.vpatio.state.backend)):
+            player.uri = 'x-rincon-stream:' + KITCHEN
+            player.transport = 'PLAYING'
+            player.track_metadata, player.track_duration, player.position = 'NOT_IMPLEMENTED', 'NOT_IMPLEMENTED', 'NOT_IMPLEMENTED'
+            player.notify('AVTransport')
+            self.assertTrue(wait_for(lambda: room.line_in_source() == KITCHEN))
+            self.assertEqual(room.track(), ('Turntable & CD', '', 'Kitchen', '', None))
+            self.assertEqual(room.position(), 0)
+            self.assertEqual(room.capabilities(), frozenset())
+            self.assertEqual(room.queue_numbers(), (1, 1))
+            room.pause()
+            self.assertEqual(player.calls[-1][0], 'Stop')
+
+    def test_select_line_in_uses_the_source_uuid_and_destination_coordinator(self):
+        self.connect_line_in()
+        self.fake.regroup(PATIO, KITCHEN)
+        self.assertTrue(wait_for(lambda: self.backend.coordinator_of(PATIO) == KITCHEN))
+        self.vpatio.state.backend.play_line_in(KITCHEN)
+        self.assertEqual(calls(self.kitchen, 'SetAVTransportURI')[-1],
+                         {'InstanceID': '0', 'CurrentURI': 'x-rincon-stream:' + KITCHEN, 'CurrentURIMetaData': ''})
+        self.assertEqual(calls(self.patio, 'SetAVTransportURI'), [])
+        self.assertEqual(calls(self.kitchen, 'AddURIToQueue'), [])
+        self.assertEqual(len(calls(self.kitchen, 'Play')), 1)
+        self.kitchen.line_in_connected = False
+        self.kitchen.notify('AudioIn')
+        self.assertTrue(wait_for(lambda: self.backend.line_in_sources() == []))
+        with self.assertRaises(sonos_backend.BackendError): self.vpatio.state.backend.play_line_in(KITCHEN)
+
+    def test_removed_input_player_is_no_longer_discovered(self):
+        self.connect_line_in()
+        self.backend.apply_topology([(PATIO, [PATIO])],
+                                    {PATIO: {'base': self.patio.base, 'name': 'Patio', 'icon': ''}})
+        self.assertEqual(self.backend.line_in_sources(), [])
+        self.assertIsNone(self.backend.speaker(KITCHEN))
+
+
+class ConnectState(unittest.TestCase):
+    """Connect keeps a session URI while GetPositionInfo changes the song."""
+
+    def setUp(self):
+        self.backend = object.__new__(sonos_backend.SonosBackend)
+        self.backend.lock, self.backend.wake = threading.RLock(), threading.Event()
+        self.backend.listeners, self.backend.log = [], lambda record: None
+        self.backend.groups = [(KITCHEN, [KITCHEN])]
+        self.backend.settings = None
+        self.speaker = sonos_backend.Speaker(KITCHEN, 'http://127.0.0.1:1400', 'Kitchen')
+        self.backend.speakers = {KITCHEN: self.speaker}
+        self.speaker.position_at = time.monotonic()
+        self.speaker.volume, self.speaker.available = 20, True
+        self.uri = 'x-sonos-vli:RINCON_SESSION:2,spotify,context-hash'
+        self.speaker.avt = {
+            'TransportState': 'PLAYING', 'AVTransportURI': self.uri,
+            'CurrentTrackURI': self.uri, 'CurrentTrack': '1', 'NumberOfTracks': '1',
+            'CurrentTrackDuration': '0:03:00', 'CurrentPlayMode': 'NORMAL',
+            'CurrentTransportActions': 'Play,Pause,Stop,Next,Previous,Seek',
+            'AVTransportURIMetaData': DIDL_OPEN + entry('context', 'Spotify', '-1',
+                'object.item.audioItem.linein') + '</DIDL-Lite>',
+            'CurrentTrackMetaData': self.metadata('First song', 'First artist', 'First album'),
+        }
+        # Exercise the real revision-aware URL mapping without starting a fetch.
+        art = ArtStore(self.backend)
+        self.backend.art = SimpleNamespace(path_for=lambda picture, *, revision=None:
+            art.path_for(picture, prefetch=False, revision=revision))
+        self.room = sonos_backend.SonosRoom(self.backend, KITCHEN)
+
+    @staticmethod
+    def metadata(title, artist, album):
+        return DIDL_OPEN + entry('-1', title, '-1', artist=artist, album=album,
+            art='/getaa?spotify=current') + '</DIDL-Lite>'
+
+    def event(self, **values):
+        change = '<Event><InstanceID val="0">%s</InstanceID></Event>' % ''.join(
+            '<%s val="%s"/>' % (key, html.escape(str(value), quote=True)) for key, value in values.items())
+        self.backend.on_avt(KITCHEN, {'LastChange': change})
+
+    def test_connect_song_metadata_wins_over_spotify_context_and_changes_art_revision(self):
+        first = self.room.track()
+        self.assertEqual(first[:3], ('First song', 'First artist', 'First album'))
+        first_values = self.room.values('VIRTUAL')
+        metadata = self.metadata('Second song', 'Second artist', 'Second album')
+        self.event(CurrentTrackMetaData=metadata)
+        second = self.room.track()
+        self.assertEqual(second[:3], ('Second song', 'Second artist', 'Second album'))
+        self.assertEqual(self.room.avt['CurrentTrackURI'], self.uri)
+        self.assertNotEqual(first[3], second[3])  # same source art URL, new song
+        second_values = self.room.values('VIRTUAL')
+        self.assertNotEqual(first_values['CurrentTrackURI'], second_values['CurrentTrackURI'])
+        self.assertIn('Second artist', second_values['CurrentTrackMetaData'])
+        self.assertNotIn('First song', second_values['CurrentTrackMetaData'])
+
+    def test_position_reconciliation_recovers_missing_track_event_without_reentry(self):
+        # A phone advances the track, but no GENA metadata event arrives.
+        metadata = self.metadata('Recovered song', 'Recovered artist', 'Recovered album')
+        response = {'Track': '1', 'TrackDuration': '0:04:00', 'TrackURI': self.uri,
+                    'TrackMetaData': metadata, 'RelTime': '0:00:12'}
+        notifications = []
+        self.backend.listeners.append(lambda key: notifications.append((key, self.room.position())))
+        with patch('sonos_backend.soap', return_value=response) as read:
+            self.backend.read_position(self.speaker)
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(self.room.track()[:3], ('Recovered song', 'Recovered artist', 'Recovered album'))
+            self.assertEqual(self.room.avt['CurrentTrackDuration'], '0:04:00')
+            self.assertEqual(len(notifications), 1)
+            self.assertEqual(notifications[0][0], KITCHEN)
+            self.assertTrue(12 <= notifications[0][1] < 13)
+            # A position-only change must not generate an endless state publish.
+            response['RelTime'] = '0:00:13'
+            self.backend.read_position(self.speaker)
+            self.assertEqual(len(notifications), 1)
+
+    def test_partial_track_transitions_coalesce_a_prompt_metadata_read(self):
+        for index in range(2, 20):
+            self.event(CurrentTrack=index)
+        self.assertEqual(len(self.speaker.refresh_at), 1)
+        self.assertLessEqual(self.speaker.refresh_at[0] - time.monotonic(), sonos_backend.REFRESH_AFTER[0])
+        self.assertTrue(self.backend.wake.is_set())
 
 
 class Protocol(unittest.TestCase):

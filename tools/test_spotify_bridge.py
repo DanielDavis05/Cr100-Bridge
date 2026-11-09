@@ -77,7 +77,7 @@ class SpotifyBridge(unittest.TestCase):
     def tearDown(self):
         self.house.close()
         self.service.close()
-        self.ha.close()
+        self.house.backends['ha'].close()
         self.fake.close()
 
     def test_search_selection_appends_without_replacing_sonos_queue(self):
@@ -155,7 +155,8 @@ class Configuration(unittest.TestCase):
             config = Path(folder) / 'bridge.json'
             settings = {'spotify_music_service': {'host': '127.0.0.1', 'port': 0,
                         'client_id': '', 'token_file': 'credentials/spotify.json'},
-                        'music_service_stub': {'host': '127.0.0.1', 'port': 0}}
+                        'music_service_stub': {'host': '127.0.0.1', 'port': 0},
+                        'speaker_settings': {'enabled': False}}
             config.write_text(json.dumps(settings))
             with patch('spotify_client.SpotifyClient') as client:
                 service = zoneplayers.load_music_service(config, '127.0.0.1', lambda r: None)

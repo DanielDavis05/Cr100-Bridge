@@ -8,8 +8,20 @@
     "token_file": "ha-token"
   },
   "rooms": [],
+  "controllers": {},
+  "radio": {
+    "enabled": true,
+    "port": 8402,
+    "state_file": "radio-state.json"
+  },
+  "alarms": {
+    "enabled": true,
+    "state_file": "alarms.sqlite3",
+    "timezone": "UTC"
+  },
   "spotify_music_service": {
     "enabled": false,
+    "autoplay": false,
     "host": "192.168.69.1",
     "port": 8400,
     "id": 240,

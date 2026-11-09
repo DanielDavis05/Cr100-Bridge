@@ -115,7 +115,14 @@ class Services(unittest.TestCase):
         dhcp = started['dhcp'][0].args
         self.assertIn('--interface=sonos0', dhcp)
         self.assertIn('--dhcp-option=3', dhcp)
-        self.assertIn('--dhcp-option=6', dhcp)
+        self.assertIn('--dhcp-option=6,192.168.69.1', dhcp)
+        self.assertIn('--listen-address=192.168.69.1', dhcp)
+        self.assertIn('--except-interface=lo', dhcp)
+        self.assertIn('--no-resolv', dhcp)
+        self.assertIn('--no-hosts', dhcp)
+        self.assertIn('--address=/update.sonos.com/update-firmware.sonos.com/system-api.sonos.com/192.168.69.1', dhcp)
+        self.assertIn('--local=/update.sonos.com/update-firmware.sonos.com/system-api.sonos.com/', dhcp)
+        self.assertNotIn('--port=0', dhcp)
         self.assertNotIn('--seconds', started['link'][0].args)
         self.assertTrue(all(p.terminated for group in started.values() for p in group))   # stopped on the way out
 
@@ -132,6 +139,7 @@ class Services(unittest.TestCase):
 
     def pair_attempt(self, output):
         def spawn(args, **kwargs):
+            self.pair_command = args
             if output is not None:
                 Path(args[args.index('--state') + 1]).write_text(json.dumps(output))
             return Process(args, 0)
@@ -142,13 +150,56 @@ class Services(unittest.TestCase):
             service.pair(self.state, self.run)
         return command
 
-    def test_successful_pair_atomically_replaces_state_with_private_permissions(self):
-        changed = {**STATE, 'household': 'Sonos_new', 'network_key': '02' * 16}
+    def test_successful_pair_atomically_adds_controller_with_private_permissions(self):
+        changed = {**STATE, 'cr100_mac': '02:00:00:00:00:03', 'txid': 5, 'time': 10}
         command = self.pair_attempt(changed)
-        self.assertEqual(json.loads(self.state.read_text()), changed)
+        saved = json.loads(self.state.read_text())
+        self.assertEqual(saved['cr100_mac'], STATE['cr100_mac'])
+        self.assertEqual(saved['network_key'], STATE['network_key'])
+        self.assertEqual(saved['controllers'], [{'mac': STATE['cr100_mac'], 'aid': 1},
+                         {'mac': changed['cr100_mac'], 'aid': 2, 'txid': 5, 'time': 10}])
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.pair_command[self.pair_command.index('--previous-state') + 1], str(self.state))
         command.assert_any_call(['systemctl', '--no-block', 'start', 'cr100-bridge.service'], check=True)
         self.assertFalse(list(self.folder.glob('.pair-*')))
+
+    def test_repair_keeps_existing_controller_and_household_metadata(self):
+        previous = {**STATE, 'custom': 'household', 'controllers': [
+            {'mac': STATE['cr100_mac'], 'aid': 8, 'time': 1, 'custom': 'controller'},
+            {'mac': '02:00:00:00:00:03', 'aid': 2}]}
+        self.state.write_text(json.dumps(previous))
+        self.pair_attempt({**STATE, 'txid': 9, 'time': 20})
+        saved = json.loads(self.state.read_text())
+        self.assertEqual(saved['custom'], 'household')
+        self.assertEqual(saved['controllers'], [
+            {'mac': STATE['cr100_mac'], 'aid': 8, 'time': 20, 'txid': 9, 'custom': 'controller'},
+            {'mac': '02:00:00:00:00:03', 'aid': 2}])
+
+    def test_pairing_cannot_replace_existing_household_credentials(self):
+        for field, value in (('household', 'Sonos_changed'), ('network_key', '02' * 16),
+                             ('bssid', '02:00:00:00:00:03'), ('freq', 2412)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'cannot change'):
+                self.pair_attempt({**STATE, field: value})
+            self.assertEqual(json.loads(self.state.read_text()), STATE)
+
+    def test_first_pair_creates_canonical_controller_state(self):
+        self.state.unlink()
+        self.pair_attempt(STATE)
+        saved = json.loads(self.state.read_text())
+        self.assertEqual(saved['controllers'], [{'mac': STATE['cr100_mac'], 'aid': 1}])
+
+    def test_validate_state_accepts_multiple_without_legacy_alias(self):
+        state = {key: value for key, value in STATE.items() if key != 'cr100_mac'}
+        state['controllers'] = [{'mac': STATE['cr100_mac'], 'aid': 5}, {'mac': '02:00:00:00:00:03'}]
+        self.state.write_text(json.dumps(state))
+        self.assertEqual([c['aid'] for c in service.validate_state(self.state)['controllers']], [5, 1])
+
+    def test_pairing_retains_channel_and_bssid_from_the_current_household(self):
+        previous = {**STATE, 'freq': 2462}
+        self.state.write_text(json.dumps(previous))
+        self.pair_attempt(previous)
+        self.assertEqual(self.pair_command[self.pair_command.index('--freq') + 1], '2462')
+        self.assertEqual(self.pair_command[self.pair_command.index('--mac') + 1], STATE['bssid'])
 
     def test_pair_timeout_preserves_and_restarts_previous_pairing(self):
         with self.assertRaisesRegex(RuntimeError, 'No CR100 responded'): self.pair_attempt(None)

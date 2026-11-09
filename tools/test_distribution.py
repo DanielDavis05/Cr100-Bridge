@@ -21,11 +21,61 @@ class Distribution(unittest.TestCase):
         self.assertIn('tools/zp80/fixtures/synthetic_public_key.bin', selected)
         self.assertIn('tools/zp80/fixtures/xml/device_description.xml', selected)
         self.assertIn('tools/webui/app.js', selected)
+        self.assertIn('tools/spotify_connect.py', selected)
+        self.assertIn('tools/spotify_autoplay.py', selected)
+        self.assertIn('tools/nexmon_power.py', selected)
+        self.assertIn('tools/nexmon_clock.py', selected)
+        self.assertTrue({'tools/online_updates.py', 'tools/update_service.py',
+                         'tools/update_transport.py', 'docs/ONLINE-UPDATES.md'} <= selected)
+        self.assertIn('firmware/nexmon-ownership/apply.py', selected)
+        self.assertIn('firmware/nexmon-ownership/status.py', selected)
+        self.assertIn('firmware/nexmon-ownership/manifest.json', selected)
+        self.assertTrue({'firmware/nexmon-ownership/tsf_query.c',
+                         'firmware/nexmon-ownership/tsf_query.h'} <= selected)
+        self.assertTrue({'firmware/nexmon-ownership/shm_query.c',
+                         'firmware/nexmon-ownership/shm_query.h',
+                         'firmware/nexmon-ownership/beacon_stamp.c',
+                         'firmware/nexmon-ownership/beacon_stamp.h',
+                         'firmware/nexmon-ownership/test_beacon_stamp.c',
+                         'firmware/nexmon-ownership/test_shm_query.c'} <= selected)
+        self.assertFalse(any(p.startswith('firmware/nexmon-ownership/build/') or
+                             (p.startswith('firmware/') and p.endswith('.bin')) for p in selected))
+        example = json.loads((distribution.ROOT / 'config/bridge-config.example.json').read_text())
+        self.assertIs(example['spotify_music_service']['autoplay'], False)
         private_state = distribution.ROOT / 'bridge-state.json'
         if private_state.exists():
             private_key = json.loads(private_state.read_text())['network_key'].encode()
             for path in distribution.files():
-                self.assertNotIn(private_key, path.read_bytes(), str(path.relative_to(distribution.ROOT)))
+                if private_key in path.read_bytes():
+                    self.fail('Private pairing material in distribution: ' +
+                              str(path.relative_to(distribution.ROOT)))
+
+    def test_packaged_radio_power_helper_reads_the_bundled_transport(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'app'
+            distribution.copy(root)
+            # Exercise the lazy status.py dependency from the packaged tree;
+            # replace the radio socket so this test never accesses hardware.
+            script = f'import sys; sys.path.insert(0, {str(root / "tools")!r})\n' + '''
+import socket
+import struct
+from unittest.mock import Mock, patch
+import nexmon_power
+control = Mock()
+control.__enter__ = Mock(return_value=control)
+control.__exit__ = Mock(return_value=False)
+control.getsockname.return_value = (1234, 0)
+payload = b'NEX\\0' + struct.pack('<III', 0, 262, 0) + bytes(32)
+control.sendto.side_effect = lambda packet, destination: len(packet)
+control.recvfrom.return_value = (struct.pack('<IHHII', 16 + len(payload), 3, 0, 0, 0) + payload, (0, 0))
+with patch.object(socket, 'socket', return_value=control) as factory:
+    assert nexmon_power.disable_mpc(getter=nexmon_power._read_mpc) == 0
+factory.assert_called_once_with(16, socket.SOCK_RAW, 31)
+packet, destination = control.sendto.call_args.args
+assert destination == (0, 0)
+assert packet[16:] == b'NEX\\0' + struct.pack('<III', 0, 262, 0) + b'mpc\\0'.ljust(32, b'\\0')
+'''
+            subprocess.run([sys.executable, '-I', '-c', script], check=True)
 
     def test_isolated_first_boot_http_setup_and_empty_controller_list(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -36,7 +86,8 @@ class Distribution(unittest.TestCase):
             # Import the shipped player, including its fixtures, in a clean interpreter.
             subprocess.run([sys.executable, '-I', '-c',
                             f'import sys; sys.path.insert(0, {str(root / "tools")!r}); '
-                            'import zoneplayers; zp=zoneplayers.load_peer_module(zoneplayers.DEFAULT_PEER_DIR); '
+                            'import zoneplayers, online_updates, update_transport, update_service, nexmon_clock; '
+                            'zp=zoneplayers.load_peer_module(zoneplayers.DEFAULT_PEER_DIR); '
                             'state=zp.PeerState(zp.Config()); assert state.services'], check=True)
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', 0))

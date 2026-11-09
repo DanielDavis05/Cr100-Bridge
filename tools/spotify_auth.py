@@ -28,6 +28,7 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
+from music_service_registry import provider_settings
 from spotify_client import SpotifyError, _json_request, read_token_file, save_token_response
 
 AUTHORIZE_ENDPOINT = 'https://accounts.spotify.com/authorize'
@@ -176,7 +177,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.config.exists():
-            settings = json.loads(args.config.read_text()).get('spotify_music_service', {})
+            settings = provider_settings(json.loads(args.config.read_text()), 'spotify')
         else:
             settings = {}
         client_id = args.client_id or settings.get('client_id', '')

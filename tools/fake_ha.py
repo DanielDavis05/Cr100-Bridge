@@ -54,10 +54,22 @@ class FakeHA:
         self.browses = []              # (content_id, content_type) asked for
         self.queues = {}               # entity -> [queue item]
         self.platforms = {}            # entity -> integration for the entity registry (default sonos)
+        self.config_entries = {}       # entity -> HA integration instance / grouping scope
+        self.registry_entries = {}     # optional realistic registry identity overrides
+        self.service_requests = []     # includes read-only actions and their domains
+        self.devices = []              # Sonos device registry (empty unless a test supplies one)
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
-        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        self.closing = False
+        self.thread = threading.Thread(target=self.run_loop, daemon=True)
+        self.thread.start()
         asyncio.run_coroutine_threadsafe(self.serve(), self.loop).result(5)
+
+    def run_loop(self):
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
 
     @property
     def url(self):
@@ -68,10 +80,20 @@ class FakeHA:
         self.port = self.server.sockets[0].getsockname()[1]
 
     def close(self):
+        if self.closing:
+            if threading.current_thread() is not self.thread: self.thread.join(3)
+            return
+        self.closing = True
         async def stop():
-            self.server.close(); await self.server.wait_closed()
-        asyncio.run_coroutine_threadsafe(stop(), self.loop).result(5)
-        self.loop.call_soon_threadsafe(self.loop.stop)
+            try:
+                self.server.close(); await self.server.wait_closed()
+            finally:
+                self.loop.call_soon(self.loop.stop)
+        if threading.current_thread() is self.thread:
+            self.loop.create_task(stop())
+            return
+        try: asyncio.run_coroutine_threadsafe(stop(), self.loop).result(5)
+        finally: self.thread.join(3)
 
     def http(self, connection, request):
         if request.path == '/api/websocket': return None
@@ -100,7 +122,11 @@ class FakeHA:
                     await self.result(ws, message_id, list(self.states.values()))
                 elif kind == 'config/entity_registry/list':
                     await self.result(ws, message_id, [
-                        {'entity_id': e, 'platform': self.platforms.get(e, 'sonos')} for e in self.states])
+                        {'entity_id': e, 'platform': self.platforms.get(e, 'sonos'),
+                         'config_entry_id': self.config_entries.get(e, self.platforms.get(e, 'sonos') + '-test-entry'),
+                         'device_id': 'fake-' + e, **self.registry_entries.get(e, {})} for e in self.states])
+                elif kind == 'config/device_registry/list':
+                    await self.result(ws, message_id, self.devices)
                 elif kind == 'media_player/browse_media':
                     key = (message.get('media_content_id', ''), message.get('media_content_type', ''))
                     self.browses.append(key)
@@ -113,6 +139,12 @@ class FakeHA:
                             {k: v for k, v in child.items() if k != 'children'} for child in node['children'] or []]})
                 elif kind == 'call_service':
                     entity_id = message['target']['entity_id']
+                    self.service_requests.append((message['domain'], message['service'], entity_id,
+                                                  copy.deepcopy(message['service_data'])))
+                    if message['domain'] == 'sonos' and self.platforms.get(entity_id, 'sonos') != 'sonos':
+                        await ws.send(json.dumps({'id': message_id, 'type': 'result', 'success': False,
+                                                  'error': {'code': 'unsupported', 'message': 'Not a Sonos player'}}))
+                        continue
                     if message['service'] == 'get_queue':   # read-only: not recorded as a call
                         await self.result(ws, message_id, {'context': {}, 'response': {
                             entity_id: copy.deepcopy(self.queues.get(entity_id, []))}})
@@ -151,6 +183,15 @@ class FakeHA:
             for member in remaining: await self.change(member, group_members=remaining)
             await self.change(entity_id, group_members=[entity_id])
         elif service == 'play_media':
+            if data['media_content_id'].startswith('x-rincon-stream:'):
+                # Model HA Sonos: a request targeting a member acts on its
+                # coordinator, whose media state is shared by the whole group.
+                for member in attributes.get('group_members') or [entity_id]:
+                    if member in self.states:
+                        await self.change(member, 'playing', media_content_id=data['media_content_id'],
+                                          media_title='Line-in', source='Line-in', queue_position=None,
+                                          media_position=None, media_duration=None)
+                return
             queue = self.queues.setdefault(entity_id, [])
             item = {'media_title': data['media_content_id'], 'media_content_id': data['media_content_id']}
             position = int(attributes.get('queue_position') or 0)

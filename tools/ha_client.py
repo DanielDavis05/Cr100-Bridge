@@ -35,26 +35,47 @@ class HomeAssistant:
         self.pending = {}
         self.ws = None
         self.closing = False
+        self.close_lock = threading.Lock()
         self.subscription = None
-        self.thread = threading.Thread(target=self.loop.run_forever, name='ha-client', daemon=True)
+        self.thread = threading.Thread(target=self.run_loop, name='ha-client', daemon=True)
 
     # --- lifecycle --------------------------------------------------------------
-    def start(self):
-        self.thread.start()
+    def run_loop(self):
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
 
+    def start(self):
         async def begin(): self.runner = asyncio.create_task(self.run())
-        asyncio.run_coroutine_threadsafe(begin(), self.loop).result(5)
+        with self.close_lock:
+            if self.closing: raise RuntimeError('Home Assistant client is closed')
+            self.thread.start()
+            asyncio.run_coroutine_threadsafe(begin(), self.loop).result(5)
 
     def close(self):
-        self.closing = True
+        with self.close_lock:
+            first_close = not self.closing
+            self.closing = True
+            if self.thread.ident is None:
+                self.loop.close()
+                return
 
         async def finish():
-            self.runner.cancel()
-            try: await self.runner
-            except BaseException: pass
-        try: asyncio.run_coroutine_threadsafe(finish(), self.loop).result(5)
+            try:
+                self.runner.cancel()
+                try: await self.runner
+                except BaseException: pass
+            finally:
+                self.loop.call_soon(self.loop.stop)
+
+        if threading.current_thread() is self.thread:
+            if first_close: self.loop.create_task(finish())
+            return
+        try:
+            if first_close and self.thread.is_alive():
+                asyncio.run_coroutine_threadsafe(finish(), self.loop).result(5)
         finally:
-            self.loop.call_soon_threadsafe(self.loop.stop)
             self.thread.join(3)
 
     async def run(self):
@@ -69,10 +90,12 @@ class HomeAssistant:
             except Exception as error:
                 self.log({'event': 'ha-disconnected', 'error': repr(error)})
             finally:
+                was_connected = self.connected.is_set()
                 self.connected.clear(); self.ws = None
                 for future in self.pending.values():
                     if not future.done(): future.set_exception(HAError('Connection lost'))
                 self.pending.clear()
+                if was_connected: self.notify_cached_states()
             await asyncio.sleep(delay)
 
     async def session(self):
@@ -93,10 +116,12 @@ class HomeAssistant:
                     if self.states.get(entity_id) != states.get(entity_id):
                         self.update(entity_id, states.get(entity_id))
                 self.connected.set()
+                self.notify_cached_states()
                 self.log({'event': 'ha-connected', 'version': reply.get('ha_version'), 'entities': len(states)})
                 await reader
             finally:
                 reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
 
     async def read(self, ws):
         async for raw in ws:
@@ -113,6 +138,18 @@ class HomeAssistant:
     def update(self, entity_id, state):
         if state is None: self.states.pop(entity_id, None)
         else: self.states[entity_id] = state
+        self.notify(entity_id, state)
+
+    def notify_cached_states(self):
+        """Connection changes alter capabilities even when entity states match.
+
+        Keep the last snapshot for About and playback metadata while notifying
+        listeners after the connection flag and pending calls are up to date.
+        """
+        for entity_id, state in list(self.states.items()):
+            self.notify(entity_id, state)
+
+    def notify(self, entity_id, state):
         for listener in list(self.listeners):
             try: listener(entity_id, state)
             except Exception as error: self.log({'event': 'ha-listener-error', 'error': repr(error)})

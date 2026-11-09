@@ -18,6 +18,8 @@ import zoneplayers
 from fake_ha import media
 from ha_client import HomeAssistant
 from test_ha_backend import AVT, Events, field, playing_kitchen, wait_for
+from test_ha_linein import HA as RegistryHA, Listener as InputListener, Inventory as IdentityInventory
+from ha_linein import SonosLineIn
 from test_zoneplayers import HOUSEHOLD, soap, zp
 
 CD = '/MediaServer/ContentDirectory/Control'
@@ -80,11 +82,56 @@ class Content(unittest.TestCase):
     def tearDown(self):
         self.events.close()
         self.house.close()
-        self.ha.close()
+        self.house.backends['ha'].close()
         self.fake.close()
 
     def play_calls(self):
         return [data for service, _, data in self.fake.calls if service == 'play_media']
+
+    def test_line_in_source_browse_and_remote_playback_keep_the_destination_queue(self):
+        entity, uuid = 'media_player.kitchen', 'RINCON_000E5800000101400'
+        backend = self.house.backends['ha']
+        backend.line_in.close()
+        backend.line_in = SonosLineIn(self.ha, backend.line_in_changed, self.logs.append,
+                                     listener=InputListener(),
+                                     reader=lambda base, timeout: {'name': 'Audio Component'},
+                                     inventory=IdentityInventory())
+        registry = RegistryHA()
+        with patch.object(self.ha, 'call', side_effect=registry.call):
+            self.assertTrue(backend.line_in.refresh())
+        self.fake.queues['media_player.patio'] = [{'media_content_id': TRACK, 'media_title': 'Saved queue track'}]
+        returned, total, entries = browse(self.kitchen, 'AI:')
+        self.assertEqual((returned, total, title(entries[0])), (1, 1, 'Turntable'))
+        self.assertEqual(res(entries[0]), 'x-rincon-stream:' + self.kitchen.config.udn)
+        self.assertEqual(browse(self.patio, 'AI:')[:2], (0, 0))
+        status, body = soap(self.patio, AVT, 'AVTransport', 'SetAVTransportURI',
+                           '<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI>'
+                           '<CurrentURIMetaData></CurrentURIMetaData>' % res(entries[0]))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.play_calls()[-1], {'media_content_id': 'x-rincon-stream:' + uuid,
+                                                 'media_content_type': 'music'})
+        self.assertEqual(len(self.fake.queues['media_player.patio']), 1)
+        self.assertTrue(wait_for(lambda: self.patio.state.backend.line_in_source() == entity))
+        _, body = soap(self.patio, AVT, 'AVTransport', 'GetMediaInfo', '<InstanceID>0</InstanceID>')
+        self.assertEqual(field(body, 'CurrentURI'), 'x-rincon-stream:' + self.kitchen.config.udn)
+        _, body = soap(self.patio, AVT, 'AVTransport', 'GetPositionInfo', '<InstanceID>0</InstanceID>')
+        self.assertEqual(title(ET.fromstring(field(body, 'TrackMetaData'))[0]), 'Turntable')
+        self.assertEqual(field(body, 'RelTime'), 'NOT_IMPLEMENTED')
+        # The bridge sends the requested member to HA. HA's Sonos integration
+        # owns coordinator routing; the fake models its shared group media state.
+        members = ['media_player.patio', entity]
+        self.fake.set(entity, group_members=members)
+        self.fake.set('media_player.patio', 'paused', group_members=members)
+        self.assertTrue(wait_for(lambda: self.house.coordinator[self.kitchen.config.udn] == self.patio.config.udn))
+        before = len(self.fake.calls)
+        status, body = soap(self.kitchen, AVT, 'AVTransport', 'SetAVTransportURI',
+                           '<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI>'
+                           '<CurrentURIMetaData></CurrentURIMetaData>' % res(entries[0]))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.fake.calls[before][1], entity)
+        self.assertTrue(wait_for(lambda: all(self.ha.state(member).get('state') == 'playing' for member in members)))
+        self.assertTrue(all(self.ha.state(member)['attributes']['media_content_id'] == 'x-rincon-stream:' + uuid
+                            for member in members))
 
     def test_library_containers_and_tracks(self):
         returned, total, entries = browse(self.kitchen, 'A:ALBUM', 'BrowseMetadata')

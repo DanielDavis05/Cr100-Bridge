@@ -31,7 +31,8 @@ def soap(player, path, service, action, args=''):
 
 def groups(topology_xml):
     root = ET.fromstring(topology_xml)
-    return sorted(sorted(m.get('ZoneName') for m in g) for g in root.iter('ZoneGroup'))
+    visible = [[m.get('ZoneName') for m in g if m.get('Invisible') != '1'] for g in root.iter('ZoneGroup')]
+    return sorted(sorted(members) for members in visible if members)
 
 
 class Household(unittest.TestCase):

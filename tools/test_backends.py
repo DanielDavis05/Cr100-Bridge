@@ -93,6 +93,10 @@ class MemoryRoom(backends.Room):
         for key in members: self.backend.groups[key] = members
         self.record('join', member.key)
 
+    def unjoin(self):
+        self.backend.groups[self.key] = [self.key]
+        self.record('unjoin')
+
 
 class MemoryHousehold(unittest.TestCase):
     def setUp(self):
@@ -116,7 +120,7 @@ class MemoryHousehold(unittest.TestCase):
         status, _ = soap(self.den, AVT, 'AVTransport', 'Previous', '<InstanceID>0</InstanceID>')
         self.assertEqual(status, 500)
         _, body = soap(self.den, AVT, 'AVTransport', 'GetCurrentTransportActions', '<InstanceID>0</InstanceID>')
-        self.assertEqual(field(body, 'Actions'), 'Play,Stop,Pause,Next')
+        self.assertEqual(field(body, 'Actions'), 'Play,Pause')
         soap(self.den, RC, 'RenderingControl', 'SetVolume',
              '<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>55</DesiredVolume>')
         self.assertTrue(wait_for(lambda: ('den', 'volume', 55) in self.one.calls))

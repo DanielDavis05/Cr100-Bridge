@@ -167,6 +167,7 @@ class Controllers(Fixture):
         [c] = result['controllers']
         self.assertEqual((c['status'], c['ip'], c['name']), ('connected', '192.168.69.52', 'Controller'))
         self.assertEqual((result['channel'], result['household']), (6, HOUSEHOLD))
+        self.assertTrue(result['multi_controller'])
         self.assertEqual([e['event'] for e in c['events']], ['associated', 'cr100-searching', 'link-heard'])
         self.assertAlmostEqual(c['events'][0]['time'], time.time() - 50, delta=2)
 
@@ -188,6 +189,40 @@ class Controllers(Fixture):
         self.assertEqual(names, ['Kitchen remote', 'Controller 2'])
         with self.assertRaises(webui.ApiError):
             self.bridge.rename_controller('00:0e:58:99:99:99', 'Nobody')
+
+    def test_controller_status_and_events_are_independent(self):
+        other = '00:0e:58:11:22:33'
+        wall = time.time()
+        write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437,
+                                        'controllers': [{'mac': CR}, {'mac': other}]})
+        # An old unaddressed station event cannot be attributed with several
+        # controllers; a radio-wide outage belongs to both controllers.
+        lines = [{'t': 1, 'event': 'associated'},
+                 {'t': 2, 'event': 'resumed', 'mac': other.upper()},
+                 {'t': 3, 'event': 'radio-reopened'}]
+        lines += [{'t': 10 + n, 'event': 'associated', 'mac': CR} for n in range(15)]
+        lines.append({'t': 100, 'event': 'stats', 'wall': wall, 'stations': [
+            {'mac': CR, 'associated': True, 'searching': False, 'dozing': False, 'last_heard_s': 1},
+            {'mac': other, 'associated': False, 'searching': False, 'dozing': False, 'last_heard_s': 300}]})
+        write(self.run_dir / 'link.jsonl', '\n'.join(json.dumps(line) for line in lines) + '\n')
+        write(self.run_dir / 'leases', '0 %s 192.168.69.50 * *\n0 %s 192.168.69.51 * *\n' % (CR, other))
+        result = self.bridge.controllers()
+        first, second = result['controllers']
+        self.assertTrue(result['multi_controller'])
+        self.assertEqual((first['status'], first['ip']), ('connected', '192.168.69.50'))
+        self.assertEqual((second['status'], second['ip']), ('away', '192.168.69.51'))
+        self.assertEqual(len(first['events']), 12)
+        self.assertTrue(all(event.get('mac') == CR for event in first['events']))
+        self.assertEqual([event['event'] for event in second['events']], ['resumed', 'radio-reopened'])
+        self.assertEqual(second['events'][0]['mac'], other)
+
+    def test_single_controller_list_keeps_legacy_unaddressed_events(self):
+        write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437,
+                                        'controllers': [{'mac': CR}]})
+        self.link_log(time.time(), last_heard_s=1)
+        [controller] = self.bridge.controllers()['controllers']
+        self.assertEqual([event['event'] for event in controller['events']],
+                         ['associated', 'cr100-searching', 'link-heard'])
 
     def test_cr100_status_parsing(self):
         self.assertEqual(webui.parse_uptime('  3:44pm  up  2:12, load average: 0.07'), 2 * 3600 + 12 * 60)
@@ -299,6 +334,7 @@ class SpeakerSource(Fixture):
                                        'library': 'sonos:' + self.BEDROOM})
         config = self.saved()
         self.assertEqual(config['rooms'], [{'backend': 'sonos', 'id': self.BEDROOM, 'name': 'Den',
+                                            'last_known_name': 'Bedroom',
                                             'slot': config['player_slots']['sonos:' + self.BEDROOM]}])
         self.assertEqual(config['music_menu'], {'library': {'backend': 'sonos', 'id': self.BEDROOM}})
         with self.assertRaises(webui.ApiError):   # a Home Assistant speaker is not on offer now

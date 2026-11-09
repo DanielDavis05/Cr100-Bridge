@@ -13,7 +13,6 @@ __pycache__/
 /spotify-token.json
 /t4-decrypted.jsonl
 /STATIC-FINDINGS-4.3.2.md
-/RESEARCH.md
 /MUSIC-SERVICES.md
 /SPOTIFY-SETUP.md
 .impeccable/
@@ -25,3 +24,4 @@ __pycache__/
 /tools/t2_run.sh
 /tools/bridge_run.sh
 /tools/bridge_stop.sh
+bridge-config.json.lock

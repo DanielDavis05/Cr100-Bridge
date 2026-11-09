@@ -1,5 +1,5 @@
 [Unit]
-Description=Pair one CR100 controller
+Description=Add a CR100 controller to the bridge household
 Requires=cr100-radio.service
 After=cr100-radio.service
 

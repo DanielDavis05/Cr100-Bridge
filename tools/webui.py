@@ -9,8 +9,8 @@ SIGHUP to zoneplayers.py, which restarts the virtual players in place. The radio
 costs the CR100 a drop. Controller status comes from the link's log (the 'stations' in
 its stats lines), the DHCP leases, and each CR100's own /status pages.
 
-Built for several controllers: the state file may list them under "controllers"
-(today the link and pairing handle one, "cr100_mac").
+Paired controllers are listed under "controllers" in the state file; older
+single-controller state using "cr100_mac" remains readable.
 
 Speaker source: the controller's rooms come from Home Assistant or straight from Sonos
 players (config "backend", see backends.py). Switching keeps the other source's rooms aside
@@ -41,6 +41,13 @@ import urllib.request
 from pathlib import Path
 
 import room_icons
+from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME, MAX_SLOTS,
+                           apply_rooms, reconcile_sonos_rooms, room_for, room_key,
+                           room_key_ref, update_config_file, write_json)
+from controller_state import controller_records
+from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
+                                   visible_components)
+from music_service_registry import provider_settings
 
 _HERE = Path(__file__).resolve().parent
 STATIC_DIR = _HERE / 'webui'
@@ -48,13 +55,12 @@ STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=
                 '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
                 '.ico': 'image/x-icon'}
 CR100_NETWORK = ipaddress.ip_network('192.168.69.0/24')   # sonos0: never serve the controllers' side
-MAX_SLOTS = 38                 # zoneplayers.MAX_SLOTS (player addresses .11-.48)
-MAX_ROOM_NAME = 30
 MIN_PASSWORD = 8
 PBKDF2_ROUNDS = 300_000
 SESSION_SECONDS = 30 * 24 * 3600
 SESSION_COOKIE = 'bridge_session'
 BODY_LIMIT = 64 * 1024
+FIRMWARE_BODY_LIMIT = 16 * 1024 * 1024
 LINK_FRESH = 30                # s: a stats line older than this means the radio link is not running
 CONNECTED_WITHIN = 20          # s since the CR100 was last heard
 AWAY_AFTER = 120               # s searching or silent: asleep (standby) or out of range
@@ -63,35 +69,11 @@ STATUS_TIMEOUT = 3
 HA_TEST_WAIT = 8
 SONOS_FRESH = 10               # s a read of the Sonos household is reused
 SOURCES = {'ha': 'Home Assistant', 'sonos': 'Sonos'}
-LIBRARY_KEYS = ('library', 'library_entity')   # music_menu keys naming where the Music menu is read
 MAX_HOSTS = 16
 SPOTIFY_SIGN_IN_TTL = 900
 LINK_EVENTS = ('associated', 'resumed', 'cr100-searching', 'link-heard', 'link-silent', 'radio-lost',
                'radio-reopened', 'disassoc', 'deauth')
 FREQ_CHANNEL = {2412: 1, 2437: 6, 2462: 11}
-
-
-class ApiError(Exception):
-    def __init__(self, status, message):
-        super().__init__(message)
-        self.status, self.message = status, message
-
-
-def write_json(path, value, mode=None):
-    """Atomically replace a JSON file, keeping its mode (or the given one)."""
-    path = Path(path)
-    mode = mode if mode is not None else (path.stat().st_mode & 0o777 if path.exists() else 0o644)
-    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
-    try:
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
-            os.fchmod(target.fileno(), mode)
-            json.dump(value, target, indent=1)
-            target.write('\n')
-        os.replace(temporary, path)
-    except BaseException:
-        try: os.unlink(temporary)
-        except OSError: pass
-        raise
 
 
 def write_secret(path, text):
@@ -168,7 +150,8 @@ class DataFile:
 # --- the bridge --------------------------------------------------------------------
 class Bridge:
     def __init__(self, config_path, state_path, run_dir, players_pid, data, log=print, ha_factory=None,
-                 token_exchange=None, profile_fetch=None, managed=False):
+                 token_exchange=None, profile_fetch=None, managed=False, spotify_factory=None,
+                 folder_factory=None):
         self.config_path, self.state_path = Path(config_path), Path(state_path)
         self.run_dir = Path(run_dir) if run_dir else None
         self.players_pid, self.data, self.log = Path(players_pid), data, log
@@ -180,6 +163,14 @@ class Bridge:
         self.sonos_cache, self.sonos_lock = (0, None), threading.Lock()
         self.details, self.known_ips = {}, {}
         self.spotify_pending = None
+        self.spotify_folder_pending = None
+        self.spotify_factory = spotify_factory
+        self.folder_factory = folder_factory
+        self.spotify_resource_lock = threading.RLock()
+        self.spotify_resources_cache = None
+        self._radio_management = None
+        self._alarm_management = None
+        self._online_update_management = None
         self.stop = threading.Event()
         self.managed = managed
 
@@ -187,12 +178,67 @@ class Bridge:
     def config(self):
         return json.loads(self.config_path.read_text())
 
+    def alarms(self):
+        if self._alarm_management is None:
+            from alarms import AlarmService, AlarmProviderRegistry
+            from alarm_runtime import make_radio_alarm_provider
+            from radio_management import state_paths
+            from radio_store import RadioStore
+            from radio_catalog import RadioCatalog
+            path, alarm_path = state_paths(self.config_path)
+            store = RadioStore(path)
+            provider = make_radio_alarm_provider(RadioCatalog(store=store), store)
+            registry = AlarmProviderRegistry(); registry.register('radio', provider)
+            self._alarm_management = AlarmService(alarm_path, providers=registry, log=self.log,
+                                                  timezone=(self.config().get('alarms') or {}).get('timezone', 'UTC'))
+        return self._alarm_management
+
+    def radio(self):
+        if self._radio_management is None:
+            from radio_management import RadioManagement
+            self._radio_management = RadioManagement(self.config_path, alarms=self.alarms())
+        return self._radio_management
+
+    def radio_request(self, command=None, body=None):
+        from radiotime import RadioTimeError
+        try:
+            return self.radio().command(command, body or {}) if command else self.radio().snapshot()
+        except RadioTimeError as error:
+            raise ApiError(error.status if isinstance(error.status, int) else 502, str(error)) from error
+        except (ValueError, KeyError) as error:
+            raise ApiError(400, str(error)) from error
+
+    def alarm_request(self, command='list', body=None):
+        from alarms import AlarmError
+        body = body or {}
+        try:
+            service = self.alarms()
+            if command == 'list':
+                from zoneplayers import player_mac
+                configured = {room_key(room): int(room.get('slot', index))
+                              for index, room in enumerate(self.config().get('rooms', []))}
+                rooms = []
+                for room in self.speakers().get('speakers', []):
+                    if not room['shown'] or room.get('simulated'): continue
+                    slot = configured.get(room['key'])
+                    rooms.append({**room, 'udn': 'RINCON_' + player_mac(slot).replace(':', '').upper() + '01400'
+                                  if slot is not None else ''})
+                return {**service.snapshot(), 'sources': service.sources(),
+                        'rooms': rooms}
+            if command == 'save': return {'alarm': service.save(body, expected_revision=body.get('revision'))}
+            if command == 'delete': service.delete(body.get('id')); return {'deleted': True}
+            if command in ('snooze', 'stop', 'test'):
+                return service.command(command, room=body.get('room'), alarm_id=body.get('id'),
+                                       run_id=body.get('run_id'), request_id=body.get('request_id'))
+            raise ValueError('Unknown alarm operation')
+        except AlarmError as error:
+            raise ApiError(409 if error.code == 409 else 400, str(error)) from error
+        except (ValueError, KeyError) as error:
+            raise ApiError(400, str(error)) from error
+
     def update_config(self, change):
         with self.config_lock:
-            config = self.config()
-            change(config)
-            write_json(self.config_path, config)
-            return config
+            return update_config_file(self.config_path, change)
 
     def reload_players(self):
         """SIGHUP zoneplayers.py: it restarts in place with the new config (not the radio)."""
@@ -211,7 +257,14 @@ class Bridge:
 
     def close(self):
         self.stop.set()
+        if self._alarm_management is not None:
+            self._alarm_management.close()
+            self._alarm_management = None
         if self.ha: self.ha.close()
+        with self.spotify_resource_lock:
+            if self.spotify_resources_cache:
+                self.spotify_resources_cache[2].close()
+                self.spotify_resources_cache = None
 
     # Home Assistant --------------------------------------------------------------
     def ha_settings(self):
@@ -315,7 +368,8 @@ class Bridge:
     def source_status(self):
         source = self.source()
         return {'source': source, 'sources': [{'name': n, 'label': l} for n, l in SOURCES.items()],
-                'home_assistant': self.home_assistant(), 'sonos': self.sonos()}
+                'home_assistant': self.home_assistant(), 'sonos': self.sonos(),
+                'speaker_health': self.speaker_health()}
 
     def switch_source(self, source):
         """Take the controller's rooms from another source. The current source's rooms and Music
@@ -371,7 +425,8 @@ class Bridge:
             if hosts is None and not fresh and cached is not None and time.monotonic() - cached_at < SONOS_FRESH:
                 return cached
             try:
-                _, groups, zones = sonos_upnp.household(self.sonos_hosts() if hosts is None else hosts, STATUS_TIMEOUT)
+                _, groups, zones = sonos_upnp.household(self.sonos_hosts() if hosts is None else hosts,
+                                                       STATUS_TIMEOUT, discover_fallback=hosts is None)
             except sonos_upnp.UPnPFault as error:
                 result = {'error': 'No Sonos speakers answered (%s). Check that the bridge is on their network, '
                                    'or add a speaker\'s address.' % error, 'zones': []}
@@ -415,6 +470,63 @@ class Bridge:
         return {'applied': False, 'message': 'Saved. Sonos is used once you choose it as the speaker source.'}
 
     # speakers --------------------------------------------------------------------
+    def player_runtime(self):
+        """Only trust readiness belonging to the current player process."""
+        running = False
+        try:
+            pid = int(self.players_pid.read_text())
+            if pid <= 0: return {'running': False, 'ready': False, 'rooms': []}
+            args = (Path('/proc') / str(pid) / 'cmdline').read_bytes().split(b'\0')
+            running = os.fsencode(str(_HERE / 'zoneplayers.py')) in args
+            status = json.loads((self.players_pid.parent / 'players-status.json').read_text())
+            if running and status.get('pid') == pid:
+                return {'running': True, 'ready': True, 'rooms': status['rooms'],
+                        'components': status.get('components', [])}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return {'running': running, 'ready': False, 'rooms': []}
+
+    def speaker_health(self, config=None, wait=True):
+        """Discovery, saved selection and active players must agree for a healthy status."""
+        config = self.config() if config is None else config
+        source = self.source(config)
+        if source == 'sonos':
+            household = self.sonos_household() if wait else self.sonos_known()
+            available = {'sonos:' + z['uuid']: z['name'] for z in household['zones']
+                         if z.get('state') != 'unavailable'}
+        else:
+            available = {key: friendly(state) for key, state in self.media_players().items()
+                         if state.get('state') not in ('unavailable', 'unknown')}
+        selected, missing, expected = [], [], []
+        rooms = config.get('rooms', [])
+        for index, room in enumerate(rooms):
+            key = room_key(room)
+            name = room.get('name') or available.get(key) or room.get('last_known_name') or key
+            selected.append(name)
+            expected.append({'key': key, 'slot': int(room.get('slot', index))})
+            if room_key_ref(room) and key not in available: missing.append(name)
+        runtime = self.player_runtime()
+        active = [{'key': room['key'], 'slot': room['slot']} for room in runtime['rooms']]
+        applied = runtime['ready'] and active == expected and all(
+            not room.get('name') or room['name'] == actual['name']
+            for room, actual in zip(rooms, runtime['rooms']))
+        healthy = bool(rooms) and applied and not missing
+        if not rooms:
+            message = ('No speakers available on this network. They will appear automatically when found.'
+                       if source == 'sonos' and not available and (config.get('sonos') or {}).get('follow_network', True)
+                       else 'No speakers selected for the controller. Choose speakers on the Speakers page.')
+        elif not runtime['running']:
+            message = 'The controller’s speaker service is not running.'
+        elif not applied:
+            message = 'The saved speaker selection is waiting to be applied to the controller.'
+        else:
+            message = 'Ready for the controller: %s.' % ', '.join(selected)
+        if missing:
+            detail = 'Selected speakers unavailable: %s. Choose an available speaker on the Speakers page.' % ', '.join(missing)
+            message = detail if applied else message + ' ' + detail
+        return {'healthy': healthy, 'players_running': runtime['running'], 'selection_applied': applied,
+                'selected': selected, 'missing': missing, 'message': message}
+
     def listing(self, source):
         """key -> the source's own name, for every speaker the source knows now."""
         if source == 'sonos':
@@ -450,6 +562,7 @@ class Bridge:
                                                  hidden_icons.get(entity)))
             library = menu.get('library_entity')
         return {'speakers': rows, 'library': library, 'library_entity': library, 'source': source,
+                'speaker_health': self.speaker_health(config),
                 'source_label': SOURCES[source], 'source_connected': self.source_connected(source),
                 'ha_connected': self.ha_connected(),
                 'max_shown': MAX_SLOTS, 'icons': [{'name': n, 'label': l} for n, l, _ in room_icons.PICTURES],
@@ -479,74 +592,14 @@ class Bridge:
         return self.reload_players()
 
     @staticmethod
-    def apply_rooms(config, wanted, library, source, listing, platforms):
-        """Make the config's rooms the wanted ones ({'key', 'name', 'icon'}), in order, and the
-        Music menu read from library (a shown speaker's key, or None)."""
-        prefix = 'sonos:' if source == 'sonos' else 'media_player.'
-        rooms = config.get('rooms', [])
-        existing = {room_key(r): r for r in rooms}
-        slots = dict(config.get('player_slots') or {})
-        for index, room in enumerate(rooms):   # rooms from before slots keep their position
-            slots.setdefault(room_key(room), int(room.get('slot', index)))
-        new_rooms, names, keys = [], set(), set()
-        for item in wanted:
-            key = item.get('key') if isinstance(item, dict) else None
-            if not isinstance(key, str) or key in keys: raise ApiError(400, 'Each speaker can appear once.')
-            keys.add(key)
-            if key.startswith(prefix):
-                if key not in listing and key not in existing:
-                    raise ApiError(400, '%s is not a %s.' % (key, 'Sonos speaker on this network' if source == 'sonos'
-                                                              else 'Home Assistant media player'))
-                ref = key
-            elif key in existing and not room_key_ref(existing[key]):
-                ref = None   # a simulated room from the config file
-            else:
-                raise ApiError(400, 'Unknown speaker %s.' % key)
-            custom = (item.get('name') or '').strip()
-            if len(custom) > MAX_ROOM_NAME:
-                raise ApiError(400, 'Keep room names to %d characters.' % MAX_ROOM_NAME)
-            default = listing.get(ref) if ref else existing[key].get('name')
-            if not default and ref in existing: default = existing[ref].get('name')
-            if custom == default: custom = ''
-            name = custom or default or (ref.split('.', 1)[-1].replace('_', ' ').title() if source == 'ha' else ref)
-            if name.lower() in names: raise ApiError(400, 'Two rooms are both named %s.' % name)
-            names.add(name.lower())
-            room = room_for(ref) if ref else {}
-            if custom or not ref or not listing.get(ref): room['name'] = name
-            icon = item.get('icon') or ''
-            if icon and icon not in room_icons.ICONS: raise ApiError(400, 'Unknown room icon %s.' % icon)
-            icon = room_icons.picture(icon)
-            if icon and icon != room_icons.guess(name): room['icon'] = icon   # else follow the name
-            new_rooms.append((key, room))
-        # A speaker keeps the slot it had (its player identity on the controller); a new one
-        # takes a slot no speaker has used, or failing that one no shown speaker uses.
-        assigned = {}
-        for key, _ in new_rooms:
-            if key in slots and slots[key] not in assigned.values(): assigned[key] = slots[key]
-        for key, _ in new_rooms:
-            if key in assigned: continue
-            free = [s for s in range(MAX_SLOTS) if s not in assigned.values() and s not in slots.values()] \
-                or [s for s in range(MAX_SLOTS) if s not in assigned.values()]
-            assigned[key] = slots[key] = free[0]
-        for key, room in new_rooms: room['slot'] = assigned[key]
-        config['rooms'] = [room for _, room in new_rooms]
-        # Icons of speakers hidden now are kept, so showing one again restores it.
-        kept = dict(config.get('room_icons') or {})
-        for room in rooms:
-            if room_key_ref(room) and room.get('icon'): kept[room_key(room)] = room['icon']
-        for key, room in new_rooms:
-            if room_key_ref(room): kept.pop(key, None)
-        if kept: config['room_icons'] = kept
-        else: config.pop('room_icons', None)
-        config['player_slots'] = {k: v for k, v in slots.items() if k.startswith(('media_player.', 'sonos:'))}
-        if library is not None and (library not in keys or not library.startswith(prefix)
-                                    or (source == 'ha' and platforms.get(library, 'sonos') != 'sonos')):
-            raise ApiError(400, 'Choose a Sonos speaker that is shown on the controller for the library.')
-        menu = config.get('music_menu') or {}
-        for name in LIBRARY_KEYS: menu.pop(name, None)
-        if library and source == 'sonos': menu['library'] = room_for(library)
-        elif library: menu['library_entity'] = library
-        if menu or 'music_menu' in config: config['music_menu'] = menu
+    def apply_rooms(config, wanted, library, source, listing, platforms, automatic=False):
+        """Compatibility wrapper for the shared configuration rules."""
+        return apply_rooms(config, wanted, library, source, listing, platforms, automatic=automatic)
+
+    @staticmethod
+    def reconcile_sonos_rooms(config, available, pending=None):
+        """Compatibility wrapper for the shared configuration rules."""
+        return reconcile_sonos_rooms(config, available, pending)
 
     # controllers -----------------------------------------------------------------
     def state(self):
@@ -569,8 +622,7 @@ class Bridge:
         return {'message': 'Pairing started. Put the CR100 in its add-to-household setup mode.'}
 
     def controller_macs(self, state):
-        listed = [c.get('mac') for c in state.get('controllers', []) if c.get('mac')]
-        return [m.lower() for m in listed] or ([state['cr100_mac'].lower()] if state.get('cr100_mac') else [])
+        return [controller['mac'] for controller in controller_records(state)]
 
     def link_status(self):
         """The radio link's latest stats line and recent events, from its log."""
@@ -587,8 +639,9 @@ class Bridge:
             elif record.get('event') in LINK_EVENTS: events.append(record)
         if not stats: return {'running': False, 'stations': {}, 'events': []}
         offset = stats['wall'] - stats['t']   # wall clock of this link process's t = 0
-        timeline = [{'event': e['event'], 'time': round(offset + e['t'], 1), 'reason': e.get('reason')}
-                    for e in events if e['t'] <= stats['t'] + 60][-12:]
+        timeline = [{'event': e['event'], 'time': round(offset + e['t'], 1), 'reason': e.get('reason'),
+                     **({'mac': e['mac'].lower()} if e.get('mac') else {})}
+                    for e in events if e['t'] <= stats['t'] + 60]
         age = max(0.0, time.time() - stats['wall'])
         stations = {}
         for station in stats.get('stations', []):   # 'last heard' counted to now, not to the log line
@@ -616,20 +669,27 @@ class Bridge:
         state, config = self.state(), self.config()
         names = config.get('controllers') or {}
         link, ips = self.link_status(), self.leases()
+        macs = self.controller_macs(state)
         result = []
-        for index, mac in enumerate(self.controller_macs(state)):
+        for index, mac in enumerate(macs):
             station = link['stations'].get(mac)
             status, label = controller_status(link['running'], station)
             details = self.details.get(mac, {})
             result.append({'mac': mac, 'name': (names.get(mac) or {}).get('name') or
                            ('Controller' if index == 0 else 'Controller %d' % (index + 1)),
                            'status': status, 'status_label': label, 'ip': ips.get(mac),
+                           'auto_reconnect': (names.get(mac) or {}).get('auto_reconnect') is not False,
                            'last_heard_s': station.get('last_heard_s') if station else None,
-                           'events': link['events'] if len(state.get('controllers', [])) <= 1 else [],
+                           'visible_components': None if visible_components(config, mac) is None else
+                               list((names.get(mac) or {}).get('visible_components', [])),
+                           'events': [event for event in link['events'] if event.get('mac') == mac or
+                                      (not event.get('mac') and (len(macs) == 1 or
+                                       event['event'] in ('radio-lost', 'radio-reopened')))][-12:],
                            **details})
         return {'controllers': result, 'household': state.get('household'),
+                'speaker_health': self.speaker_health(config, wait=False),
                 'channel': FREQ_CHANNEL.get(state.get('freq')), 'radio_running': link['running'],
-                'multi_controller': False, 'pairing': self.pairing_status()}
+                'multi_controller': True, 'pairing': self.pairing_status()}
 
     def rename_controller(self, mac, name):
         name = (name or '').strip()
@@ -638,6 +698,125 @@ class Bridge:
         if mac.lower() not in self.controller_macs(self.state()): raise ApiError(404, 'No such controller.')
         self.update_config(lambda c: c.setdefault('controllers', {}).setdefault(mac.lower(), {}).update(name=name))
         return {'message': 'Renamed.'}
+
+    def save_controller_reconnect(self, mac, payload):
+        controller = self.spotify_controller(mac)
+        if not isinstance(payload, dict) or type(payload.get('enabled')) is not bool:
+            raise ApiError(400, 'Reconnect attempts must be enabled or paused.')
+        enabled = payload['enabled']
+        def update(config):
+            if config.get('controllers') is None: config['controllers'] = {}
+            profiles = config['controllers']
+            if profiles.get(controller['mac']) is None: profiles[controller['mac']] = {}
+            profiles[controller['mac']]['auto_reconnect'] = enabled
+        self.update_config(update)
+        return {'controller': controller, 'auto_reconnect': enabled,
+                'message': 'Saved. Applies within a few seconds while the bridge is running.'}
+
+    def updates(self):
+        if self._online_update_management is None:
+            from online_updates import UpdateManager
+            self._online_update_management = UpdateManager(self.config_path)
+        return self._online_update_management
+
+    def controller_firmware(self, mac, command=None, payload=None, upload=None, filename=None):
+        controller = self.spotify_controller(mac)
+        current = (self.details.get(controller['mac']) or {}).get('firmware')
+        try:
+            manager = self.updates()
+            if command == 'upload':
+                status = manager.stage_controller(controller['mac'], upload, filename=filename,
+                                                  current_version=current, arm=False)
+            elif command == 'install':
+                force = (payload or {}).get('force', False)
+                if not isinstance(force, bool):
+                    raise ApiError(400, 'Force update must be true or false.')
+                expected = (payload or {}).get('sha256')
+                if expected is not None and (not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected)):
+                    raise ApiError(400, 'Review the uploaded firmware before installing it.')
+                status = manager.arm_controller(controller['mac'], force_prompt=force,
+                                                current_version=current, expected_sha256=expected,
+                                                allow_unverified=(payload or {}).get('allow_unverified', False))
+            elif command == 'cancel':
+                status = manager.cancel_controller(controller['mac'])
+            else:
+                status = manager.status(controller['mac'])
+            return {'controller': controller, 'current_version': current, 'firmware': status}
+        except ValueError as error:
+            raise ApiError(getattr(error, 'status', 400), str(error)) from error
+
+    def update_status(self):
+        try:
+            manager = self.updates()
+            return {'controllers': manager.status(), 'bridge': manager.bridge_status()}
+        except ValueError as error:
+            raise ApiError(getattr(error, 'status', 400), str(error)) from error
+
+    def component_inventory(self, config, mac, runtime=None):
+        """Configured rooms plus current About components; keep unavailable saved choices."""
+        enabled = {item['key']: {**item, 'enabled': True} for item in configured_components(config)}
+        room_keys = set(enabled)
+        if room_keys:
+            enabled[BRIDGE_COMPONENT] = {'key': BRIDGE_COMPONENT, 'name': 'CR100 Bridge',
+                                         'kind': 'bridge', 'enabled': True}
+        runtime = self.player_runtime() if runtime is None else runtime
+        for item in runtime.get('components', []):
+            key, kind = item.get('key'), item.get('kind')
+            if not isinstance(key, str) or kind not in ('room', 'about', 'bridge'): continue
+            if key in enabled:
+                enabled[key]['name'] = item.get('name') or enabled[key]['name']
+            elif kind == 'about' and set(item.get('parent_keys', [])) & room_keys:
+                enabled[key] = {**item, 'enabled': True}
+        known = dict(enabled)
+        # A source/network switch must not discard saved preferences. Show known
+        # disabled rooms without allowing a controller to enable them globally.
+        for source in (config.get('stashed_sources') or {}).values():
+            for item in configured_components(source):
+                known.setdefault(item['key'], {**item, 'enabled': False})
+        for key, room in ((config.get('sonos') or {}).get('room_preferences') or {}).items():
+            if key.startswith('sonos:'):
+                known.setdefault(key, {'key': key, 'name': room.get('name') or room.get('last_known_name') or key,
+                                       'kind': 'room', 'enabled': False})
+        for key in config.get('player_slots') or {}:
+            canonical = 'ha:' + key if key.startswith('media_player.') else key
+            if canonical.startswith(('ha:', 'sonos:')):
+                known.setdefault(canonical, {'key': canonical, 'name': key, 'kind': 'room', 'enabled': False})
+        selection = visible_components(config, mac)
+        for key in selection or ():
+            known.setdefault(key, {'key': key, 'name': key, 'kind': 'about', 'enabled': False})
+        if not room_keys and BRIDGE_COMPONENT in known: known[BRIDGE_COMPONENT]['enabled'] = False
+        for item in known.values():
+            item['selected'] = item['enabled'] if selection is None else item['key'] in selection
+            parents = item.get('parent_keys', [])
+            item['parent_names'] = [known[key]['name'] for key in parents if key in known]
+            item['effective'] = item['enabled'] and item['selected'] and (not parents or any(
+                key in known and known[key]['enabled'] and (selection is None or key in selection) for key in parents))
+        return sorted(known.values(), key=lambda item: (not item['enabled'], item['kind'] != 'room', item['name'].lower()))
+
+    def controller_components(self, mac):
+        controller = self.spotify_controller(mac)
+        config = self.config()
+        selection = ((config.get('controllers') or {}).get(controller['mac']) or {}).get('visible_components')
+        return {'controller': controller, 'visible_components': selection,
+                'components': self.component_inventory(config, controller['mac'])}
+
+    def save_controller_components(self, mac, payload):
+        controller = self.spotify_controller(mac)
+        if not isinstance(payload, dict) or 'visible_components' not in payload:
+            raise ApiError(400, 'Choose components, or use the household selection.')
+        runtime = self.player_runtime()
+        def update(config):
+            known = {item['key'] for item in self.component_inventory(config, controller['mac'], runtime)}
+            try: selection = validate_selection(payload['visible_components'], known)
+            except ValueError as error: raise ApiError(400, str(error)) from None
+            if config.get('controllers') is None: config['controllers'] = {}
+            profiles = config['controllers']
+            if profiles.get(controller['mac']) is None: profiles[controller['mac']] = {}
+            profile = profiles[controller['mac']]
+            if selection is None: profile.pop('visible_components', None)
+            else: profile['visible_components'] = selection
+        self.update_config(update)
+        return {**self.reload_players(), **self.controller_components(controller['mac'])}
 
     def poll_controllers(self):
         while not self.stop.wait(1 if not self.details else DETAILS_POLL):
@@ -654,31 +833,198 @@ class Bridge:
 
     # Spotify ---------------------------------------------------------------------
     def spotify_settings(self):
-        settings = self.config().get('spotify_music_service') or {}
+        settings = provider_settings(self.config(), 'spotify')
         return settings, resolve(self.config_path, settings.get('token_file'), 'spotify-token.json')
 
     def spotify(self):
         from spotify_auth import DEFAULT_REDIRECT_URI, status
+        from spotify_folders import FOLDER_CLIENT_ID
         settings, token_file = self.spotify_settings()
         client_id = settings.get('client_id', '')
         authorized = bool(client_id) and status(client_id, token_file).get('authorized', False)
         account = self.data.values.get('spotify_account') if authorized else None
+        playback_token = resolve(self.config_path, (settings.get('folders') or {}).get('token_file'),
+                                 'spotify-folders-token.json')
+        playback_status = status(FOLDER_CLIENT_ID, playback_token)
         return {'enabled': bool(settings) and settings.get('enabled', True), 'name': settings.get('name', 'Spotify'),
                 'client_id': client_id, 'redirect_uri': settings.get('redirect_uri', DEFAULT_REDIRECT_URI),
                 'authorized': authorized, 'account': account,
+                'autoplay': settings.get('autoplay') is True,
+                'autoplay_connected': playback_status.get('authorized', False)
+                                      and 'streaming' in playback_status.get('scopes', ()),
                 'signing_in': bool(self.spotify_pending and self.spotify_pending['expires'] > time.time())}
 
+    def spotify_resources(self):
+        """Reuse the read-only library reader; config changes replace its background worker."""
+        from spotify_client import SpotifyClient
+        from spotify_folders import make_folder_provider
+        settings, token_file = self.spotify_settings()
+        signature = json.dumps({'client_id': settings.get('client_id'), 'token_file': str(token_file),
+                                'folders': settings.get('folders') or {}}, sort_keys=True)
+        with self.spotify_resource_lock:
+            if self.spotify_resources_cache and self.spotify_resources_cache[0] == signature:
+                return self.spotify_resources_cache[1:]
+            if self.spotify_resources_cache:
+                self.spotify_resources_cache[2].close()
+            client = (self.spotify_factory or SpotifyClient)(settings.get('client_id', ''), token_file, log=self.log)
+            provider = (self.folder_factory or make_folder_provider)(self.config_path, settings, client, log=self.log)
+            provider.start()
+            self.spotify_resources_cache = signature, client, provider
+            return client, provider
+
+    def spotify_controller(self, mac):
+        mac = str(mac).lower()
+        if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
+            raise ApiError(400, 'Choose a valid controller.')
+        if mac not in self.controller_macs(self.state()):
+            raise ApiError(404, 'That controller is not paired with this bridge.')
+        names = self.config().get('controllers') or {}
+        return {'mac': mac, 'name': (names.get(mac) or {}).get('name') or 'Controller'}
+
+    def spotify_menu(self, mac):
+        from spotify_menu import menu_for_controller
+        controller = self.spotify_controller(mac)
+        settings, _ = self.spotify_settings()
+        return {'controller': controller, 'items': menu_for_controller(settings, controller['mac'])}
+
+    def save_spotify_menu(self, mac, payload):
+        from spotify_menu import validate_items
+        controller = self.spotify_controller(mac)
+        try:
+            items = validate_items(payload.get('items'))
+        except (ValueError, TypeError) as error:
+            raise ApiError(400, str(error)) from None
+        def change(config):
+            settings = provider_settings(config, 'spotify', create=True)
+            settings.setdefault('controller_menus', {})[controller['mac']] = {'items': items}
+        self.update_config(change)
+        return {**self.reload_players(), 'controller': controller, 'items': items}
+
+    def spotify_library(self):
+        from spotify_client import SpotifyError
+        client, provider = self.spotify_resources()
+        playlists, error, offset = [], None, 0
+        try:
+            for _ in range(20):
+                page = client.get('/me/playlists', {'offset': offset, 'limit': 50})
+                batch = page.get('items')
+                if not isinstance(batch, list): raise ApiError(502, 'Spotify returned an unreadable playlist list.')
+                for item in batch:
+                    if not isinstance(item, dict): continue
+                    ident, name = item.get('id'), item.get('name')
+                    if isinstance(ident, str) and re.fullmatch(r'[A-Za-z0-9]{22}', ident) and isinstance(name, str):
+                        playlists.append({'uri': 'spotify:playlist:' + ident, 'name': name})
+                if not page.get('next') or not batch: break
+                offset += len(batch)
+        except SpotifyError as failure:
+            error = 'Spotify playlists could not be loaded. Check sign-in or try again shortly.'
+            self.log({'event': 'spotify-menu-library-failed', 'status': failure.status})
+        return {'folders': provider.get_tree(), 'playlists': playlists,
+                'folder_status': provider.status(), 'playlist_error': error}
+
+    def spotify_resolve(self, value):
+        from spotify_client import SpotifyError
+        from spotify_menu import normalize_spotify_uri
+        try: uri = normalize_spotify_uri(value)
+        except (ValueError, TypeError) as error: raise ApiError(400, str(error)) from None
+        _, kind, ident = uri.split(':')
+        client, _ = self.spotify_resources()
+        try: item = client.get('/%ss/%s' % (kind, ident))
+        except SpotifyError as error:
+            raise ApiError(400, 'Spotify could not read that item. Check the link and account access.') from None
+        if not isinstance(item.get('name'), str): raise ApiError(502, 'Spotify returned an item without a name.')
+        return {'uri': uri, 'name': item['name'], 'kind': 'single' if kind == 'album' and item.get('album_type') == 'single' else kind}
+
+    def spotify_folders_refresh(self):
+        from spotify_client import SpotifyError
+        _, provider = self.spotify_resources()
+        try: tree = provider.refresh(force=True)
+        except SpotifyError:
+            return {'folder_status': provider.status(), 'folders': provider.get_tree(),
+                    'refreshed': False, 'message': 'Folder refresh failed. The last complete library is still available.'}
+        return {'folder_status': provider.status(), 'folders': tree, 'refreshed': True, 'message': 'Spotify folders refreshed.'}
+
+    def spotify_folder_snapshot(self):
+        _, provider = self.spotify_resources()
+        return {'folder_status': provider.status(), 'folders': provider.get_tree()}
+
+    def spotify_folders_begin(self):
+        from spotify_auth import AUTHORIZE_ENDPOINT, pkce_pair
+        from spotify_folders import FOLDER_CLIENT_ID, FOLDER_REDIRECT_URI, FOLDER_SCOPES
+        verifier, challenge = pkce_pair()
+        pending = {'verifier': verifier, 'state': secrets.token_urlsafe(24), 'redirect_uri': FOLDER_REDIRECT_URI,
+                   'client_id': FOLDER_CLIENT_ID, 'expires': time.time() + SPOTIFY_SIGN_IN_TTL}
+        with self.spotify_resource_lock: self.spotify_folder_pending = pending
+        return {'url': AUTHORIZE_ENDPOINT + '?' + urllib.parse.urlencode({
+            'response_type': 'code', 'client_id': FOLDER_CLIENT_ID, 'redirect_uri': FOLDER_REDIRECT_URI,
+            'state': pending['state'], 'scope': ' '.join(FOLDER_SCOPES),
+            'code_challenge_method': 'S256', 'code_challenge': challenge}), 'redirect_uri': FOLDER_REDIRECT_URI}
+
+    def spotify_folders_finish(self, pasted):
+        from spotify_client import SpotifyError
+        from spotify_folders import FOLDER_REDIRECT_URI, folder_token_lock
+        with self.spotify_resource_lock:
+            pending = self.spotify_folder_pending
+            if not pending or pending['expires'] <= time.time():
+                raise ApiError(400, 'Start again with Connect Spotify folders; that sign-in expired.')
+            if not isinstance(pasted, str) or len(pasted) > 16384:
+                raise ApiError(400, 'Paste the whole address from Spotify.')
+            try: parsed, expected = urllib.parse.urlsplit(pasted.strip()), urllib.parse.urlsplit(FOLDER_REDIRECT_URI)
+            except ValueError: raise ApiError(400, 'Paste the full local address Spotify sent you to.') from None
+            if (parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path) or parsed.fragment:
+                raise ApiError(400, 'Paste the full local address Spotify sent you to.')
+            values = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            states, codes = values.get('state', []), values.get('code', [])
+            if len(states) != 1 or not hmac.compare_digest(states[0].encode('utf-8'), pending['state'].encode('ascii')):
+                raise ApiError(400, 'That address is from a different folder sign-in. Start again.')
+            if values.get('error'):
+                self.spotify_folder_pending = None
+                raise ApiError(400, 'Spotify reports that folder access was declined.')
+            if len(codes) != 1 or not 0 < len(codes[0]) <= 8192:
+                raise ApiError(400, 'Paste the whole address containing code and state.')
+            self.spotify_folder_pending = None  # one use, including failed exchanges
+            settings, _ = self.spotify_settings()
+            token_file = resolve(self.config_path, (settings.get('folders') or {}).get('token_file'), 'spotify-folders-token.json')
+            try:
+                with folder_token_lock(token_file):
+                    self.token_exchange(pending, codes[0], token_file)
+            except (SpotifyError, ApiError):
+                raise ApiError(400, 'Spotify folder access could not be saved. Try signing in again.') from None
+            self.log({'event': 'spotify-folders-signed-in'})
+        result = self.spotify_folders_refresh()
+        # Authorization is complete even if a later network refresh fails. Its
+        # safe status keeps the retry action available without repeating consent.
+        result['message'] = ('Spotify folder access connected.' if result['refreshed'] else
+                             'Folder access connected. Refresh the library when Spotify is available.')
+        return result
+
     def save_spotify(self, payload):
-        client_id = (payload.get('client_id') or '').strip()
-        name = (payload.get('name') or '').strip() or 'Spotify'
+        if 'autoplay' in payload and not isinstance(payload['autoplay'], bool):
+            raise ApiError(400, 'Autoplay must be on or off.')
+        previous, _ = self.spotify_settings()
+        # An Autoplay-only request is a live preference update. Older setup
+        # requests retain their original replacement/default semantics.
+        defaults = previous if 'autoplay' in payload else {}
+        client_id = (payload.get('client_id', defaults.get('client_id')) or '').strip()
+        name = (payload.get('name', defaults.get('name')) or '').strip() or 'Spotify'
         if client_id and not re.fullmatch(r'[0-9a-fA-F]{32}', client_id):
             raise ApiError(400, 'A Spotify Client ID is 32 letters and digits, from the Spotify developer dashboard.')
         if len(name) > 24: raise ApiError(400, 'Keep the service name to 24 characters.')
-        enabled = bool(payload.get('enabled'))
+        enabled = bool(payload.get('enabled', defaults.get('enabled', bool(defaults))))
+        live_preference_only = ('autoplay' in payload
+            and enabled == (bool(previous) and previous.get('enabled', True))
+            and name == previous.get('name', 'Spotify') and client_id == previous.get('client_id', ''))
         def change(config):
-            settings = config.setdefault('spotify_music_service', {})
+            settings = provider_settings(config, 'spotify', create=True)
             settings.update(enabled=enabled, name=name, client_id=client_id)
+            if 'autoplay' in payload:
+                settings['autoplay'] = payload['autoplay']
         self.update_config(change)
+        if live_preference_only:
+            # The provider reads this flag in place. Restarting its player
+            # process would discard the currently playing continuation session.
+            return {'applied': True, 'message': 'Saved. The current track keeps playing; '
+                    'Autoplay controls what follows your queued music.'}
         return self.reload_players()
 
     def spotify_begin(self):
@@ -733,7 +1079,8 @@ class Bridge:
         return {'controller': best, 'controllers_connected': sum(c['status'] in ('connected', 'dozing')
                                                                   for c in controllers),
                 'controllers': len(controllers), 'home_assistant': self.ha_connected(),
-                'source': SOURCES[source], 'source_connected': self.source_connected(source, wait=False)}
+                'source': SOURCES[source], 'source_connected': self.source_connected(source, wait=False),
+                'speaker_health': self.speaker_health(wait=False)}
 
 
 STATUS_ORDER = ['connected', 'dozing', 'searching', 'away', 'radio-off', 'none']
@@ -791,24 +1138,6 @@ def parse_uptime(text):
     return int(days or 0) * 86400 + (int(hours) * 3600 + int(minutes) * 60 if hours else int(only_minutes) * 60)
 
 
-def room_key(room):
-    """The web interface's key for a config room: its entity, sonos:<UUID>, or sim:<name>."""
-    if room.get('entity'): return room['entity']
-    if room.get('backend'): return '%s:%s' % (room['backend'], room.get('id', ''))
-    return 'sim:' + room.get('name', '')
-
-
-def room_key_ref(room):
-    """Whether a config room plays through a source (not simulated)."""
-    return bool(room.get('entity') or room.get('backend'))
-
-
-def room_for(key):
-    """The config room for a source speaker's key."""
-    if key.startswith('sonos:'): return {'backend': 'sonos', 'id': key[len('sonos:'):]}
-    return {'entity': key}
-
-
 def row(key, source_name, custom_name, shown, custom_icon, entity=None, simulated=False, missing=False, state=None,
         playing=None, sub='', platform=None, sonos=False):
     """One line of the speakers page."""
@@ -828,7 +1157,7 @@ def sonos_row(key, zone, room, shown, custom_icon=None):
         return row(key, None, room.get('name'), True, custom_icon, simulated=True)
     sub = urllib.parse.urlsplit(zone['base']).hostname if zone else key[len('sonos:'):]
     if zone and zone['group']: sub += ' · grouped with ' + ', '.join(n for n in zone['group'] if n != zone['name'])
-    return row(key, zone['name'] if zone else None, room.get('name'), shown, custom_icon, missing=zone is None,
+    return row(key, zone['name'] if zone else room.get('last_known_name'), room.get('name'), shown, custom_icon, missing=zone is None,
                state=zone['state'] if zone else None, playing=zone['playing'] if zone else None, sub=sub,
                platform='sonos', sonos=True)
 
@@ -836,9 +1165,10 @@ def sonos_row(key, zone, room, shown, custom_icon=None):
 def sonos_playing(base):
     """('playing' | 'paused' | ..., 'title – artist' or None) for a group coordinator."""
     from sonos_upnp import UPnPFault, parse_didl, soap
+    from sonos_backend import READ_TIMEOUT
     try:
-        state = soap(base, 'AVTransport', 'GetTransportInfo', [('InstanceID', 0)], STATUS_TIMEOUT)
-        position = soap(base, 'AVTransport', 'GetPositionInfo', [('InstanceID', 0)], STATUS_TIMEOUT)
+        state = soap(base, 'AVTransport', 'GetTransportInfo', [('InstanceID', 0)], READ_TIMEOUT)
+        position = soap(base, 'AVTransport', 'GetPositionInfo', [('InstanceID', 0)], READ_TIMEOUT)
     except UPnPFault:
         return 'unavailable', None
     track = next(iter(parse_didl(position.get('TrackMetaData'))), {})
@@ -898,9 +1228,9 @@ def default_profile_fetch(client_id, token_file):
 def make_handler(bridge, auth, log):
     routes = {}
 
-    def route(method, pattern, public=False):
+    def route(method, pattern, public=False, binary=False):
         def register(function):
-            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public))
+            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public, binary))
             return function
         return register
 
@@ -943,11 +1273,46 @@ def make_handler(bridge, auth, log):
     route('GET', '/api/controllers')(lambda h, b, m: bridge.controllers())
     route('POST', '/api/controllers/pair')(lambda h, b, m: bridge.pair_controller())
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})')(lambda h, b, m: bridge.rename_controller(m.group(1), b.get('name')))
+    route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/reconnect')(lambda h, b, m: bridge.save_controller_reconnect(m.group(1), b))
+    route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.controller_components(m.group(1)))
+    route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.save_controller_components(m.group(1), b))
+    route('GET', '/api/updates')(lambda h, b, m: bridge.update_status())
+    route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/firmware')(lambda h, b, m: bridge.controller_firmware(m.group(1)))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/install')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'install', b))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/cancel')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'cancel'))
+
+    @route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware', binary=True)
+    def upload_firmware(handler, body, match):
+        mac = bridge.spotify_controller(match.group(1))['mac']
+        filename = urllib.parse.unquote(handler.headers.get('X-Firmware-Name', 'firmware.upd'))
+        if len(filename) > 255 or any(ord(character) < 32 for character in filename):
+            raise ApiError(400, 'Choose a firmware filename up to 255 characters.')
+        filename = filename.replace('\\', '/').rsplit('/', 1)[-1]
+        if not filename.lower().endswith('.upd'):
+            raise ApiError(400, 'Choose a .upd controller firmware file.')
+        with tempfile.TemporaryDirectory(prefix='cr100-firmware-') as directory:
+            path = Path(directory) / 'upload.upd'
+            handler.read_firmware(path)
+            return bridge.controller_firmware(mac, 'upload', upload=path, filename=filename)
     route('GET', '/api/spotify')(lambda h, b, m: bridge.spotify())
+    route('GET', '/api/radio')(lambda h, b, m: bridge.radio_request())
+    route('PUT', '/api/radio')(lambda h, b, m: bridge.radio_request('settings', b))
+    route('POST', r'/api/radio/([a-z-]+)')(lambda h, b, m: bridge.radio_request(m.group(1), b))
+    route('GET', '/api/alarms')(lambda h, b, m: bridge.alarm_request())
+    route('PUT', '/api/alarms')(lambda h, b, m: bridge.alarm_request('save', b))
+    route('POST', r'/api/alarms/([a-z-]+)')(lambda h, b, m: bridge.alarm_request(m.group(1), b))
     route('PUT', '/api/spotify')(lambda h, b, m: bridge.save_spotify(b))
     route('POST', '/api/spotify/sign-in')(lambda h, b, m: bridge.spotify_begin())
     route('POST', '/api/spotify/finish')(lambda h, b, m: bridge.spotify_finish(b.get('address')))
     route('POST', '/api/spotify/sign-out')(lambda h, b, m: bridge.spotify_sign_out())
+    route('GET', r'/api/spotify/menu/([^/]+)')(lambda h, b, m: bridge.spotify_menu(urllib.parse.unquote(m.group(1))))
+    route('PUT', r'/api/spotify/menu/([^/]+)')(lambda h, b, m: bridge.save_spotify_menu(urllib.parse.unquote(m.group(1)), b))
+    route('GET', '/api/spotify/library')(lambda h, b, m: bridge.spotify_library())
+    route('POST', '/api/spotify/resolve')(lambda h, b, m: bridge.spotify_resolve(b.get('uri')))
+    route('GET', '/api/spotify/folders')(lambda h, b, m: bridge.spotify_folder_snapshot())
+    route('POST', '/api/spotify/folders/refresh')(lambda h, b, m: bridge.spotify_folders_refresh())
+    route('POST', '/api/spotify/folders/sign-in')(lambda h, b, m: bridge.spotify_folders_begin())
+    route('POST', '/api/spotify/folders/finish')(lambda h, b, m: bridge.spotify_folders_finish(b.get('address')))
     route('GET', '/api/home-assistant')(lambda h, b, m: bridge.home_assistant())
     route('POST', '/api/home-assistant/test')(lambda h, b, m: bridge.test_home_assistant(b.get('url'), b.get('token')))
     route('PUT', '/api/home-assistant')(lambda h, b, m: bridge.save_home_assistant(b.get('url'), b.get('token')))
@@ -982,8 +1347,19 @@ def make_handler(bridge, auth, log):
             if not self.allowed_client():
                 return self.reply(403, {'error': 'The bridge settings are not available from the controller network.'})
             path = urllib.parse.urlsplit(self.path).path
+            if method == 'GET' and path == '/alarm-chime.wav':
+                from alarm_runtime import chime_wav
+                data = chime_wav()
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/wav')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.security_headers()
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if method == 'GET' and not path.startswith('/api/'): return self.static(path)
-            for pattern, function, public in routes.get(method, []):
+            for pattern, function, public, binary in routes.get(method, []):
                 match = pattern.match(path)
                 if not match: continue
                 if method != 'GET' and self.headers.get('X-Bridge') != '1':
@@ -991,7 +1367,7 @@ def make_handler(bridge, auth, log):
                 if not public and not auth.valid(self.session_token()):
                     return self.reply(401, {'error': 'Sign in first.'})
                 try:
-                    body = self.read_body() if method != 'GET' else {}
+                    body = self.read_body() if method != 'GET' and not binary else {}
                     return self.reply(200, function(self, body, match))
                 except ApiError as error:
                     return self.reply(error.status, {'error': error.message})
@@ -1001,13 +1377,51 @@ def make_handler(bridge, auth, log):
             self.reply(404, {'error': 'Not found.'})
 
         def read_body(self):
-            length = int(self.headers.get('Content-Length') or 0)
-            if length > BODY_LIMIT: raise ApiError(413, 'Request too large.')
+            if self.headers.get('Transfer-Encoding'):
+                raise ApiError(400, 'Send JSON with a Content-Length header.')
+            lengths = self.headers.get_all('Content-Length', [])
+            if len(lengths) > 1 or (lengths and (len(lengths[0]) > 12 or not re.fullmatch(r'[0-9]+', lengths[0]))):
+                raise ApiError(400, 'Invalid request Content-Length.')
+            length = int(lengths[0]) if lengths else 0
+            limit = 4 * 1024 * 1024 if urllib.parse.urlsplit(self.path).path == '/api/radio/import' else BODY_LIMIT
+            if length > limit: raise ApiError(413, 'Request too large.')
             if not length: return {}
             try: body = json.loads(self.rfile.read(length))
             except ValueError: raise ApiError(400, 'Expected JSON.') from None
             if not isinstance(body, dict): raise ApiError(400, 'Expected a JSON object.')
             return body
+
+        def read_firmware(self, path):
+            if self.headers.get('Transfer-Encoding'):
+                raise ApiError(400, 'Send the firmware with a Content-Length header.')
+            lengths = self.headers.get_all('Content-Length', [])
+            if not lengths:
+                raise ApiError(411, 'A firmware Content-Length is required.')
+            if len(lengths) != 1 or len(lengths[0]) > 12 or not re.fullmatch(r'[0-9]+', lengths[0]):
+                raise ApiError(400, 'Invalid firmware Content-Length.')
+            length = int(lengths[0])
+            if not length:
+                raise ApiError(400, 'The firmware file is empty.')
+            if length > FIRMWARE_BODY_LIMIT:
+                raise ApiError(413, 'Firmware files must be at most 16 MiB.')
+            if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/octet-stream':
+                raise ApiError(415, 'Upload the .upd file as application/octet-stream.')
+            previous_timeout = self.connection.gettimeout()
+            self.connection.settimeout(30)
+            try:
+                with path.open('wb') as destination:
+                    os.chmod(path, 0o600)
+                    remaining = length
+                    while remaining:
+                        chunk = self.rfile.read(min(65536, remaining))
+                        if not chunk:
+                            raise ApiError(400, 'The firmware upload ended early. Upload it again.')
+                        destination.write(chunk)
+                        remaining -= len(chunk)
+            except TimeoutError as error:
+                raise ApiError(408, 'The firmware upload timed out. Upload it again.') from error
+            finally:
+                self.connection.settimeout(previous_timeout)
 
         def security_headers(self):
             self.send_header('X-Frame-Options', 'DENY')

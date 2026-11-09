@@ -13,15 +13,26 @@ import html
 import http.client
 import http.server
 import itertools
+import math
+from pathlib import Path
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
 from sonos_upnp import DIDL_OPEN, SERVICES
 
 PATHS = {path: name for name, (path, _) in SERVICES.items()}
+PATHS['/DeviceProperties'] = 'DeviceProperties'
 PICTURE_PATH = '/getaa'
+FIXTURES = Path(__file__).resolve().parent / 'zp80' / 'fixtures' / 'xml'
+SETTINGS_SERVICES = ('RenderingControl', 'DeviceProperties', 'AVTransport', 'AudioIn')
+SETTINGS_ACTIONS = frozenset(('GetBass', 'SetBass', 'GetTreble', 'SetTreble',
+    'GetLoudness', 'SetLoudness', 'GetSupportsOutputFixed', 'GetOutputFixed',
+    'SetOutputFixed', 'GetLEDState', 'SetLEDState', 'GetRemainingSleepTimerDuration',
+    'ConfigureSleepTimer', 'SetAudioInputAttributes', 'GetLineInLevel', 'SetLineInLevel',
+    'GetZoneInfo', 'GetZoneAttributes'))
 
 
 def entry(object_id, title, parent, upnp_class='object.item.audioItem.musicTrack', container=False, res='',
@@ -68,14 +79,28 @@ class FakeHousehold:
 
 
 class FakePlayer:
-    def __init__(self, household, uuid, name, volume=20):
+    def __init__(self, household, uuid, name, volume=20, line_in_connected=None,
+                 line_in_name='Line-In', line_in_icon='AudioComponent', settings=False,
+                 supports_output_fixed=True, model='ZP80'):
         self.household, self.uuid, self.name = household, uuid, name
         self.volume, self.mute = volume, False
+        self.line_in_connected, self.line_in_name, self.line_in_icon = line_in_connected, line_in_name, line_in_icon
         self.transport, self.play_mode = 'STOPPED', 'NORMAL'
         self.uri, self.uri_metadata = '', ''
         self.queue, self.track_number, self.position = [], 0, '0:00:00'
         self.track_metadata, self.track_duration = '', '0:00:00'
         self.actions = 'Set, Stop, Pause, Play, Next, Previous, Seek'
+        # Native settings fixtures are opt-in so existing playback tests retain
+        # their original discovery/identity behavior.
+        self.settings, self.model = settings, model
+        self.channel_volumes = {'LF': 100, 'RF': 100}
+        self.channel_mutes = {'LF': False, 'RF': False}
+        self.bass, self.treble, self.loudness = 0, 0, False
+        self.led, self.output_fixed = 'On', False
+        self.supports_output_fixed = supports_output_fixed
+        self.line_in_levels = (1, 1)
+        self.sleep_deadline, self.sleep_generation = None, 0
+        self.disabled_settings_actions = set()
         self.queue_update = 0
         self.reject = {}            # action -> UPnP error code to answer with
         self.refuse_service = None  # a music service number (2311) whose share links fail, as without an account
@@ -112,6 +137,12 @@ class FakePlayer:
                 if self.path.startswith(PICTURE_PATH):
                     from fake_ha import picture_bytes
                     return self.reply(200, picture_bytes(), {'Content-Type': 'image/jpeg'})
+                if player.settings:
+                    if self.path == '/xml/device_description.xml':
+                        return self.reply(200, player.description(), {'Content-Type': 'text/xml'})
+                    match = re.fullmatch(r'/xml/([A-Za-z]+)1\.xml', self.path)
+                    if match and match.group(1) in player.settings_services():
+                        return self.reply(200, player.scpd(match.group(1)), {'Content-Type': 'text/xml'})
                 self.reply(404, b'', {})
 
             def reply(self, status, data, headers):
@@ -128,6 +159,46 @@ class FakePlayer:
 
     def close(self):
         self.server.shutdown(); self.server.server_close()
+
+    def settings_services(self):
+        return tuple(service for service in SETTINGS_SERVICES
+                     if service != 'AudioIn' or self.line_in_connected is not None)
+
+    def description(self):
+        """Native discovery contract for settings/identity integration tests."""
+        ns = {'d': 'urn:schemas-upnp-org:device-1-0'}
+        text = (FIXTURES / 'device_description.xml').read_text()
+        for key, value in {'UUID': self.uuid, 'MODEL': self.model, 'HOST': '127.0.0.1',
+                           'NAME': self.name, 'DISPLAY_NAME': self.model,
+                           'SW_VERSION': '57.23-74170', 'HW_VERSION': '1.1.1.1-1',
+                           'SERIAL_NUM': '00-0E-58-FA-KE-00:0', 'DISPLAY_VERSION': '11.16.1'}.items():
+            text = text.replace('#' + key + '#', html.escape(value))
+        root = ET.fromstring(text)
+        device = root.find('d:device', ns)
+        for tag, value in (('UDN', 'uuid:' + self.uuid), ('modelNumber', self.model),
+                           ('modelName', 'Sonos ' + self.model), ('friendlyName', self.name),
+                           ('serialNum', '00-0E-58-FA-KE-00:0'), ('softwareVersion', '57.23-74170')):
+            element = device.find('d:' + tag, ns)
+            if element is not None: element.text = value
+        # Services can be embedded in the MediaRenderer/MediaServer child devices.
+        for owner in root.iter():
+            for child in list(owner):
+                if child.tag.rpartition('}')[2] != 'serviceList': continue
+                for service in list(child):
+                    kind = service.findtext('d:serviceType', namespaces=ns) or ''
+                    if kind.rsplit(':', 2)[-2] not in self.settings_services():
+                        child.remove(service)
+        return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+    def scpd(self, service):
+        ns = {'s': 'urn:schemas-upnp-org:service-1-0'}
+        root = ET.parse(FIXTURES / (service + '1.xml')).getroot()
+        actions = root.find('s:actionList', ns)
+        for action in list(actions):
+            name = action.findtext('s:name', namespaces=ns)
+            if name in self.disabled_settings_actions or not hasattr(self, 'do_' + name):
+                actions.remove(action)
+        return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
     @property
     def coordinator(self):
@@ -156,12 +227,22 @@ class FakePlayer:
             properties = {'LastChange': change}
         elif service == 'RenderingControl':
             properties = {'LastChange': '<Event xmlns="urn:schemas-upnp-org:metadata-1-0/RCS/"><InstanceID val="0">'
-                          '<Volume channel="Master" val="%d"/><Volume channel="LF" val="100"/>'
-                          '<Mute channel="Master" val="%d"/></InstanceID></Event>' % (self.volume, self.mute)}
+                          '<Volume channel="Master" val="%d"/><Volume channel="LF" val="%d"/>'
+                          '<Volume channel="RF" val="%d"/><Mute channel="Master" val="%d"/>'
+                          '%s</InstanceID></Event>' % (self.volume, self.channel_volumes['LF'],
+                          self.channel_volumes['RF'], self.mute,
+                          '<Bass val="%d"/><Treble val="%d"/><Loudness channel="Master" val="%d"/>'
+                          '<OutputFixed val="%d"/>' % (self.bass, self.treble, self.loudness, self.output_fixed)
+                          if self.settings else '')}
         elif service == 'ContentDirectory':
             properties = {'ContainerUpdateIDs': 'Q:0,%d' % self.queue_update}
         elif service == 'ZoneGroupTopology':
             properties = {'ZoneGroupState': self.household.zone_group_state()}
+        elif service == 'AudioIn':
+            properties = {'AudioInputName': self.line_in_name, 'Icon': self.line_in_icon,
+                          'LineInConnected': str(int(bool(self.line_in_connected))),
+                          'LeftLineInLevel': str(self.line_in_levels[0]),
+                          'RightLineInLevel': str(self.line_in_levels[1])}
         else:
             properties = {}
         return ('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">%s</e:propertyset>' % ''.join(
@@ -194,11 +275,17 @@ class FakePlayer:
         with self.lock:
             self.calls.append((action, args))
             code = self.reject.get(action)
+            if action in self.disabled_settings_actions or action in SETTINGS_ACTIONS and not self.settings:
+                code = 401
             if code is None:
                 try:
-                    result = getattr(self, 'do_' + action)(args)
+                    handler = getattr(self, 'do_' + action, None)
+                    if handler is None: raise UPnPError(401)
+                    result = handler(args)
                 except UPnPError as error:
                     code = error.code
+                except (KeyError, ValueError):
+                    code = 402
         if code is not None:
             return 500, ('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault>'
                          '<faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>'
@@ -226,10 +313,107 @@ class FakePlayer:
 
     def do_GetTransportSettings(self, args): return {'PlayMode': self.play_mode}
     def do_GetCurrentTransportActions(self, args): return {'Actions': self.actions if self.coordinator else 'Start, Stop'}
-    def do_GetVolume(self, args): return {'CurrentVolume': self.volume}
-    def do_GetMute(self, args): return {'CurrentMute': int(self.mute)}
-    def do_SetVolume(self, args): self.volume = int(args['DesiredVolume'])
-    def do_SetMute(self, args): self.mute = args['DesiredMute'] == '1'
+    def do_GetVolume(self, args):
+        channel = args.get('Channel', 'Master')
+        if channel == 'Master': return {'CurrentVolume': self.volume}
+        if channel in self.channel_volumes: return {'CurrentVolume': self.channel_volumes[channel]}
+        raise UPnPError(402)
+    def do_GetMute(self, args):
+        channel = args.get('Channel', 'Master')
+        if channel == 'Master': return {'CurrentMute': int(self.mute)}
+        if channel in self.channel_mutes: return {'CurrentMute': int(self.channel_mutes[channel])}
+        raise UPnPError(402)
+    def do_GetAudioInputAttributes(self, args):
+        if self.line_in_connected is None: raise UPnPError(401)
+        return {'CurrentName': self.line_in_name, 'CurrentIcon': self.line_in_icon}
+    def do_SetVolume(self, args):
+        if self.output_fixed: raise UPnPError(501)
+        channel, value = args.get('Channel', 'Master'), int(args['DesiredVolume'])
+        if not 0 <= value <= 100: raise UPnPError(402)
+        if channel == 'Master': self.volume = value
+        elif channel in self.channel_volumes: self.channel_volumes[channel] = value
+        else: raise UPnPError(402)
+    def do_SetMute(self, args):
+        channel = args.get('Channel', 'Master')
+        if args.get('DesiredMute') not in ('0', '1'): raise UPnPError(402)
+        if channel == 'Master': self.mute = args['DesiredMute'] == '1'
+        elif channel in self.channel_mutes: self.channel_mutes[channel] = args['DesiredMute'] == '1'
+        else: raise UPnPError(402)
+
+    def do_GetBass(self, args): return {'CurrentBass': self.bass}
+    def do_GetTreble(self, args): return {'CurrentTreble': self.treble}
+    def do_SetBass(self, args): self.set_tone('bass', args['DesiredBass'])
+    def do_SetTreble(self, args): self.set_tone('treble', args['DesiredTreble'])
+
+    def set_tone(self, name, value):
+        value = int(value)
+        if not -10 <= value <= 10: raise UPnPError(402)
+        if self.output_fixed: raise UPnPError(501)
+        setattr(self, name, value)
+
+    def do_GetLoudness(self, args):
+        if args.get('Channel') != 'Master': raise UPnPError(402)
+        return {'CurrentLoudness': int(self.loudness)}
+
+    def do_SetLoudness(self, args):
+        if self.output_fixed: raise UPnPError(501)
+        if args.get('Channel') != 'Master' or args.get('DesiredLoudness') not in ('0', '1'):
+            raise UPnPError(402)
+        self.loudness = args['DesiredLoudness'] == '1'
+
+    def do_GetSupportsOutputFixed(self, args): return {'CurrentSupportsFixed': int(self.supports_output_fixed)}
+    def do_GetOutputFixed(self, args): return {'CurrentFixed': int(self.output_fixed)}
+    def do_SetOutputFixed(self, args):
+        if not self.supports_output_fixed: raise UPnPError(401)
+        if args.get('DesiredFixed') not in ('0', '1'): raise UPnPError(402)
+        self.output_fixed = args['DesiredFixed'] == '1'
+
+    def do_GetLEDState(self, args): return {'CurrentLEDState': self.led}
+    def do_SetLEDState(self, args):
+        if args.get('DesiredLEDState') not in ('On', 'Off'): raise UPnPError(402)
+        self.led = args['DesiredLEDState']
+
+    def do_ConfigureSleepTimer(self, args):
+        self.need_coordinator()
+        duration = args['NewSleepTimerDuration']
+        if duration == '': self.sleep_deadline = None
+        else:
+            match = re.fullmatch(r'(\d{1,2}):([0-5]\d):([0-5]\d)', duration)
+            if not match: raise UPnPError(402)
+            hours, minutes, seconds = map(int, match.groups())
+            if hours >= 24: raise UPnPError(402)
+            self.sleep_deadline = time.monotonic() + hours * 3600 + minutes * 60 + seconds
+        self.sleep_generation += 1
+
+    def do_GetRemainingSleepTimerDuration(self, args):
+        self.need_coordinator()
+        duration = ''
+        if self.sleep_deadline is not None:
+            seconds = max(0, math.ceil(self.sleep_deadline - time.monotonic()))
+            duration = '%d:%02d:%02d' % (seconds // 3600, seconds // 60 % 60, seconds % 60)
+        return {'RemainingSleepTimerDuration': duration, 'CurrentSleepTimerGeneration': self.sleep_generation}
+
+    def do_SetAudioInputAttributes(self, args):
+        if self.line_in_connected is None: raise UPnPError(401)
+        self.line_in_name, self.line_in_icon = args['DesiredName'], args['DesiredIcon']
+
+    def do_GetLineInLevel(self, args):
+        if self.line_in_connected is None: raise UPnPError(401)
+        return {'CurrentLeftLineInLevel': self.line_in_levels[0], 'CurrentRightLineInLevel': self.line_in_levels[1]}
+
+    def do_SetLineInLevel(self, args):
+        if self.line_in_connected is None: raise UPnPError(401)
+        values = int(args['DesiredLeftLineInLevel']), int(args['DesiredRightLineInLevel'])
+        if any(not -(2**31) <= value < 2**31 for value in values): raise UPnPError(402)
+        self.line_in_levels = values
+
+    def do_GetZoneInfo(self, args):
+        return {'SerialNumber': '00-0E-58-FA-KE-00:0', 'SoftwareVersion': '57.23-74170',
+                'DisplaySoftwareVersion': '11.16.1', 'HardwareVersion': '1.1.1.1-1',
+                'IPAddress': '127.0.0.1', 'MACAddress': '00:0E:58:FA:KE:00', 'ExtraInfo': ''}
+
+    def do_GetZoneAttributes(self, args):
+        return {'CurrentZoneName': self.name, 'CurrentIcon': '', 'CurrentConfiguration': '1'}
 
     def do_Play(self, args): self.need_coordinator(); self.transport = 'PLAYING'
     def do_Pause(self, args): self.need_coordinator(); self.transport = 'PAUSED_PLAYBACK'
@@ -279,7 +463,10 @@ class FakePlayer:
 
     def do_Browse(self, args):
         object_id, start, count = args['ObjectID'], int(args['StartingIndex']), int(args['RequestedCount'])
-        if object_id == 'Q:0':
+        if object_id == 'AI:' and self.line_in_connected is not None:
+            children = [entry('AI:0', self.line_in_name, 'AI:', 'object.item.audioItem',
+                              res='x-rincon-stream:' + self.uuid)]
+        elif object_id == 'Q:0':
             children = [entry('Q:0/%d' % n, uri.rsplit('/', 1)[-1], 'Q:0', res=uri, art=PICTURE_PATH + '?u=%d' % n)
                         for n, (uri, _) in enumerate(self.queue, 1)]
         elif object_id in self.household.library:

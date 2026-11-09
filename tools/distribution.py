@@ -1,22 +1,38 @@
 #!/usr/bin/env python3
 """Build/copy the distributable tree without local credentials or research captures."""
 import argparse
+import io
+import json
 from pathlib import Path
 import shutil
 import tarfile
 
+import build_info
+
 ROOT = Path(__file__).resolve().parent.parent
-RUNTIME = '''bridge_service.py sonosnet_link.py frames.py ccmp.py zoneplayers.py
-backends.py content.py ha_backend.py ha_client.py ha_content.py room_icons.py music_service_events.py
-smapi_stub.py sonos_queue_art.py spotify_auth.py spotify_client.py spotify_playback.py
-spotify_service.py webui.py netstart_pair.py synthetic_public_key.bin fake_ha.py
-sonos_backend.py sonos_content.py sonos_upnp.py fake_sonos.py
+RUNTIME = '''bridge_service.py controller_state.py controller_visibility.py sonosnet_link.py nexmon_power.py nexmon_clock.py frames.py ccmp.py ccmp_pn.py zoneplayers.py
+backends.py bridge_config.py provider_playback.py room_capabilities.py sonos_settings.py content.py ha_backend.py ha_client.py ha_content.py ha_linein.py room_icons.py music_service_events.py
+smapi_service.py smapi_stub.py speaker_settings.py music_services.py music_service_registry.py sonos_queue_art.py spotify_auth.py spotify_client.py spotify_playback.py
+spotify_service.py spotify_ui_actions.py spotify_menu.py spotify_folders.py spotify_controllers.py spotify_connect.py spotify_autoplay.py webui.py netstart_pair.py synthetic_public_key.bin fake_ha.py
+sonos_backend.py sonos_content.py sonos_upnp.py sonos_identity.py fake_sonos.py build_info.py
+radio_store.py radiotime.py radio_catalog.py native_radio.py radio_playback.py radio_management.py radio_runtime.py radio_transcode.py alarms.py alarm_runtime.py alarm_timezones.py patch_native_radio_ui.py patch_controller_settings_ui.py
+online_updates.py update_transport.py update_service.py ui_events.py
 distribution.py'''.split()
+FIRMWARE_ASSETS = '''README.md .gitignore ownership.c ownership.h tsf_query.c tsf_query.h
+shm_query.c shm_query.h beacon_stamp.c beacon_stamp.h build.py manifest.json
+status.py apply.py test_build.py test_ownership.c test_beacon_stamp.c test_shm_query.c
+test_status.py test_apply.py'''.split()
 
 
 def files(root=ROOT):
-    selected = [root / name for name in ('install.sh', 'README.md', 'requirements.txt', '.gitignore', '.gitattributes')]
+    selected = [root / name for name in ('install.sh', 'README.md', 'BACKEND-FEASIBILITY.md',
+                                        'RESEARCH.md', 'RESEARCH-MVP-2026-10-31.md', 'DIALOGS.md',
+                                        'CONTROLLER-UI.md', 'CONTROLLER-DEPLOYMENT.md', 'RADIO.md', 'RADIO-ACCEPTANCE.md', 'TUNEIN-RADIO-PLAN.md',
+                                        'requirements.txt', '.gitignore', '.gitattributes')]
     selected += [root / 'tools' / name for name in RUNTIME]
+    selected += [root / 'docs/ONLINE-UPDATES.md']
+    selected += sorted((root / 'docs/radio-validation').glob('*.png'))
+    selected += [root / 'firmware/nexmon-ownership' / name for name in FIRMWARE_ASSETS]
     selected += sorted((root / 'tools').glob('test_*.py'))
     for name in ('systemd', 'scripts', 'config', '.github', 'tools/zp80', 'tools/webui'):
         selected += sorted(p for p in (root / name).rglob('*')
@@ -27,12 +43,30 @@ def files(root=ROOT):
 
 
 def copy(destination, root=ROOT):
+    root = Path(root).resolve()
     destination = Path(destination).resolve()
-    if destination == root.resolve(): raise ValueError('Choose a destination outside the source tree')
+    if destination == root: raise ValueError('Choose a destination outside the source tree')
+    metadata = _metadata(root)   # before writing: output must not make its own source dirty
     for path in files(root):
         target = destination / path.relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
+    (destination / build_info.STAMP).write_bytes(metadata)
+
+
+def _metadata(root):
+    return (json.dumps(build_info.read(root), indent=2, sort_keys=True) + '\n').encode()
+
+
+def archive(destination, root=ROOT):
+    root = Path(root).resolve()
+    metadata = _metadata(root)
+    with tarfile.open(destination, 'w:gz') as bundle:
+        for path in files(root):
+            bundle.add(path, arcname=Path('cr100-bridge') / path.relative_to(root), recursive=False)
+        stamp = tarfile.TarInfo('cr100-bridge/' + build_info.STAMP)
+        stamp.size, stamp.mode = len(metadata), 0o644
+        bundle.addfile(stamp, io.BytesIO(metadata))
 
 
 def main():
@@ -44,9 +78,7 @@ def main():
     if args.copy:
         copy(args.copy)
     else:
-        with tarfile.open(args.archive, 'w:gz') as archive:
-            for path in files():
-                archive.add(path, arcname=Path('cr100-bridge') / path.relative_to(ROOT), recursive=False)
+        archive(args.archive)
 
 
 if __name__ == '__main__': main()

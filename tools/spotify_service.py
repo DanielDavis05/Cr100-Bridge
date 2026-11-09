@@ -8,9 +8,11 @@ service. Request logging deliberately excludes SOAP headers and credentials.
 from __future__ import annotations
 
 import collections
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import Future
 import hashlib
 import io
+import json
 import re
 import threading
 import time
@@ -18,9 +20,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
-from smapi_stub import SMAPI_NS, SOAP_NS, SmapiStub, collection, text
+from smapi_service import SmapiService, collection, text
 from spotify_client import SpotifyError
 from spotify_playback import owns, resolve_playback
+from spotify_menu import (ALIAS_PREFIX, FeatureLocked, LOCK_MESSAGE, menu_for_controller,
+                          scoped_id, unscoped_id)
 
 
 ID = re.compile(r'^spotify:(track|album|artist|playlist):([A-Za-z0-9]{22})$')
@@ -34,6 +38,7 @@ CACHE_TTL = 30
 POLL_INTERVAL = 300
 CACHE_LIMIT = 128
 NODE_LIMIT = 4000
+SCOPED_CONTEXT_LIMIT = 16000
 ART_LIMIT = 128
 ART_BYTES = 4 * 1024 * 1024
 ART_PIXELS = 16_000_000
@@ -52,9 +57,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('Image redirects are not supported')
 
 
-class SpotifyService(SmapiStub):
-    def __init__(self, host, port, client, service_id=240, name='Spotify', log=print, capabilities='1'):
+class SpotifyService(SmapiService):
+    response_event = 'spotify-smapi'
+
+    def __init__(self, host, port, client, service_id=240, name='Spotify', log=print, capabilities='1', *,
+                 menu_settings=None, controller_resolver=None, folder_provider=None, on_locked=None,
+                 playback_policy=None):
         self.client = client
+        self.menu_settings = menu_settings
+        self.controller_resolver = controller_resolver
+        self.folder_provider = folder_provider
+        self.playback_policy = playback_policy
+        self.on_locked = on_locked
+        self.issued_contexts = collections.OrderedDict()
         self.lock = threading.RLock()
         self.cache = collections.OrderedDict()
         self.search_snapshots = collections.OrderedDict()
@@ -62,8 +77,14 @@ class SpotifyService(SmapiStub):
         self.catalog_version = 1
         self.images = collections.OrderedDict()
         self.image_sources = collections.OrderedDict()
-        super().__init__(host, port, service_id, name, log, capabilities)
+        # The CR100 opens its keyboard only through the native Search insertion.
+        # A service-supplied itemType="search" remains an ordinary container in
+        # this firmware, so Search keeps its native label/position. Its category
+        # requests and callbacks still use the controller's own lock policy.
+        super().__init__(host, port, service_id, name, log, '1' if menu_settings is not None else capabilities)
         self.nodes = collections.OrderedDict()
+        from spotify_ui_actions import SpotifyUIActions
+        self.ui_actions = SpotifyUIActions(self)
         self.root_nodes = [collection('library:playlists', 'My Playlists'),
                            collection('library:albums', 'Saved Albums'),
                            collection('library:tracks', 'Liked Songs')]
@@ -71,27 +92,218 @@ class SpotifyService(SmapiStub):
         self._remember(collection('root', name), collection('search', 'Search'),
                        *self.root_nodes, *self.search_nodes)
 
-    def make_art(self):
-        return None
-
     def descriptor(self):
         values = super().descriptor()
-        values['AvailableServiceListVersion'] = '3'
+        values['AvailableServiceListVersion'] = '5' if self.menu_settings is not None else '3'
         services = ET.fromstring(values['AvailableServiceDescriptorList'])
         services.find('./Service/Policy').set('PollInterval', str(POLL_INTERVAL))
         values['AvailableServiceDescriptorList'] = ET.tostring(services, encoding='unicode')
         return values
 
+    def ui_event_handlers(self):
+        """Provider actions for the optional custom native controller interface."""
+        return self.ui_actions.handlers()
+
     def owns(self, uri, metadata=''):
         return owns(uri, metadata, service_id=self.service_id)
 
-    def resolve_playback(self, uri, metadata=''):
-        return resolve_playback(uri, metadata, service_id=self.service_id)
+    def playback_policy_for(self, uri, metadata=''):
+        return self.playback_policy if self.owns(uri, metadata) else None
+
+    def resolve_playback(self, uri, metadata='', controller_ip=None):
+        if self.menu_settings is None:
+            return resolve_playback(uri, metadata, service_id=self.service_id)
+        contexts = set()
+        def decode(value):
+            try:
+                entry, raw = self._resolve_scope(value)
+            except (LookupError, CatalogueError) as error:
+                # Player transports map ValueError to a safe UPnP fault. Menu
+                # refresh/unavailable-folder errors must use that same path.
+                # FeatureLocked is already a ValueError and stays identifiable.
+                raise ValueError(str(error)) from None
+            contexts.add(entry['id'])
+            if not ID.fullmatch(raw):
+                raise ValueError('This menu item cannot be played.')
+            return raw
+        with self.request_context(controller_ip) if controller_ip is not None else nullcontext():
+            result = resolve_playback(uri, metadata, service_id=self.service_id, item_decoder=decode)
+            if len(contexts) != 1:
+                raise ValueError('Playback metadata has inconsistent menu context.')
+            return result
 
     def start(self):
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.log({'event': 'spotify-service', 'uri': self.uri, 'id': self.service_id,
-                  'type': self.service_type})
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError('Music service is closed')
+            if self._http_thread is not None:
+                return
+            if self.folder_provider is not None:
+                self.folder_provider.start()
+            if self.playback_policy is not None:
+                self.playback_policy.start()
+            self._start_http_server()
+            self.log({'event': 'spotify-service', 'uri': self.uri, 'id': self.service_id,
+                      'type': self.service_type})
+
+    def close(self):
+        # Runtime policies stop scheduling first; their finalizers must never
+        # outlive the provider's HTTP listener or credential reader.
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            try:
+                if self.playback_policy is not None:
+                    self.playback_policy.close()
+            finally:
+                try:
+                    if self.folder_provider is not None:
+                        self.folder_provider.close()
+                finally:
+                    super().close()
+
+    @contextmanager
+    def _scope(self, entry_id):
+        old = getattr(self.request, 'entry', None)
+        self.request.entry = entry_id
+        try:
+            yield
+        finally:
+            self.request.entry = old
+
+    def _menu(self):
+        address = getattr(self.request, 'address', None)
+        mac = self.controller_resolver(address) if self.controller_resolver and address else None
+        settings = self.menu_settings() if callable(self.menu_settings) else self.menu_settings
+        return menu_for_controller(settings, mac)
+
+    def _context_key(self, entry, raw):
+        address = getattr(self.request, 'address', None)
+        mac = self.controller_resolver(address) if self.controller_resolver and address else None
+        # An unresolved caller must not inherit another anonymous caller's issued
+        # descendants merely because both currently use the default profile.
+        identity = mac.lower() if isinstance(mac, str) else address
+        return identity, entry['id'], entry['kind'], entry['target'], raw
+
+    def _issue(self, entry, raw):
+        key = self._context_key(entry, raw)
+        with self.lock:
+            self.issued_contexts[key] = None
+            self.issued_contexts.move_to_end(key)
+            while len(self.issued_contexts) > SCOPED_CONTEXT_LIMIT:
+                self.issued_contexts.popitem(last=False)
+
+    def _was_issued(self, entry, raw):
+        key = self._context_key(entry, raw)
+        with self.lock:
+            if key not in self.issued_contexts:
+                return False
+            self.issued_contexts.move_to_end(key)
+            return True
+
+    def _entry(self, entry_id):
+        entry = next((n for n in self._menu() if n['id'] == entry_id), None)
+        if entry is None:
+            raise LookupError('This menu shortcut is no longer available. Refresh Spotify.')
+        if entry['locked']:
+            if self.on_locked:
+                try:
+                    self.on_locked(getattr(self.request, 'address', None), LOCK_MESSAGE)
+                except Exception:
+                    # Notification delivery cannot turn a denial into an allowed
+                    # request or expose transport/internal exception details.
+                    self.log({'event': 'spotify-lock-notice-failed'})
+            raise FeatureLocked()
+        return entry
+
+    @staticmethod
+    def _entry_target(entry):
+        if entry['kind'] == 'builtin':
+            return 'search' if entry['target'] == 'search' else 'library:' + entry['target']
+        if entry['kind'] == 'folder':
+            return 'folder:' + entry['target']
+        return entry['target']
+
+    def _resolve_scope(self, item_id):
+        entry_id, raw = unscoped_id(item_id)
+        entry = self._entry(entry_id)
+        if raw.startswith('library:') and raw != self._entry_target(entry):
+            raise ValueError('Invalid library menu context.')
+        if raw == 'search' or raw.startswith('category:'):
+            if entry['kind'] != 'builtin' or entry['target'] != 'search':
+                raise ValueError('Invalid search menu context.')
+        elif not (raw.startswith('folder:') or raw.startswith('library:') or ID.fullmatch(raw)):
+            raise ValueError('Invalid Spotify menu item.')
+        if raw.startswith('folder:') and entry['kind'] != 'folder':
+            raise ValueError('Invalid folder menu context.')
+        if raw.startswith('folder:'):
+            folder = self._folder(entry['target'])
+            def contains(node):
+                return node.get('kind') == 'folder' and (node.get('id') == raw[7:]
+                    or any(contains(child) for child in node.get('children', [])))
+            if not contains(folder):
+                raise ValueError('This folder is outside the selected shortcut.')
+        elif raw != self._entry_target(entry) \
+                and not (entry['kind'] == 'builtin' and entry['target'] == 'search'
+                         and raw.startswith('category:') and raw[9:] in SEARCH) \
+                and not self._was_issued(entry, raw):
+            raise LookupError('This cached menu item is unavailable. Refresh Spotify from the Music menu.')
+        return entry, raw
+
+    def _check_scope(self):
+        entry = getattr(self.request, 'entry', None)
+        if entry is not None:
+            self._entry(entry)
+
+    def _scoped_node(self, node, entry_id):
+        entry = self._entry(entry_id)
+        scoped = dict(node)
+        if not scoped['id'].startswith(ALIAS_PREFIX):
+            self._issue(entry, scoped['id'])
+            scoped['id'] = scoped_id(entry_id, scoped['id'])
+        if scoped.get('albumId') and not scoped['albumId'].startswith(ALIAS_PREFIX):
+            self._issue(entry, scoped['albumId'])
+            scoped['albumId'] = scoped_id(entry_id, scoped['albumId'])
+        return scoped
+
+    def _menu_node(self, raw, label):
+        if raw.startswith('spotify:'):
+            kind = raw.split(':', 2)[1]
+            if kind == 'track':
+                return {'id': raw, 'title': label, 'itemType': 'track', 'mimeType': 'audio/mpeg',
+                        'artist': '', 'album': '', 'albumId': '', 'duration': 0, 'canPlay': True, '_stub': True}
+            return {**collection(raw, label, kind, can_play=kind in ('playlist', 'album')), '_stub': True}
+        return collection(raw, label)
+
+    def _root_menu(self):
+        nodes = []
+        for entry in self._menu():
+            if entry['kind'] == 'builtin' and entry['target'] == 'search':
+                # Capabilities=1 supplies this row before the root response.
+                continue
+            raw = self._entry_target(entry)
+            # Do not fetch locked content merely to decorate its visible shortcut.
+            node = collection(raw, entry['label']) if entry['locked'] else self._menu_node(raw, entry['label'])
+            node['id'] = scoped_id(entry['id'], raw)
+            nodes.append(node)
+        return nodes
+
+    def _folder(self, ident):
+        if self.folder_provider is None:
+            raise CatalogueError('Connect Spotify folders in bridge setup.')
+        node = self.folder_provider.find(ident)
+        if node is None:
+            raise CatalogueError('This Spotify folder is unavailable. Refresh folders in bridge setup.')
+        return node
+
+    def _folder_nodes(self, ident):
+        result = []
+        for child in self._folder(ident).get('children', []):
+            if child.get('kind') == 'folder':
+                result.append(collection('folder:' + child['id'], child['name']))
+            elif child.get('kind') in ('playlist', 'album', 'track'):
+                result.append(self._menu_node(child['uri'], child.get('name') or 'Spotify ' + child['kind']))
+        return result
 
     def _remember(self, *nodes):
         with self.lock:
@@ -101,14 +313,16 @@ class SpotifyService(SmapiStub):
             while len(self.nodes) > NODE_LIMIT:
                 self.nodes.popitem(last=False)
 
-    def _get(self, path, params=None):
-        key = (path, tuple(sorted((params or {}).items())))
+    def _get(self, path, params=None, *, cache_context=None):
+        self._check_scope()
+        key = (path, tuple(sorted((params or {}).items())), cache_context)
         with self.lock:
             hit = self.cache.get(key)
             if hit and time.monotonic() - hit[0] < CACHE_TTL:
                 self.cache.move_to_end(key)
                 return hit[1]
         result = self.client.get(path, params=params)
+        self._check_scope()
         if not isinstance(result, dict):
             raise CatalogueError('Spotify returned an unreadable response. Try again.')
         with self.lock:
@@ -129,16 +343,25 @@ class SpotifyService(SmapiStub):
         return index, min(count or limit, limit)
 
     def _page(self, nodes, index, total, wrapper):
+        self._check_scope()
         self._remember(*nodes)
+        entry = getattr(self.request, 'entry', None)
+        if entry is not None:
+            nodes = [self._scoped_node(n, entry) for n in nodes]
         return ('<%s><index>%d</index><count>%d</count><total>%d</total>%s</%s>'
                 % (wrapper, index, len(nodes), total, ''.join(self.entry(n) for n in nodes), wrapper))
 
-    def _api_page(self, path, args, kind, wrapper='getMetadataResult', params=None, album=None):
+    def _api_page(self, path, args, kind, wrapper='getMetadataResult', params=None, album=None, collection_id=None):
         index, count = self._paging(args)
-        data = self._get(path, {**(params or {}), 'offset': index, 'limit': count})
-        return self._result(data, kind, index, wrapper, album=album)
+        snapshot = self.ui_actions.browse_snapshot(collection_id or '')
+        data = self._get(path, {**(params or {}), 'offset': index, 'limit': count}, cache_context=snapshot)
+        if snapshot is not None and self.ui_actions.browse_snapshot(collection_id) != snapshot:
+            snapshot = None  # Ordinary browse works; occurrence actions require verified provenance.
+        return self._result(data, kind, index, wrapper, album=album, collection_id=collection_id,
+                            collection_snapshot=snapshot, requested_count=count)
 
-    def _result(self, data, kind, index, wrapper, album=None):
+    def _result(self, data, kind, index, wrapper, album=None, collection_id=None, collection_snapshot=None,
+                requested_count=None):
         items, total = data.get('items'), data.get('total')
         if not isinstance(items, list) or not isinstance(total, int) or total < 0:
             raise CatalogueError('Spotify cannot provide this list. Check access in bridge setup.')
@@ -154,6 +377,9 @@ class SpotifyService(SmapiStub):
             # local, or episode entries can make the CR100 repeat the same page.
             # A mixed/unavailable page therefore has an explicit error instead.
             nodes.append(self._node(item, expected, album=album))
+        if collection_id is not None:
+            self.ui_actions.record(collection_id, index, total, nodes, snapshot=collection_snapshot,
+                                   requested_count=requested_count)
         return self._page(nodes, index, total, wrapper)
 
     def _node(self, item, kind=None, album=None):
@@ -185,10 +411,10 @@ class SpotifyService(SmapiStub):
             node['image'] = self._image_url(item.get('images') or [])
         return node
 
-    def node(self, item_id):
+    def _raw_node(self, item_id):
         with self.lock:
             node = self.nodes.get(item_id)
-            if node:
+            if node and not node.get('_stub'):
                 self.nodes.move_to_end(item_id)
                 return node
         match = ID.fullmatch(item_id or '')
@@ -199,7 +425,53 @@ class SpotifyService(SmapiStub):
         self._remember(node)
         return node
 
+    def node(self, item_id):
+        if self.menu_settings is None:
+            return self._raw_node(item_id)
+        if isinstance(item_id, str) and item_id.startswith(ALIAS_PREFIX):
+            entry, raw = self._resolve_scope(item_id)
+            with self._scope(entry['id']):
+                if raw.startswith('folder:'):
+                    node = collection(raw, self._folder(raw[7:])['name'])
+                elif raw in ('search', 'library:playlists', 'library:albums', 'library:tracks'):
+                    node = collection(raw, entry['label'])
+                else:
+                    node = self._raw_node(raw)
+                if raw == self._entry_target(entry):
+                    node = {**node, 'title': entry['label']}
+                return self._scoped_node(node, entry['id'])
+        if getattr(self.request, 'entry', None) is not None:
+            self._check_scope()
+            return self._raw_node(item_id)
+        raise ValueError('Refresh Spotify from the Music menu before opening this item.')
+
     def get_metadata(self, args):
+        if self.menu_settings is None:
+            return self._get_metadata_raw(args)
+        item_id = args.get('id') or ''
+        index, count = self._paging(args)
+        if item_id == 'root':
+            nodes = self._root_menu()
+            with self._scope(None):
+                return self._page(nodes[index:index + count], index, len(nodes), 'getMetadataResult')
+        if item_id == 'search' or item_id in ('library:playlists', 'library:albums', 'library:tracks'):
+            # Old cached standard-section IDs remain policy checked during the
+            # upgrade. Raw arbitrary Spotify IDs cannot bypass route context.
+            builtin = 'search' if item_id == 'search' else item_id[8:]
+            entry = self._entry(builtin)
+            raw = item_id
+        else:
+            entry, raw = self._resolve_scope(item_id)
+        with self._scope(entry['id']):
+            if raw == 'search':
+                nodes = [collection('category:' + key, key.title(), 'search') for key in SEARCH]
+                return self._page(nodes[index:index + count], index, len(nodes), 'getMetadataResult')
+            if raw.startswith('folder:'):
+                nodes = self._folder_nodes(raw[7:])
+                return self._page(nodes[index:index + count], index, len(nodes), 'getMetadataResult')
+            return self._get_metadata_raw({**args, 'id': raw})
+
+    def _get_metadata_raw(self, args):
         item_id = args.get('id') or ''
         index, count = self._paging(args)
         if item_id in ('root', 'search'):
@@ -222,15 +494,29 @@ class SpotifyService(SmapiStub):
             album_node = self.node(item_id)
             album = {'id': ident, 'name': album_node['title'],
                      'images': [{'url': album_node['image']}] if album_node.get('image') else []}
-            return self._api_page('/albums/%s/tracks' % ident, args, 'track', album=album)
+            return self._api_page('/albums/%s/tracks' % ident, args, 'track', album=album, collection_id=item_id)
         if kind == 'artist':
             return self._api_page('/artists/%s/albums' % ident, args, 'album',
                                   params={'include_groups': 'album,single'})
         if kind == 'playlist':
-            return self._api_page('/playlists/%s/items' % ident, args, 'playlist_item')
+            return self._api_page('/playlists/%s/items' % ident, args, 'playlist_item', collection_id=item_id)
         raise LookupError('A track is not a browsable collection.')
 
     def search(self, args):
+        if self.menu_settings is None:
+            return self._search_raw(args)
+        category = args.get('id') or ''
+        if category.startswith(ALIAS_PREFIX):
+            entry, raw = self._resolve_scope(category)
+            if not raw.startswith('category:'):
+                raise LookupError('No such Spotify search category.')
+            category = raw[9:]
+        else:
+            entry = self._entry('search')
+        with self._scope(entry['id']):
+            return self._search_raw({**args, 'id': category})
+
+    def _search_raw(self, args):
         category = args.get('id') or ''
         kind = SEARCH.get(category)
         if not kind:
@@ -325,10 +611,17 @@ class SpotifyService(SmapiStub):
             # explicit catalogue mutations may call invalidate_catalog().
             with self.lock:
                 version = str(self.catalog_version)
+            if self.menu_settings is not None:
+                revision = self.folder_provider.revision if self.folder_provider is not None else ''
+                content = json.dumps([self._menu(), revision, version], sort_keys=True, separators=(',', ':'))
+                version = str(int.from_bytes(hashlib.sha256(content.encode()).digest()[:4], 'big'))
             return ('<getLastUpdateResult><catalog>%s</catalog><favorites>%s</favorites>'
                     '<pollInterval>%d</pollInterval></getLastUpdateResult>'
                     % (version, version, POLL_INTERVAL))
         if method == 'getMediaURI':
+            if self.menu_settings is not None and isinstance(args.get('id'), str) \
+                    and args['id'].startswith(ALIAS_PREFIX):
+                self._resolve_scope(args['id'])
             raise CatalogueError('Play this item through a Sonos room linked to Spotify.')
         if method == 'getSessionId':
             raise CatalogueError('Connect Spotify in bridge setup.')
@@ -429,34 +722,13 @@ class SpotifyService(SmapiStub):
         else:
             self.reply(request, 404, b'Not found', 'text/plain')
 
-    def handle_post(self, request):
-        method, args = '', {}
-        try:
-            length = int(request.headers.get('Content-Length') or 0)
-            if not 0 < length <= 1 << 20:
-                request.close_connection = True
-                raise CatalogueError('Invalid request.')
-            raw = request.rfile.read(length)
-            if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
-                raise CatalogueError('Invalid request.')
-            envelope = ET.fromstring(raw)
-            body = envelope.find('{%s}Body' % SOAP_NS)
-            if envelope.tag != '{%s}Envelope' % SOAP_NS or body is None or len(body) != 1:
-                raise CatalogueError('Invalid request.')
-            call = body[0]
-            if not call.tag.startswith('{%s}' % SMAPI_NS):
-                raise CatalogueError('Invalid request.')
-            method = call.tag.rpartition('}')[2]
-            args = {child.tag.rpartition('}')[2]: child.text or '' for child in call}
-            result = self.dispatch(method, args)
-            status, xml = 200, self.envelope('<%sResponse xmlns="%s">%s</%sResponse>'
-                                            % (method, SMAPI_NS, result, method))
-        except SpotifyError as error:
+    def error_fault(self, error):
+        if isinstance(error, FeatureLocked):
+            return 'Client.FeatureLocked', LOCK_MESSAGE
+        if isinstance(error, SpotifyError):
             code = 'Server.ServiceUnavailable'
             if error.status in (401, 403):
-                # Auth is Anonymous on the controller; LoginInvalid would send
-                # it into its legacy account repair flow. OAuth is repaired on
-                # the bridge, not through a CR100 username/password dialog.
+                # Controller auth is anonymous; OAuth is repaired on the bridge.
                 message = 'Check Spotify authorization and access in bridge setup.'
             elif error.status == 429:
                 message = 'Spotify is busy. Wait a little and try again.'
@@ -464,13 +736,11 @@ class SpotifyService(SmapiStub):
                 code, message = 'Client.ItemNotFound', 'This Spotify item is unavailable.'
             else:
                 message = 'Spotify is unavailable. Try again shortly.'
-            status, xml = 500, self.fault(code, message)
-        except (ET.ParseError, IndexError, AttributeError, TypeError, ValueError, OverflowError, CatalogueError) as error:
-            message = str(error) if isinstance(error, CatalogueError) else 'Invalid request or Spotify response.'
-            status, xml = 500, self.fault('Client.InvalidRequest', message)
-        except LookupError:
-            status, xml = 500, self.fault('Client.ItemNotFound', 'This Spotify item is unavailable.')
-        except NotImplementedError:
-            status, xml = 500, self.fault('Server.NotImplemented', 'This action is unavailable.')
-        self.log({'event': 'spotify-smapi', 'method': method, 'status': status})
-        self.reply(request, status, xml.encode())
+            return code, message
+        if isinstance(error, CatalogueError):
+            return 'Client.InvalidRequest', str(error)
+        if isinstance(error, (IndexError, AttributeError, TypeError, ValueError, OverflowError)):
+            return 'Client.InvalidRequest', 'Invalid request or Spotify response.'
+        if isinstance(error, LookupError):
+            return 'Client.ItemNotFound', 'This Spotify item is unavailable.'
+        return super().error_fault(error)

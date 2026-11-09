@@ -5,3 +5,5 @@ Pillow==13.0.0
 scapy==2.8.0
 cffi==2.1.1
 pycparser==3.12
+# Native control session is loaded only for bridge-controlled Spotify Autoplay.
+librespot==0.0.10

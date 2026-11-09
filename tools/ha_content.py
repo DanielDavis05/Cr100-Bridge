@@ -11,13 +11,15 @@ they are.
 from __future__ import annotations
 
 import dataclasses
+import collections
 import html
 import re
 from urllib.parse import quote, unquote
 
-from content import (BROADCAST_CLASS, CACHE_TTL, PLAIN_SCHEMES, RADIO_PREFIX, TRACK_CLASS, ContentError,
+from content import (BROADCAST_CLASS, CACHE_TTL, NODE_LIMIT, PLAIN_SCHEMES, RADIO_PREFIX, TRACK_CLASS, ContentError,
                      ContentSource, Node, derived_id)
 from sonos_queue_art import SonosQueueArt
+from room_capabilities import RoomBinding
 
 QUEUE_TTL = 2.0           # the CR100 asks for Q:0 metadata many times in a row
 BROWSE_TIMEOUT = 30
@@ -65,22 +67,31 @@ class Content(ContentSource):
     """The household's content, browsed through any Sonos room's media_player entity
     (the room key is its entity_id)."""
 
-    def __init__(self, ha, art=None, log=print):
+    def __init__(self, ha, art=None, log=print, binding=None):
         super().__init__(art, log)
         self.ha = ha
+        self.binding = binding or (lambda entity: RoomBinding())
+        self.generic_owners = collections.OrderedDict()
         self.queue_art = SonosQueueArt(ha, log) if art else None
 
     # --- Home Assistant -------------------------------------------------------------
-    def browse_ha(self, entity, ha_id, ha_type):
+    def browse_ha(self, entity, ha_id=None, ha_type=None):
         try:
-            return self.ha.call({'type': 'media_player/browse_media', 'entity_id': entity,
-                                 'media_content_id': ha_id, 'media_content_type': ha_type}, BROWSE_TIMEOUT)
+            attributes = (self.ha.state(entity).get('attributes') or {})
+            if not int(attributes.get('supported_features') or 0) & 131072:
+                raise ContentError(720, 'Media browsing is unavailable for this Home Assistant player')
+            request = {'type': 'media_player/browse_media', 'entity_id': entity}
+            if ha_id is not None:
+                request.update(media_content_id=ha_id, media_content_type=ha_type)
+            return self.ha.call(request, BROWSE_TIMEOUT)
         except Exception as error:
             self.log({'event': 'browse-failed', 'entity': entity, 'id': ha_id, 'error': str(error)})
             raise ContentError(720, 'Cannot process the request: %s' % error) from error
 
     def queue(self, entity):
         """The room's queue as Q:0/<n> items (1-based, as the CR100 numbers tracks)."""
+        if not self.binding(entity).is_sonos:
+            raise ContentError(720, 'Native queue browsing is unavailable for this Home Assistant player')
         nodes = self.cached((entity, 'Q:0'), QUEUE_TTL)
         if nodes is not None: return nodes
         try:
@@ -120,12 +131,12 @@ class Content(ContentSource):
         if not node.thumbnail and isinstance(picture, str): node.thumbnail = picture
         return nodes
 
-    def node_from(self, parent, child, favourite=False):
+    def node_from(self, parent, child, favourite=False, scope=None):
         ha_id, ha_type = child['media_content_id'], child['media_content_type']
         # A favourite keeps an FV:2 ID even when it is a playlist (SQ:2): the same playlist
         # under Sonos Playlists is a container and must not be confused with it.
-        native = ha_id.startswith('FV:2/') if favourite else ha_id.startswith(NATIVE_PREFIXES)
-        object_id = ha_id if native else derived_id(parent, ha_id, ha_type)
+        native = not scope and (ha_id.startswith('FV:2/') if favourite else ha_id.startswith(NATIVE_PREFIXES))
+        object_id = ha_id if native else derived_id(parent + ('@' + scope if scope else ''), ha_id, ha_type)
         media_class = child.get('media_class') or ''
         # Favourites play at once, whatever they are (Home Assistant replaces the queue for them).
         container = bool(child.get('can_expand')) and not favourite
@@ -163,6 +174,8 @@ class Content(ContentSource):
 
     def children(self, entity, object_id):
         if object_id == 'Q:0': return self.queue(entity)
+        if not self.binding(entity).is_sonos:
+            return self.generic_children(entity, object_id)
         nodes = self.cached(object_id, CACHE_TTL)
         if nodes is not None: return nodes
         if object_id == 'AI:': nodes = []
@@ -175,8 +188,41 @@ class Content(ContentSource):
         self.store(object_id, nodes)
         return nodes
 
+    def generic_children(self, entity, object_id):
+        """HA's opaque browse tree, without inventing Sonos catalog categories."""
+        if object_id == 'AI:': return []
+        with self.lock:
+            node = self.nodes.get(object_id)
+            owner = self.generic_owners.get(object_id)
+        if object_id != 'A:' and (owner != entity or not node or not node.container):
+            raise ContentError(701, 'This player has no such media collection')
+        key = ('ha-browser', entity, object_id)
+        nodes = self.cached(key, CACHE_TTL)
+        if nodes is not None: return nodes
+        result = self.browse_ha(entity) if object_id == 'A:' else self.browse_ha(entity, node.ref, node.kind)
+        nodes = [self.node_from(object_id, child, scope=entity) for child in result.get('children') or []]
+        for child in nodes:
+            self.register(child)
+            with self.lock:
+                self.generic_owners[child.object_id] = entity
+                self.generic_owners.move_to_end(child.object_id)
+                while len(self.generic_owners) > NODE_LIMIT: self.generic_owners.popitem(last=False)
+        self.store(key, nodes)
+        return nodes
+
     # --- CR100 side -------------------------------------------------------------------
     def metadata(self, entity, object_id):
+        if not self.binding(entity).is_sonos and not object_id.startswith('Q:'):
+            if object_id == 'AI:':
+                return Node('AI:', '0', 'Line-In', None, None, True, 'object.container', child_count=0)
+            if object_id == 'A:':
+                return Node('A:', '0', 'Home Assistant Media', None, None, True, 'object.container',
+                            child_count=len(self.generic_children(entity, object_id)))
+            with self.lock:
+                node = self.nodes.get(object_id)
+                owner = self.generic_owners.get(object_id)
+            if node and owner == entity: return node
+            raise ContentError(701, 'This player has no such media collection')
         if object_id in TOP:
             title, parent, _, _ = TOP[object_id]
             count = len(self.children(entity, object_id))

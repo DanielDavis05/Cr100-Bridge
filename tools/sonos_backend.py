@@ -8,9 +8,8 @@ POLL_INTERVAL while a player's events are not arriving. Transport goes to the ro
 coordinator; volume to the room itself. The Music menu is the players' own
 ContentDirectory (`sonos_content.py`), and album art comes from the players.
 
-Music services (the bridge's Spotify): Sonos must have the account linked. Items are
-queued as share links, as SoCo's ShareLinkPlugin does: the encoded URI with the
-service's SA_RINCON token in the metadata, trying the EU then the US service number.
+Music services: Sonos must have the account linked. Provider playback adapters
+prepare native queue URIs and metadata; the room executes the prepared plan.
 
 Config: {"sonos": {"hosts": ["10.0.0.130"], "event_port": 0}}, rooms {"backend": "sonos",
 "id": "RINCON_000E5820ACB601400"}. Without hosts the players are found by SSDP.
@@ -21,12 +20,18 @@ import re
 import threading
 import time
 import urllib.request
-from urllib.parse import urljoin
+import xml.etree.ElementTree as ET
+from urllib.parse import urljoin, urlsplit
 
 import sonos_upnp
-from backends import MODE_SETTINGS, PLAY_MODES, ArtStore, Backend, BackendError, Room, hms, parse_hms
+import sonos_settings
+from backends import MODE_SETTINGS, PLAY_MODES, ArtStore, Backend, BackendError, NativeSettingsRoom, hms, parse_hms, track_revision
 from content import PLAIN_SCHEMES
+from provider_playback import default_sonos_playback
+from room_capabilities import RoomBinding
 from sonos_content import SonosContent
+from sonos_identity import IdentityInventory, MAX_REQUESTS, NETWORK_TIMEOUT, physical_uuid
+from sonos_queue_art import _device_base
 from sonos_upnp import UPnPFault, didl_entry, parse_didl, soap
 
 STARTUP_WAIT = 10        # s to wait for the first topology before naming rooms
@@ -36,15 +41,12 @@ TOPOLOGY_INTERVAL = 60   # s between topology reads (also on its events)
 RETRY_TOPOLOGY = 5       # s between topology attempts until one succeeds
 POSITION_TTL = 5         # s a read position is interpolated before it is read again
 REFRESH_AFTER = (0.3, 1.5, 4.0)   # s after an action that its player is read again
-READ_TIMEOUT = 3
+# S1 ZP80 playback getters can take five seconds even while the player is
+# reachable. A shorter timeout withdraws its room and repeatedly reloads players.
+READ_TIMEOUT = 8
 ART_LIMIT = 8 * 1024 * 1024
 QUEUE_PREFIX = 'x-rincon-queue:'
-SHARE_SERVICES = (2311, 3079)    # Spotify's service numbers: EU/global, then US
-SHARE_KINDS = {   # spotify kind -> (enqueue URI prefix, item id key, class), as SoCo's ShareLinkPlugin
-    'track': ('', '00032020', 'object.item.audioItem.musicTrack'),
-    'album': ('x-rincon-cpcontainer:1004206c', '00040000', 'object.container.album.musicAlbum'),
-    'playlist': ('x-rincon-cpcontainer:1006206c', '1006206c', 'object.container.playlistContainer'),
-}
+LINE_IN_PREFIX = 'x-rincon-stream:'
 IGNORED_STREAM = re.compile(r'^(ZPSTR_\w+|)$')   # buffering/connecting placeholders, not titles
 
 
@@ -67,7 +69,11 @@ class Speaker:
         self.queue_update = 0
         self.position, self.position_at = 0.0, 0.0     # seconds, monotonic time read
         self.read_at, self.refresh_at = 0.0, []         # last full read; requested re-reads
+        self.available = None                       # cached reachability; About metadata is independent
         self.subscriptions = []
+        self.audio_in = {'connected': False, 'name': 'Line-In', 'icon': ''}
+        self.audio_subscription = None
+        self.audio_checked = False
 
     @property
     def healthy(self):
@@ -78,7 +84,8 @@ class SonosBackend(Backend):
     """One Sonos household, reached through hosts (addresses or base URLs) or discovery."""
     name = 'sonos'
 
-    def __init__(self, hosts=(), log=print, event_port=0, listener=None):
+    def __init__(self, hosts=(), log=print, event_port=0, listener=None, identity_inventory=None,
+                 settings=None, playback_adapters=None):
         super().__init__(log)
         self.hosts = list(hosts)
         self.lock = threading.RLock()
@@ -86,31 +93,59 @@ class SonosBackend(Backend):
         self.groups = []                       # [(coordinator, [members])]
         self.topology_base, self.topology_at = None, 0.0
         self.topology_subscription = None
+        self.line_in_snapshot = ()
         self.ready = threading.Event()
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.listener = listener or sonos_upnp.EventListener(log, port=event_port)
         self.art = ArtStore(self, log)
         self.content = SonosContent(self, self.art, log)
+        self.identity_inventory = identity_inventory or IdentityInventory(log)
+        self.identity_thread = None
+        self.settings = settings if settings is not None else sonos_settings.SettingsProvider(
+            self.settings_binding, self.settings_changed, coordinator_reader=self.settings_coordinator, log=log)
+        self.playback_adapters = playback_adapters if playback_adapters is not None else default_sonos_playback()
 
     # --- lifecycle --------------------------------------------------------------------
     def start(self):
+        self.settings.start()
         self.listener.start()
         threading.Thread(target=self.run, name='sonos-reads', daemon=True).start()
+        self.identity_thread = threading.Thread(target=self.run_identities, name='sonos-identities', daemon=True)
+        self.identity_thread.start()
 
     def close(self):
         self.stop.set(); self.wake.set()
+        self.settings.close()
         self.listener.close()
+        if self.identity_thread: self.identity_thread.join(NETWORK_TIMEOUT * MAX_REQUESTS + 1)
+
+    def run_identities(self):
+        # A household with many slow/offline products must not delay playback reads.
+        while not self.stop.is_set():
+            try:
+                with self.lock:
+                    seeds = {uuid: {'uuid': uuid, 'base': speaker.base, 'room_name': speaker.name}
+                             for uuid, speaker in self.speakers.items()}
+                changed = self.identity_inventory.refresh(seeds)
+                if self.stop.is_set(): return
+                for uuid in changed: self.changed(uuid)
+            except Exception:
+                self.log({'event': 'sonos-identities-unavailable'})
+            self.stop.wait(1)
 
     def run(self):
         """The one thread that reads players, so a slow player never runs two reads at once."""
         while not self.stop.is_set():
             try:
-                if time.monotonic() - self.topology_at > (TOPOLOGY_INTERVAL if self.speakers else RETRY_TOPOLOGY):
+                with self.lock:
+                    healthy = self.speakers and all(s.available is not False for s in self.speakers.values())
+                if time.monotonic() - self.topology_at > (TOPOLOGY_INTERVAL if healthy else RETRY_TOPOLOGY):
                     self.read_topology()
                 for speaker in self.due():
                     if self.stop.is_set(): return
                     self.read(speaker)
+                self.publish_line_in_changes()
             except Exception as error:
                 self.log({'event': 'sonos-read-loop-error', 'error': repr(error)})
             self.wake.wait(0.1); self.wake.clear()
@@ -121,7 +156,7 @@ class SonosBackend(Backend):
             found = []
             for speaker in self.speakers.values():
                 requested = [t for t in speaker.refresh_at if t <= now]
-                interval = RESYNC_INTERVAL if speaker.healthy else POLL_INTERVAL
+                interval = RESYNC_INTERVAL if speaker.healthy and speaker.available is not False else POLL_INTERVAL
                 if requested or now - speaker.read_at > interval:
                     speaker.refresh_at = [t for t in speaker.refresh_at if t > now]
                     found.append(speaker)
@@ -139,7 +174,7 @@ class SonosBackend(Backend):
         self.topology_at = time.monotonic()
         try:
             base, groups, zones = sonos_upnp.household(self.hosts + ([self.topology_base] if self.topology_base else []),
-                                                       READ_TIMEOUT)
+                                                       READ_TIMEOUT, discover_fallback=True)
         except UPnPFault as error:
             self.log({'event': 'sonos-topology-failed', 'error': str(error)})
             return
@@ -150,6 +185,13 @@ class SonosBackend(Backend):
             self.topology_subscription = self.listener.subscribe(base, 'ZoneGroupTopology', self.on_topology)
         self.ready.set()
 
+    def selection_snapshot(self):
+        """Reachable rooms and newly discovered rooms still awaiting their first read."""
+        with self.lock:
+            available = {'sonos:' + s.uuid: s.name for s in self.speakers.values() if s.available is True}
+            pending = {'sonos:' + s.uuid: s.name for s in self.speakers.values() if s.available is None}
+        return available, pending
+
     def on_topology(self, values):
         if 'ZoneGroupState' not in values: return   # some S2 events leave it out: read it then
         if not values['ZoneGroupState']:
@@ -158,9 +200,13 @@ class SonosBackend(Backend):
 
     def apply_topology(self, groups, zones):
         added = []
+        removed = []
         with self.lock:
             changed = groups != self.groups
             self.groups = groups
+            for uuid in set(self.speakers) - set(zones):
+                removed.append(self.speakers.pop(uuid))
+                changed = True
             for uuid, zone in zones.items():
                 speaker = self.speakers.get(uuid)
                 if speaker is None:
@@ -169,6 +215,10 @@ class SonosBackend(Backend):
                 elif (speaker.base, speaker.name) != (zone['base'], zone['name']):
                     if speaker.base != zone['base']: added.append(speaker)   # moved: subscribe there
                     speaker.base, speaker.name = zone['base'], zone['name']; changed = True
+        for speaker in removed:
+            for subscription in speaker.subscriptions: self.listener.unsubscribe(subscription)
+            if speaker.audio_subscription: self.listener.unsubscribe(speaker.audio_subscription)
+            self.changed(speaker.uuid)
         for speaker in added: self.watch(speaker)
         if changed:
             self.log({'event': 'sonos-groups', 'groups': [[self.zone_name(u) for u in members] for _, members in groups]})
@@ -176,6 +226,10 @@ class SonosBackend(Backend):
 
     def watch(self, speaker):
         for subscription in speaker.subscriptions: self.listener.unsubscribe(subscription)
+        if speaker.audio_subscription:
+            self.listener.unsubscribe(speaker.audio_subscription)
+            speaker.audio_subscription = None
+        speaker.audio_checked = False
         uuid = speaker.uuid
         speaker.subscriptions = [
             self.listener.subscribe(speaker.base, 'AVTransport', lambda v: self.on_avt(uuid, v)),
@@ -211,6 +265,7 @@ class SonosBackend(Backend):
     def read(self, speaker):
         """Everything a room shows, read from the player itself."""
         base = speaker.base
+        self.read_audio_in(speaker)
         try:
             transport = soap(base, 'AVTransport', 'GetTransportInfo', [('InstanceID', 0)], READ_TIMEOUT)
             position = soap(base, 'AVTransport', 'GetPositionInfo', [('InstanceID', 0)], READ_TIMEOUT)
@@ -220,8 +275,12 @@ class SonosBackend(Backend):
             volume = soap(base, 'RenderingControl', 'GetVolume', [('InstanceID', 0), ('Channel', 'Master')], READ_TIMEOUT)
             mute = soap(base, 'RenderingControl', 'GetMute', [('InstanceID', 0), ('Channel', 'Master')], READ_TIMEOUT)
         except UPnPFault as error:
-            speaker.read_at = time.monotonic()
+            with self.lock:
+                was_available = speaker.available
+                speaker.available = False
+                speaker.read_at = time.monotonic()
             self.log({'event': 'sonos-read-failed', 'speaker': speaker.name, 'error': str(error)})
+            if was_available is not False: self.transport_changed(speaker.uuid)
             return
         avt = {'TransportState': transport.get('CurrentTransportState', ''),
                'CurrentTrack': position.get('Track', ''), 'CurrentTrackDuration': position.get('TrackDuration', ''),
@@ -230,6 +289,8 @@ class SonosBackend(Backend):
                'AVTransportURIMetaData': media.get('CurrentURIMetaData', ''),
                'CurrentPlayMode': settings.get('PlayMode', ''), 'CurrentTransportActions': actions.get('Actions', '')}
         with self.lock:
+            was_available = speaker.available
+            speaker.available = True
             speaker.read_at = time.monotonic()
             changed = any(speaker.avt.get(k) != v for k, v in avt.items())
             speaker.avt.update(avt)
@@ -237,16 +298,66 @@ class SonosBackend(Backend):
             level, muted = number(volume.get('CurrentVolume'), None), mute.get('CurrentMute') == '1'
             changed_rendering = (level, muted) != (speaker.volume, speaker.mute)
             speaker.volume, speaker.mute = level, muted
-        if changed: self.transport_changed(speaker.uuid)
+        if changed or was_available is not True: self.transport_changed(speaker.uuid)
         elif changed_rendering: self.changed(speaker.uuid)
+
+    def read_audio_in(self, speaker):
+        """Probe input support once, then keep its connected/name state through GENA.
+
+        AudioIn is absent on speakers without an input. Its subscription is separate
+        from transport health so an unsupported input cannot force fast AVT polling.
+        Network failures are retried on the next read; a genuine UPnP unsupported
+        action is remembered until the player changes address.
+        """
+        if speaker.audio_checked: return
+        try:
+            attributes = sonos_upnp.read_line_in(speaker.base, READ_TIMEOUT)
+        except UPnPFault as error:
+            # Unsupported service/action: do not subscribe forever to a non-input player.
+            if error.code in (401, 501) or 'HTTP 404' in str(error): speaker.audio_checked = True
+            return
+        with self.lock:
+            speaker.audio_in.update(attributes)
+            speaker.audio_checked = True
+        speaker.audio_subscription = self.listener.subscribe(
+            speaker.base, 'AudioIn', lambda values: self.on_audio_in(speaker.uuid, values))
+
+    def on_audio_in(self, uuid, values):
+        speaker = self.speaker(uuid)
+        if speaker is None: return
+        cached = self.settings.values(uuid)
+        if any(name in values and str(values[name]) != str(cached.get(name))
+               for name in ('AudioInputName', 'Icon', 'LeftLineInLevel', 'RightLineInLevel')):
+            self.settings.request_refresh(uuid)
+        update = {}
+        if 'LineInConnected' in values: update['connected'] = values['LineInConnected'].lower() in ('1', 'true', 'yes')
+        if 'AudioInputName' in values: update['name'] = values['AudioInputName'] or 'Line-In'
+        if 'Icon' in values: update['icon'] = values['Icon']
+        if not update: return
+        with self.lock:
+            changed = any(speaker.audio_in.get(k) != v for k, v in update.items())
+            speaker.audio_in.update(update)
+        if changed:
+            # Source attributes are also shown on other rooms playing this input.
+            for member in list(self.speakers): self.changed(member)
 
     def read_position(self, speaker):
         try:
             position = soap(speaker.base, 'AVTransport', 'GetPositionInfo', [('InstanceID', 0)], READ_TIMEOUT)
         except UPnPFault:
             return
+        track = {target: position[source] for source, target in (
+            ('Track', 'CurrentTrack'), ('TrackDuration', 'CurrentTrackDuration'),
+            ('TrackMetaData', 'CurrentTrackMetaData'), ('TrackURI', 'CurrentTrackURI'))
+            if source in position}
         with self.lock:
+            changed = any(speaker.avt.get(key) != value for key, value in track.items())
+            speaker.avt.update(track)
             speaker.position, speaker.position_at = seconds(position.get('RelTime')), time.monotonic()
+        # GetPositionInfo is also our recovery path when Connect changes songs
+        # without a complete event. Publish only track changes, after recording
+        # position_at so a listener reading position cannot start another read.
+        if changed: self.transport_changed(speaker.uuid)
 
     def transport_changed(self, uuid):
         """A coordinator's transport is every member's."""
@@ -257,18 +368,52 @@ class SonosBackend(Backend):
         speaker = self.speaker(uuid)
         if not speaker or not update: return
         with self.lock:
+            transitioned = any(key in update and speaker.avt.get(key) != update[key]
+                               for key in ('AVTransportURI', 'CurrentTrackURI', 'CurrentTrack', 'TransportState'))
+            incomplete = not parse_didl(update.get('CurrentTrackMetaData'))
+            speaker.available = True
             speaker.avt.update({k: v for k, v in update.items() if not k.startswith('Next')})
             if 'TransportState' in update or 'CurrentTrackURI' in update: speaker.position_at = 0   # read again
+            if transitioned and incomplete:
+                # A source/track-only event can leave the previous song's
+                # metadata cached. Coalesce a burst into one prompt state read.
+                due = time.monotonic() + REFRESH_AFTER[0]
+                if not any(deadline <= due for deadline in speaker.refresh_at):
+                    speaker.refresh_at.append(due)
+        if transitioned and incomplete: self.wake.set()
         self.transport_changed(uuid)
 
     def on_rendering(self, uuid, values):
-        update = sonos_upnp.last_change(values.get('LastChange'))
         speaker = self.speaker(uuid)
-        if not speaker or not ('Volume' in update or 'Mute' in update): return
+        raw = values.get('LastChange')
+        if not speaker or not raw: return
+        try:
+            update = sonos_upnp.last_change(raw)
+            document = ET.fromstring(raw)
+        except ET.ParseError:
+            return
+        cached = self.settings.values(uuid)
+        needs_refresh = any(name in update and update[name] != cached.get(name)
+                            for name in ('Bass', 'Treble', 'Loudness', 'OutputFixed'))
+        # last_change deliberately returns only Master volume/mute. Balance
+        # changes arrive as LF/RF events and need their own native readback.
+        for instance in document:
+            if instance.get('val') != '0': continue
+            for variable in instance:
+                name, channel = sonos_upnp.local(variable.tag), variable.get('channel')
+                if name in ('Volume', 'Mute') and channel in ('LF', 'RF'):
+                    if variable.get('val', '') != cached.get(name + 'Channels', {}).get(channel):
+                        needs_refresh = True
+        if needs_refresh:
+            self.settings.request_refresh(uuid, output_fixed=update.get('OutputFixed'))
+        if not ('Volume' in update or 'Mute' in update): return
         with self.lock:
+            was_available = speaker.available
+            speaker.available = True
             if 'Volume' in update: speaker.volume = number(update['Volume'], speaker.volume)
             if 'Mute' in update: speaker.mute = update['Mute'] == '1'
-        self.changed(uuid)
+        if was_available is False: self.transport_changed(uuid)
+        else: self.changed(uuid)
 
     def on_content(self, uuid, values):
         updates = sonos_upnp.container_updates(values.get('ContainerUpdateIDs'))
@@ -280,11 +425,93 @@ class SonosBackend(Backend):
 
     # --- Backend --------------------------------------------------------------------------
     def room(self, uuid):
+        self.settings.register(uuid)
         return SonosRoom(self, uuid, self.log)
+
+    def settings_binding(self, uuid):
+        """Verified cached route only while this room's playback domain is available."""
+        speaker = self.speaker(uuid)
+        coordinator = self.speaker(self.coordinator_of(uuid)) or speaker
+        if not speaker or not coordinator or speaker.available is False or coordinator.available is False:
+            return RoomBinding()
+        return self.binding(uuid)
+
+    def settings_coordinator(self, uuid):
+        # A timer belongs to a known real coordinator, never an assumed member.
+        if not self.settings_binding(uuid).native_sonos: return None
+        with self.lock:
+            coordinator = next((key for key, members in self.groups if uuid in members), None)
+        return coordinator if coordinator and self.settings_binding(coordinator).native_sonos else None
+
+    def settings_changed(self, uuid):
+        # Native input edits must refresh the existing source menu's cache too.
+        values = self.settings.values(uuid)
+        update = {target: values[source] for source, target in
+                  (('AudioInputName', 'name'), ('Icon', 'icon')) if source in values}
+        with self.lock:
+            speaker = self.speakers.get(uuid)
+            if speaker and update: speaker.audio_in.update(update)
+            keys = list(self.speakers) if update else [uuid]
+        for key in keys: self.changed(key)
 
     def display_name(self, uuid):
         speaker = self.speaker(uuid)
         return speaker.name if speaker else None
+
+    def binding(self, uuid):
+        """Cached control binding, never inferred from descriptive About fields.
+
+        Discovery selects one topology for this backend. Only actual playback
+        members in that topology can share its grouping key; cached bonded
+        identities do not acquire playback or grouping capabilities.
+        """
+        if not physical_uuid(uuid): return RoomBinding()
+        with self.lock:
+            speaker = self.speakers.get(uuid)
+            base = _device_base(speaker.base) if speaker else None
+            # Fake/local fixtures use arbitrary loopback HTTP ports. Their
+            # trusted topology is the source just as for production speakers.
+            if speaker and not base:
+                try:
+                    parsed = urlsplit(speaker.base)
+                    if (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', '::1')
+                            and parsed.port and not parsed.username and not parsed.password
+                            and not parsed.path and not parsed.query and not parsed.fragment):
+                        base = speaker.base
+                except ValueError:
+                    pass
+            in_topology = speaker and any(uuid in members for _, members in self.groups)
+            group = ('sonos', str(id(self))) if base and in_topology else None
+            return RoomBinding(platform='sonos', device_id=uuid,
+                               native_id=uuid if base else '', native_url=base or '', group_key=group)
+
+    def identity(self, uuid):
+        cached = self.identity_inventory.identity(uuid)
+        if cached is not None:
+            if not cached.get('model'): cached['model'] = 'Sonos (details unavailable)'
+            return cached
+        if not physical_uuid(uuid): return None
+        speaker = self.speaker(uuid)
+        return IdentityInventory.metadata({'id': uuid, 'model': 'Sonos (details unavailable)',
+            'name': speaker.name if speaker else '',
+            'ip': (urlsplit(speaker.base).hostname or '') if speaker else ''})
+
+    def bonded_devices(self, uuid):
+        return self.identity_inventory.bonded_devices(uuid)
+
+    def line_in_sources(self):
+        with self.lock:
+            return [{'id': speaker.uuid, 'name': speaker.audio_in['name'], 'room_name': speaker.name,
+                     'icon': speaker.audio_in['icon'], 'uri': LINE_IN_PREFIX + speaker.uuid}
+                    for speaker in self.speakers.values() if speaker.audio_in['connected']
+                    and speaker.audio_subscription and speaker.audio_subscription.healthy]
+
+    def publish_line_in_changes(self):
+        """Renewal/expiry can change availability even when no input event arrives."""
+        snapshot = tuple(tuple(sorted(source.items())) for source in self.line_in_sources())
+        if snapshot != self.line_in_snapshot:
+            self.line_in_snapshot = snapshot
+            for uuid in list(self.speakers): self.changed(uuid)
 
     def picture_url(self, base, art):
         """An absolute art URL from a player's (often relative /getaa?...) albumArtURI."""
@@ -306,7 +533,7 @@ def load(settings, config_dir, log):
     return backend
 
 
-class SonosRoom(Room):
+class SonosRoom(NativeSettingsRoom):
     """One virtual room backed by one Sonos player."""
 
     @property
@@ -323,6 +550,38 @@ class SonosRoom(Room):
         coordinator = self.coordinator
         if not coordinator: return {}
         with self.backend.lock: return dict(coordinator.avt)
+
+    @property
+    def available(self):
+        speaker, coordinator = self.speaker, self.coordinator
+        return bool(speaker and coordinator and speaker.available is not False
+                    and coordinator.available is not False and self.backend.binding(self.key).native_sonos)
+
+    def operation_capabilities(self):
+        """Implemented routes and current-source controls, from cached state only."""
+        if not self.available: return frozenset()
+        operations = {'volume', 'mute', 'browse', 'play_item', 'radio_play', 'queue_browse', 'queue_play',
+                      'queue_add', 'queue_use', 'queue_remove', 'queue_clear',
+                      'provider_play', 'provider_enqueue'}
+        if self.backend.binding(self.key).group_key: operations.add('group')
+        if self.backend.line_in_sources(): operations.add('line_in')
+        avt = self.avt
+        actions = {value.strip().lower() for value in (avt.get('CurrentTransportActions') or '').split(',')}
+        operations.update(actions & {'play', 'pause', 'stop'})
+        # A paused/stopped source can still be resumed; these are supported
+        # native actions even when a device omits them from an empty state.
+        if not avt.get('AVTransportURI') or self.transport in ('STOPPED', 'PAUSED_PLAYBACK'):
+            operations.add('play')
+        if self.line_in_source():
+            # The CR100's play/pause key needs Pause advertised to stop a live
+            # input. pause() translates that action to the speaker's Stop;
+            # resuming keeps the selected input and leaves the queue intact.
+            operations.update(('play', 'stop', 'pause'))
+        else:
+            operations.update(actions & {'seek', 'next', 'previous'})
+            if self.playing_queue() or not avt.get('AVTransportURI'):
+                operations.update(('shuffle', 'repeat'))
+        return self.with_settings_capabilities(operations)
 
     # --- state ------------------------------------------------------------------------
     @property
@@ -349,16 +608,39 @@ class SonosRoom(Room):
     def playing_queue(self, avt=None):
         return (avt if avt is not None else self.avt).get('AVTransportURI', '').startswith(QUEUE_PREFIX)
 
+    def line_in_source(self):
+        avt = self.avt
+        uri = avt.get('AVTransportURI') or avt.get('CurrentTrackURI', '')
+        return uri[len(LINE_IN_PREFIX):].split('?', 1)[0] if uri.startswith(LINE_IN_PREFIX) else None
+
+    def track_reference(self):
+        coordinator, avt = self.coordinator, self.avt
+        return '%s:%s' % (coordinator.uuid if coordinator else self.key,
+                          avt.get('CurrentTrackURI') or avt.get('AVTransportURI', ''))
+
     def track(self):
         avt, coordinator = self.avt, self.coordinator
         uri = avt.get('AVTransportURI', '')
         if not coordinator or not uri or avt.get('TransportState') in (None, '', 'NO_MEDIA_PRESENT'): return None
+        source_id = self.line_in_source()
+        if source_id:
+            source = self.backend.speaker(source_id)
+            title = source.audio_in['name'] if source else 'Line-In'
+            return title, '', source.name if source else '', '', None
         entry = next(iter(parse_didl(avt.get('CurrentTrackMetaData'))), {})
-        station = next(iter(parse_didl(avt.get('AVTransportURIMetaData'))), {}).get('title', '') \
-            if not self.playing_queue(avt) else ''
+        context = next(iter(parse_didl(avt.get('AVTransportURIMetaData'))), {}) \
+            if not self.playing_queue(avt) else {}
+        station = context.get('title', '')
         stream = entry.get('stream_content', '')
         if IGNORED_STREAM.match(stream): stream = ''
-        if stream or (station and not self.playing_queue(avt)):
+        music_track = entry.get('class', '').startswith('object.item.audioItem.musicTrack')
+        broadcast = context.get('class', '').startswith('object.item.audioItem.audioBroadcast')
+        if entry.get('title') and music_track and not (stream and broadcast):
+            # Spotify Connect exposes a non-queue x-sonos-vli transport whose
+            # context title is only "Spotify". GetPositionInfo still supplies
+            # a complete musicTrack; that song must win over the context label.
+            title, artist, album = entry['title'], entry.get('artist', ''), entry.get('album', '')
+        elif stream or (station and not self.playing_queue(avt)):
             artist, _, title = stream.partition(' - ') if ' - ' in stream else ('', '', stream)
             title, album = title or station or entry.get('title', ''), station if stream else ''
         else:
@@ -366,9 +648,11 @@ class SonosRoom(Room):
         if not title: return None
         duration = seconds(avt.get('CurrentTrackDuration'))
         art = self.backend.picture_url(coordinator.base, entry.get('art', ''))
-        return title, artist, album, self.backend.art.path_for(art), duration or None
+        revision = track_revision(self.track_reference(), title, artist, album, duration or None)
+        return title, artist, album, self.backend.art.path_for(art, revision=revision), duration or None
 
     def position(self):
+        if self.line_in_source(): return 0
         coordinator = self.coordinator
         if coordinator is None: return 0
         if time.monotonic() - coordinator.position_at > POSITION_TTL: self.backend.read_position(coordinator)
@@ -390,8 +674,7 @@ class SonosRoom(Room):
         return (coordinator.queue_update, self.avt.get('NumberOfTracks')) if coordinator else None
 
     def capabilities(self):
-        actions = {a.strip().lower() for a in self.avt.get('CurrentTransportActions', '').split(',')}
-        return frozenset(actions & {'seek', 'next', 'previous'})
+        return self.operation_capabilities() & {'seek', 'next', 'previous'}
 
     # --- calls --------------------------------------------------------------------------
     def call(self, speaker, service, action, args=(), ignore=()):
@@ -413,11 +696,17 @@ class SonosRoom(Room):
 
     # --- actions ------------------------------------------------------------------------
     def play(self): self.transport_call('Play', [('Speed', 1)])
+    def play_line_in(self, source_id):
+        if not any(source['id'] == source_id for source in self.backend.line_in_sources()):
+            raise BackendError('Line-In source is not connected: %s' % source_id)
+        self.transport_call('SetAVTransportURI', [('CurrentURI', LINE_IN_PREFIX + source_id),
+                                                ('CurrentURIMetaData', '')])
+        self.play()
     def pause(self):
         if self.transport in ('STOPPED', 'PAUSED_PLAYBACK'): return   # the player refuses (701); nothing to do
         # A radio stream offers Stop but not Pause (CurrentTransportActions "Set, Stop, Play").
         actions = {a.strip() for a in self.avt.get('CurrentTransportActions', '').split(',')}
-        self.transport_call('Stop' if 'Stop' in actions and 'Pause' not in actions else 'Pause')
+        self.transport_call('Stop' if self.line_in_source() or ('Stop' in actions and 'Pause' not in actions) else 'Pause')
     def stop(self): self.transport_call('Stop')
     def next(self): self.transport_call('Next')
     def previous(self): self.transport_call('Previous')
@@ -481,6 +770,13 @@ class SonosRoom(Room):
         else:
             self.replace_queue(uri, metadata)
 
+    def play_radio(self, uri, metadata=''):
+        self.transport_call('SetAVTransportURI', [('CurrentURI', uri), ('CurrentURIMetaData', metadata)])
+        self.transport_call('Play', [('Speed', 1)])
+
+    def radio_formats(self):
+        return ('mp3', 'aac', 'wma')
+
     def enqueue_item(self, node, as_next=False):
         uri, metadata = self.item_uri(node)
         if self.direct(node, uri):   # a station plays at once, as with Home Assistant
@@ -489,36 +785,35 @@ class SonosRoom(Room):
                     'NewQueueLength': self.avt.get('NumberOfTracks') or '1'}
         return self.add_to_queue(uri, metadata, as_next)
 
-    def share(self, uri, as_next=False):
-        """Queue a spotify:<kind>:<id> URI as a share link; the AddURIToQueue results."""
-        match = re.fullmatch(r'spotify:(track|album|playlist):(\w+)', uri)
-        if not match: raise BackendError('Not a Spotify item: %s' % uri)
-        prefix, key, upnp_class = SHARE_KINDS[match.group(1)]
-        encoded = uri.replace(':', '%3a')
+    def _enqueue_provider_plan(self, items, as_next=False):
+        """Execute a validated plan, trying the next native encoding on failure."""
         error = None
-        for service in SHARE_SERVICES:
-            metadata = (sonos_upnp.DIDL_OPEN + '<item id="%s%s" restricted="true"><upnp:class>%s</upnp:class>'
-                        '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">'
-                        'SA_RINCON%d_X_#Svc%d-0-Token</desc></item></DIDL-Lite>') % (key, encoded, upnp_class,
-                                                                                   service, service)
+        for item in items:
             try:
-                return self.add_to_queue(prefix + encoded, metadata, as_next)
+                return self.add_to_queue(item.uri, item.metadata, as_next)
             except BackendError as failure:
                 error = failure
         raise error
 
+    def share(self, uri, as_next=False):
+        """Compatibility entry point for queueing a resolved provider share URI."""
+        return self._enqueue_provider_plan(self.backend.playback_adapters.prepare(uri), as_next)
+
     def play_provider(self, uri, kind):
+        items = self.backend.playback_adapters.prepare(uri, kind)
         self.clear_queue()
-        self.share(uri)
+        self._enqueue_provider_plan(items)
         self.play_track(1)
 
     def enqueue_provider(self, uri, kind, as_next=False):
-        return self.share(uri, as_next)
+        return self._enqueue_provider_plan(self.backend.playback_adapters.prepare(uri, kind), as_next)
 
     def send_volume(self, value):
+        self.require('volume')
         self.call(self.speaker, 'RenderingControl', 'SetVolume', [('Channel', 'Master'), ('DesiredVolume', value)])
 
     def send_mute(self, value):
+        self.require('mute')
         self.call(self.speaker, 'RenderingControl', 'SetMute', [('Channel', 'Master'), ('DesiredMute', int(value))])
 
     def join(self, member):

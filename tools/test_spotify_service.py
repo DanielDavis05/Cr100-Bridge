@@ -48,7 +48,7 @@ def call(service, method, args=None):
     ET.SubElement(header, 'credentials').text = 'must-not-appear-in-logs'
     body = ET.SubElement(root, '{http://schemas.xmlsoap.org/soap/envelope/}Body')
     request = ET.SubElement(body, '{%s}%s' % (SMAPI_NS, method))
-    for key, value in (args or {}).items(): ET.SubElement(request, key).text = str(value)
+    for key, value in (args or {}).items(): ET.SubElement(request, '{%s}%s' % (SMAPI_NS, key)).text = str(value)
     connection = http.client.HTTPConnection('127.0.0.1', service.port, timeout=5)
     connection.request('POST', '/smapi', ET.tostring(root), {'Content-Type': 'text/xml'})
     response = connection.getresponse()

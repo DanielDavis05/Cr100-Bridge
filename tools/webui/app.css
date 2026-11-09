@@ -336,6 +336,11 @@ main { min-width: 0; outline: none; }
   cursor: pointer;
 }
 .inline-button:disabled { opacity: 0.5; cursor: default; }
+.radio-check { display: block; margin: 12px 0; }
+.radio-check input { width: auto; margin-right: 7px; }
+.radio-managed-row { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid rgba(58,77,104,.16); }
+.radio-managed-row small { display: block; overflow-wrap: anywhere; color: var(--muted); }
+.radio-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .choice {
   display: flex;
@@ -552,8 +557,63 @@ button.room-icon:hover { background: rgba(255,255,255,0.16); box-shadow: inset 0
   box-shadow: 0 2px 6px rgba(28, 60, 110, 0.25);
 }
 .picker-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* Spotify menu rows retain the controller's pale list and slate selected state. */
+.spotify-menu-editor select, .spotify-menu-editor input[type="text"] { width: 100%; }
+.spotify-menu-entry {
+  display: grid;
+  grid-template-columns: 24px minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--row-edge);
+  border-radius: var(--radius-row);
+  margin: 8px 0;
+  background: linear-gradient(180deg, #e9f5fc, var(--row));
+}
+.spotify-menu-entry.is-locked { border-left: 5px solid var(--slate); }
+.spotify-menu-position { color: var(--muted); font-weight: 700; }
+.spotify-menu-entry .field { margin: 0; }
+.spotify-menu-entry .field > span { font-size: 13px; }
+.spotify-menu-lock { margin: 0; white-space: nowrap; }
+.spotify-menu-move { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2 / -1; }
+.spotify-menu-move .inline-button { min-width: 42px; padding: 4px 10px; }
+.spotify-menu-target { grid-column: 2 / -1; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+.spotify-menu-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+.sp-menu-status { font-size: 14px; color: var(--muted); }
+.sp-add-controls { border-top: 1px solid rgba(28,91,175,.25); padding-top: 18px; margin-top: 20px; }
+.sp-folder-tree { max-height: 420px; overflow: auto; margin-top: 16px; }
+.sp-folder-tree details { margin: 8px 0; }
+.sp-folder-tree summary { cursor: pointer; font-weight: 700; padding: 6px 0; }
+.sp-folder-tree summary span { margin-right: 8px; }
+.sp-folder-tree .inline-button { padding: 3px 9px; font-size: 13px; }
+.spotify-folder-children { border-left: 1px solid rgba(28,91,175,.3); padding-left: 14px; margin-left: 5px; }
+.spotify-folder-leaf { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; }
+.spotify-folder-leaf span { overflow-wrap: anywhere; }
+.spotify-folder-leaf button { flex: none; }
+@media (max-width: 540px) {
+  .spotify-menu-entry { grid-template-columns: 20px minmax(80px, 1fr); }
+  .spotify-menu-lock { grid-column: 2; }
+  .spotify-folder-leaf { align-items: flex-start; flex-direction: column; gap: 4px; }
+}
 .inline-button.quiet {
   color: var(--row-text);
   background: linear-gradient(180deg, #fff, #e3eefa);
   border-color: rgba(28, 91, 175, 0.4);
 }
+.controller-component-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 18px 0 4px; }
+.controller-component-actions > span { color: var(--muted); font-size: 14px; }
+.controller-component-list { border-top: 1px solid rgba(28,91,175,.25); margin: 16px 0; padding-top: 6px; }
+.controller-component-option { display: flex; align-items: flex-start; margin: 12px 0; }
+.controller-component-option .sub { display: block; margin-top: 3px; font-size: 13px; font-weight: 400; }
+.controller-component-option:has(input:disabled) { opacity: .65; }
+.component-save-status { color: var(--muted); min-height: 1.2em; }
+.controller-firmware { border-top: 1px solid rgba(28,91,175,.25); margin-top: 18px; padding-top: 16px; }
+.controller-firmware h3 { margin-top: 0; }
+.controller-firmware .field { margin: 14px 0; }
+.controller-firmware input[type="file"] { max-width: 100%; width: 100%; font: inherit; }
+.firmware-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.firmware-progress { width: 100%; height: 12px; margin-top: 14px; accent-color: var(--key-mid); }
+.firmware-status, .firmware-error { font-size: 14px; overflow-wrap: anywhere; }
+.firmware-status:empty, .firmware-error:empty { display: none; }
+.bridge-update-status p:first-child { margin-top: 0; }

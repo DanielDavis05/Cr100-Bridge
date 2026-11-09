@@ -37,6 +37,8 @@ SERVICES = {   # name -> (path, service type); /Control and /Event below the pat
     'Queue': ('/MediaRenderer/Queue', 'urn:schemas-sonos-com:service:Queue:1'),
     'ContentDirectory': ('/MediaServer/ContentDirectory', 'urn:schemas-upnp-org:service:ContentDirectory:1'),
     'ZoneGroupTopology': ('/ZoneGroupTopology', 'urn:schemas-upnp-org:service:ZoneGroupTopology:1'),
+    'DeviceProperties': ('/DeviceProperties', 'urn:schemas-upnp-org:service:DeviceProperties:1'),
+    'AudioIn': ('/AudioIn', 'urn:schemas-upnp-org:service:AudioIn:1'),
 }
 NS = {'s': 'http://schemas.xmlsoap.org/soap/envelope/', 'u': 'urn:schemas-upnp-org:control-1-0',
       'd': 'urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/', 'dc': 'http://purl.org/dc/elements/1.1/',
@@ -158,6 +160,19 @@ def container_updates(text):
     return {parts[i]: int(parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i + 1].isdigit()}
 
 
+def read_line_in(base, timeout=SOAP_TIMEOUT):
+    """The input's name/icon, or UPnPFault if this player has no AudioIn service.
+
+    Connection status is only reported by AudioIn events (LineInConnected). Neither
+    this getter nor the presence of an AI: ContentDirectory item proves a cable is
+    attached, so callers keep that status separately from the input attributes.
+    """
+    values = soap(base, 'AudioIn', 'GetAudioInputAttributes', timeout=timeout)
+    if not {'CurrentName', 'CurrentIcon'} & values.keys():
+        raise UPnPFault('GetAudioInputAttributes', None, 'missing AudioIn attributes')
+    return {'name': values.get('CurrentName') or 'Line-In', 'icon': values.get('CurrentIcon') or ''}
+
+
 class Subscription:
     def __init__(self, listener, base, service, handler):
         self.listener, self.base, self.service, self.handler = listener, base, service, handler
@@ -167,7 +182,7 @@ class Subscription:
 
     @property
     def healthy(self):
-        return bool(self.sid) and self.heard
+        return bool(self.sid) and self.heard and time.monotonic() < self.expires
 
 
 class EventListener:
@@ -339,7 +354,7 @@ def search_response(text):
     return base_url(location.group(1))
 
 
-def household(hosts, timeout=SOAP_TIMEOUT):
+def household(hosts, timeout=SOAP_TIMEOUT, discover_fallback=False):
     """(base that answered, groups, zones) from the first of hosts (addresses or base URLs) that
     reports a topology; hosts empty: discovery. Raises UPnPFault when none answers."""
     bases = [host if '://' in host else 'http://' + host if ':' in host else 'http://%s:%d' % (host, PORT)
@@ -352,4 +367,12 @@ def household(hosts, timeout=SOAP_TIMEOUT):
             return base, groups, zones
         except UPnPFault as fault:
             error = fault
+    if hosts and discover_fallback:
+        for base in discover():
+            if base in bases: continue
+            try:
+                groups, zones = topology(base, timeout)
+                return base, groups, zones
+            except UPnPFault as fault:
+                error = fault
     raise error

@@ -65,7 +65,8 @@ class Events:
             def log_message(self, *a): pass
 
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Callback)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
 
     def subscribe(self, player, path):
         c = http.client.HTTPConnection('127.0.0.1', player.config.port, timeout=5)
@@ -79,6 +80,8 @@ class Events:
 
     def close(self):
         self.server.shutdown()
+        self.server.server_close()
+        if threading.current_thread() is not self.thread: self.thread.join(3)
 
 
 class HABackend(unittest.TestCase):
@@ -98,11 +101,27 @@ class HABackend(unittest.TestCase):
     def tearDown(self):
         self.events.close()
         self.house.close()
-        self.ha.close()
+        self.house.backends['ha'].close()
         self.fake.close()
 
     def services(self):
         return [(service, entity) for service, entity, _ in self.fake.calls]
+
+    def test_disconnected_home_assistant_exposes_bridge_until_connection_recovers(self):
+        house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio'], ['127.0.0.1'] * 2,
+            lambda _: None, port=0, backends=self.house.backends.values(),
+            refs=[('ha', 'media_player.kitchen'), ('ha', 'media_player.patio')])
+        try:
+            self.assertNotIn(['CR100 Bridge'], groups(house.topology()))
+            self.ha.connected.clear()
+            house.refresh_identities()
+            self.assertIn(['CR100 Bridge'], groups(house.topology()))
+            self.ha.connected.set()
+            house.refresh_identities()
+            self.assertNotIn(['CR100 Bridge'], groups(house.topology()))
+        finally:
+            self.ha.connected.set()
+            house.close()
 
     def test_now_playing_from_home_assistant(self):
         status, body = soap(self.kitchen, AVT, 'AVTransport', 'GetPositionInfo', '<InstanceID>0</InstanceID>')
@@ -140,6 +159,64 @@ class HABackend(unittest.TestCase):
         self.assertEqual(self.fake.picture_requests, requests)
         c = http.client.HTTPConnection('127.0.0.1', self.kitchen.config.port, timeout=5)
         c.request('GET', '/art/0000000000000000.jpg'); self.assertEqual(c.getresponse().status, 404); c.close()
+
+    def test_external_track_changes_refresh_identity_and_stable_proxy_art(self):
+        from PIL import Image
+        # Connect can retain its session URI and HA image proxy while the song changes.
+        session_uri = 'x-sonos-vli:connect-session'
+        self.fake.set('media_player.kitchen', media_content_id=session_uri)
+        self.assertTrue(wait_for(lambda: self.ha.state('media_player.kitchen')['attributes'].get('media_content_id')
+                                == session_uri))
+
+        def position():
+            status, body = soap(self.kitchen, AVT, 'AVTransport', 'GetPositionInfo', '<InstanceID>0</InstanceID>')
+            self.assertEqual(status, 200)
+            metadata = field(body, 'TrackMetaData')
+            art = ET.fromstring(metadata).findtext('.//{urn:schemas-upnp-org:metadata-1-0/upnp/}albumArtURI')
+            return field(body, 'TrackURI'), metadata, art
+
+        def picture(path):
+            c = http.client.HTTPConnection('127.0.0.1', self.kitchen.config.port, timeout=5)
+            c.request('GET', path); response = c.getresponse(); data = response.read(); c.close()
+            self.assertEqual(response.status, 200)
+            with Image.open(io.BytesIO(data)) as image: return image.convert('RGB').getpixel((0, 0))
+
+        first_uri, _, first_art = position()
+        first_pixel = picture(first_art)
+        self.assertGreater(first_pixel[0], first_pixel[2] + 100)
+        self.assertEqual(self.events.subscribe(self.kitchen, '/MediaRenderer/AVTransport/Event'), 200)
+        self.events.get()
+
+        image = io.BytesIO()
+        Image.new('RGB', (640, 640), (10, 20, 220)).save(image, 'JPEG')
+        self.fake.picture = image.getvalue()
+        self.fake.set('media_player.kitchen', media_title='Freddie Freeloader', queue_position=4)
+        update = ET.fromstring(field(self.events.get(), 'LastChange'))
+        values = {node.tag.rsplit('}', 1)[-1]: node.get('val') for node in update.iter() if 'val' in node.attrib}
+        second_uri, second_metadata, second_art = position()
+        self.assertNotEqual(second_uri, first_uri)
+        self.assertNotEqual(second_art, first_art)
+        self.assertIn('Freddie Freeloader', second_metadata)
+        self.assertEqual(values['CurrentTrackURI'], second_uri)
+        self.assertEqual(values['CurrentTrackMetaData'], second_metadata)
+        second_pixel = picture(second_art)
+        self.assertGreater(second_pixel[2], second_pixel[0] + 100)
+
+        # Position reports must not produce new track IDs, artwork fetches, or NOTIFYs.
+        requests = self.fake.picture_requests
+        self.fake.set('media_player.kitchen', media_position=200)
+        with self.assertRaises(queue.Empty): self.events.get(timeout=1)
+        uri, _, art = position()
+        self.assertEqual((uri, art), (second_uri, second_art))
+        self.assertEqual(self.fake.picture_requests, requests)
+
+        # Distinct resource IDs must also differ when their displayed metadata matches.
+        self.fake.set('media_player.kitchen', media_content_id='spotify:track:another-resource')
+        self.assertTrue(wait_for(lambda: self.ha.state('media_player.kitchen')['attributes'].get('media_content_id')
+                                == 'spotify:track:another-resource'))
+        third_uri, _, third_art = position()
+        self.assertNotEqual(third_uri, second_uri)
+        self.assertNotEqual(third_art, second_art)
 
     def test_transport_actions_become_service_calls(self):
         for action, args in (('Pause', '<InstanceID>0</InstanceID>'),
@@ -227,6 +304,41 @@ class HABackend(unittest.TestCase):
 
 
 class Client(unittest.TestCase):
+    def test_close_releases_connection_thread_and_loop(self):
+        fake = fake_ha.FakeHA([])
+        ha = HomeAssistant(fake.url, fake_ha.TOKEN, lambda _: None)
+        ha.start()
+        try:
+            self.assertTrue(ha.connected.wait(5))
+        finally:
+            ha.close(); fake.close()
+        ha.close(); fake.close()
+        self.assertFalse(ha.thread.is_alive())
+        self.assertTrue(ha.loop.is_closed())
+        self.assertFalse(fake.thread.is_alive())
+        self.assertTrue(fake.loop.is_closed())
+
+    def test_close_from_client_thread_and_before_start(self):
+        unused = HomeAssistant('http://127.0.0.1', 'unused', lambda _: None)
+        unused.close(); unused.close()
+        self.assertTrue(unused.loop.is_closed())
+        fake = fake_ha.FakeHA([])
+        ha = HomeAssistant(fake.url, fake_ha.TOKEN, lambda _: None)
+        ha.start()
+        closed_from_client = threading.Event()
+        def close_on_client():
+            ha.close(); ha.close()
+            closed_from_client.set()
+        try:
+            self.assertTrue(ha.connected.wait(5))
+            ha.loop.call_soon_threadsafe(close_on_client)
+            self.assertTrue(closed_from_client.wait(2))
+            ha.thread.join(5)
+            self.assertFalse(ha.thread.is_alive())
+            self.assertTrue(ha.loop.is_closed())
+        finally:
+            ha.close(); fake.close()
+
     def test_bad_token_is_reported_and_not_connected(self):
         fake = fake_ha.FakeHA([])
         logs = []

@@ -91,7 +91,7 @@ trap 'rm -rf "$TEMP"' EXIT
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates git python3 python3-venv python3-pip iproute2 iw \
-  dnsmasq-base libpcap0.8t64 ethtool rfkill kmod dkms build-essential
+  dnsmasq-base libpcap0.8t64 ethtool rfkill kmod dkms build-essential ffmpeg tzdata
 # Do not change kernels automatically. DKMS needs headers for the kernel actually booted.
 if [[ ! -e /lib/modules/$(uname -r)/build/Makefile ]]; then
   apt-cache show "linux-headers-$(uname -r)" >/dev/null 2>&1 || \
@@ -130,6 +130,9 @@ PAIR_STATE=$(systemctl show -p ActiveState --value cr100-pair.service 2>/dev/nul
 if [[ "$PAIR_STATE" == active || "$PAIR_STATE" == activating || "$PAIR_STATE" == deactivating ]]; then
   die 'Pairing is in progress. Wait for it to finish and rerun installation.'
 fi
+# Patch only the exact supported package image, retaining its alternatives links
+# and a private original backup. Running firmware is verified by the radio service.
+"$RELEASE/.venv/bin/python" "$RELEASE/firmware/nexmon-ownership/apply.py" --apply
 systemctl stop cr100-bridge.service cr100-webui.service cr100-radio.service 2>/dev/null || true
 OLD_RELEASE=$(readlink -e /opt/cr100-bridge/current 2>/dev/null || true)   # -e: empty on a first install
 ln -s "$RELEASE" /opt/cr100-bridge/.current-new

@@ -348,15 +348,19 @@ class PeerState:
             ET.SubElement(ET.SubElement(root, 'e:property'), key).text = str(value)
         return xml_bytes(root)
 
+    def validate_action(self, service, action, args):
+        """Validate the contract without changing simulated state."""
+        if action not in self.actions.get(service, {}):
+            raise UPnPError(401, 'Invalid Action')
+        expected = self.actions[service][action]
+        if any(name not in args for name, direction, _ in expected if direction == 'in'):
+            raise UPnPError(402, 'Invalid Args')
+        return {name: ('0' if kind in ('boolean', 'ui4', 'ui2', 'i4', 'i2', 'int') else '')
+                for name, direction, kind in expected if direction == 'out'}
+
     def action(self, service, action, args):
         with self.lock:
-            if action not in self.actions.get(service, {}):
-                raise UPnPError(401, 'Invalid Action')
-            expected = self.actions[service][action]
-            if any(name not in args for name, direction, _ in expected if direction == 'in'):
-                raise UPnPError(402, 'Invalid Args')
-            defaults = {name: ('0' if kind in ('boolean', 'ui4', 'ui2', 'i4', 'i2', 'int') else '')
-                        for name, direction, kind in expected if direction == 'out'}
+            defaults = self.validate_action(service, action, args)
             changed = []
             result = {}
             if service == 'ZoneGroupTopology':
@@ -506,6 +510,7 @@ class PeerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         service = self.peer.state.control_paths.get(urlsplit(self.path).path)
         if not service: self.reply(404, b'Not found', 'text/plain'); return
+        action = None
         try:
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= 262144: raise UPnPError(402, 'Invalid Args')
@@ -522,7 +527,10 @@ class PeerHandler(BaseHTTPRequestHandler):
             self.reply(200, soap_response(service_type, action, values), headers={'EXT': ''})
             for name in changed: self.peer.publish(name)
         except (ET.ParseError, ValueError): self.reply(500, soap_fault(UPnPError(402, 'Invalid Args')))
-        except UPnPError as exc: self.reply(500, soap_fault(exc))
+        except UPnPError as exc:
+            print(json.dumps({'time': time.time(), 'service': service, 'action': action,
+                              'result': 'error', 'code': exc.code, 'error': exc.description}), flush=True)
+            self.reply(500, soap_fault(exc))
 
     def do_SUBSCRIBE(self):
         service = self.peer.state.event_paths.get(urlsplit(self.path).path)
@@ -536,7 +544,8 @@ class PeerHandler(BaseHTTPRequestHandler):
             now = time.monotonic()
             if sid:
                 subscription = self.peer.state.subscriptions.get(sid)
-                if not subscription or subscription['service'] != service or subscription['expires'] < now:
+                if not subscription or subscription['service'] != service or subscription['expires'] < now \
+                        or self.subscription_source(subscription) != self.client_address[0]:
                     self.reply(412); return
                 subscription['expires'] = now + seconds
             else:
@@ -547,6 +556,7 @@ class PeerHandler(BaseHTTPRequestHandler):
                 if not self.peer.valid_callback(callback, self.client_address[0]): self.reply(412); return
                 sid = 'uuid:' + str(uuid.uuid4())
                 self.peer.state.subscriptions[sid] = {'service': service, 'callback': callback,
+                    'source': self.client_address[0],
                     'expires': now + seconds, 'sequence': 0, 'notify_lock': threading.Lock()}
         self.reply(200, headers={'SID': sid, 'TIMEOUT': 'Second-%d' % seconds})
         if not self.headers.get('SID'):
@@ -560,10 +570,15 @@ class PeerHandler(BaseHTTPRequestHandler):
         sid = self.headers.get('SID')
         with self.peer.state.lock:
             subscription = self.peer.state.subscriptions.get(sid)
-            if not subscription or self.peer.state.event_paths.get(urlsplit(self.path).path) != subscription['service']:
+            if not subscription or self.peer.state.event_paths.get(urlsplit(self.path).path) != subscription['service'] \
+                    or self.subscription_source(subscription) != self.client_address[0]:
                 self.reply(412); return
             del self.peer.state.subscriptions[sid]
         self.reply(200)
+
+    @staticmethod
+    def subscription_source(subscription):
+        return subscription.get('source') or urlsplit(subscription.get('callback', '')).hostname
 
 
 class ZP80Peer:
@@ -596,13 +611,13 @@ class ZP80Peer:
         if parsed.scheme != 'http' or parsed.username or parsed.password or parsed.fragment: return False
         return str(address) == source or bool(self.config.callback_network and address in ipaddress.IPv4Network(self.config.callback_network))
 
-    def notify(self, sid):
+    def notify(self, sid, body_override=None):
         with self.state.lock:
             subscription = self.state.subscriptions.get(sid)
             if not subscription or subscription['expires'] < time.monotonic():
                 self.state.subscriptions.pop(sid, None); return
         with subscription['notify_lock']:
-            body = self.state.propertyset(subscription['service'])
+            body = self.notification_body(subscription) if body_override is None else body_override
             destination = urlsplit(subscription['callback'])
             headers = {'Content-Type': 'text/xml; charset="utf-8"', 'NT': 'upnp:event',
                        'NTS': 'upnp:propchange', 'SID': sid, 'SEQ': str(subscription['sequence'])}
@@ -624,6 +639,10 @@ class ZP80Peer:
                 if self.config.browser_workers:
                     with self.notification_condition:
                         if self.notification_connection is connection:self.notification_connection = None
+
+    def notification_body(self, subscription):
+        """Build a subscription's event under its ordinary notification lock."""
+        return self.state.propertyset(subscription['service'])
 
     def queue_notification(self, sid, delay=0):
         """Coalesce pending state for a SID; keep a bounded FIFO of distinct SIDs."""

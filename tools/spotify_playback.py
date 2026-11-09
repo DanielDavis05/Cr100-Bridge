@@ -18,7 +18,7 @@ MAX_METADATA = 65536
 MAX_XML_NODES = 128
 MAX_XML_DEPTH = 16
 _CANONICAL = re.compile(r'spotify:(track|album|playlist):([A-Za-z0-9]{22})\Z')
-_HEADER = re.compile(r'[0-9A-Fa-f]{8}(?=spotify:)')
+_HEADER = re.compile(r'[0-9A-Fa-f]{8}(?=spotify:|bm:)')
 _ACCOUNT = re.compile(r'SA_RINCON([0-9]+)_([^\s<>]+)\Z')
 _BAD_PERCENT = re.compile(r'%(?![0-9A-Fa-f]{2})')
 _MEDIA_TYPE = {'track': 'music', 'album': 'album', 'playlist': 'playlist'}
@@ -37,7 +37,7 @@ def _bounded(value, limit, name):
     return value
 
 
-def _decode_id(value, header=False):
+def _decode_id(value, header=False, item_decoder=None):
     """Decode at most three escaping layers, then match the complete item id."""
     value = _bounded(value, MAX_URI, 'item id')
     for _ in range(3):
@@ -51,6 +51,8 @@ def _decode_id(value, header=False):
             raise ValueError('Invalid item id encoding') from error
     if header:
         value = _HEADER.sub('', value, count=1)
+    if item_decoder is not None:
+        value = item_decoder(value)
     match = _CANONICAL.fullmatch(value)
     if not match:
         raise ValueError('Unsupported Spotify item id')
@@ -90,20 +92,20 @@ def _split_uri(uri):
     return path, _query(query)
 
 
-def _parse_uri(uri):
+def _parse_uri(uri, item_decoder=None):
     path, query = _split_uri(uri)
     if path.startswith('x-sonos-http:'):
         payload = path[len('x-sonos-http:'):]
         # The CR100's audio/mpeg path adds .mp3 to the SMAPI item id.
         if payload.endswith('.mp3'):
             payload = payload[:-4]
-        item, kind = _decode_id(payload)
+        item, kind = _decode_id(payload, item_decoder=item_decoder)
         if kind != 'track':
             raise ValueError('Only tracks use x-sonos-http')
     elif path.startswith('x-rincon-cpcontainer:'):
-        item, kind = _decode_id(path[len('x-rincon-cpcontainer:'):], header=True)
+        item, kind = _decode_id(path[len('x-rincon-cpcontainer:'):], header=True, item_decoder=item_decoder)
     elif path.startswith('spotify:'):
-        item, kind = _decode_id(path)
+        item, kind = _decode_id(path, item_decoder=item_decoder)
     else:
         raise ValueError('Unsupported playback URI')
     return item, kind, query.get('sid')
@@ -147,17 +149,17 @@ def _accounts(obj):
     return accounts
 
 
-def _metadata(metadata):
+def _metadata(metadata, item_decoder=None):
     obj = _didl_item(metadata)
     if obj is None:
         return [], []
     identities, accounts = [], _accounts(obj)
     if 'id' in obj.attrib:
-        identities.append((_decode_id(obj.attrib['id'], header=True)[0], None))
+        identities.append((_decode_id(obj.attrib['id'], header=True, item_decoder=item_decoder)[0], None))
     for node in obj:
         name = node.tag.rsplit('}', 1)[-1]
         if name == 'res':
-            item, _, sid = _parse_uri((node.text or '').strip())
+            item, _, sid = _parse_uri((node.text or '').strip(), item_decoder=item_decoder)
             identities.append((item, sid))
     if not identities:
         raise ValueError('Playback metadata has no item identifier')
@@ -186,7 +188,7 @@ def owns(uri: str, metadata: str = '', service_id: int = 240) -> bool:
         return False
 
 
-def resolve_playback(uri: str, metadata: str = '', service_id: int = 240) -> tuple[str, str]:
+def resolve_playback(uri: str, metadata: str = '', service_id: int = 240, *, item_decoder=None) -> tuple[str, str]:
     """Return a validated Spotify URI and HA type (music, album or playlist).
 
     An exact sid or DIDL account must identify this service. Every supplied sid,
@@ -194,8 +196,8 @@ def resolve_playback(uri: str, metadata: str = '', service_id: int = 240) -> tup
     identify the playable object. Artists and arbitrary web URLs are unsupported.
     """
     _service_id(service_id)
-    item, kind, sid = _parse_uri(uri)
-    identities, accounts = _metadata(metadata)
+    item, kind, sid = _parse_uri(uri, item_decoder=item_decoder)
+    identities, accounts = _metadata(metadata, item_decoder=item_decoder)
     expected_sid, expected_account = str(service_id), str(service_id * 256 + 7)
     sids = [value for _, value in identities if value is not None]
     if sid is not None:

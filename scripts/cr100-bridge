@@ -2,9 +2,11 @@
 set -euo pipefail
 case "${1:-help}" in
   pair) exec systemctl start cr100-pair.service ;;
+  controller-search) exec /opt/cr100-bridge/current/.venv/bin/python -u /opt/cr100-bridge/current/tools/bridge_service.py "$@" ;;
   status) exec systemctl --no-pager status cr100-webui.service cr100-bridge.service cr100-radio.service cr100-pair.service ;;
   logs) exec journalctl -u cr100-webui.service -u cr100-bridge.service -u cr100-radio.service -u cr100-pair.service -f ;;
   restart) systemctl restart cr100-webui.service; exec systemctl restart cr100-bridge.service ;;
   stop) systemctl stop cr100-pair.service; exec systemctl stop cr100-bridge.service cr100-webui.service ;;
-  *) echo 'Usage: sudo cr100-bridge {pair|status|logs|restart|stop}' ;;
+  *) echo 'Usage: sudo cr100-bridge {pair|status|logs|restart|stop}'
+     echo '       sudo cr100-bridge controller-search MAC {pause|resume}' ;;
 esac
