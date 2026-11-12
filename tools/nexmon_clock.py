@@ -35,6 +35,11 @@ TSF_MODULUS = 1 << 64
 TSF_MASK = TSF_MODULUS - 1
 BOOTSTRAP_SAMPLES = 3
 DEFAULT_TIMEOUT = .075
+# A rejected refresh is retried this soon instead of after a full refresh
+# interval. Live (2026-11-08..10) GET433 RTT normally sits near 0.8 ms but
+# spikes to 3.5-4 ms for a second or more; at one attempt per second, two or
+# three slow samples in a row let a good model expire and stopped the link.
+RETRY_INTERVAL = .05
 IPC_ALLOWANCE = .025
 DEFAULT_LOCK_PATH = '/run/cr100-bridge/tsf-query.lock'
 
@@ -375,16 +380,22 @@ class HardwareClock:
 
     def __init__(self, *, reader=None, monotonic_ns=time.monotonic_ns,
                  query_timeout=DEFAULT_TIMEOUT, refresh_interval=1., max_age=3.,
-                 max_drift_ppm=200., max_uncertainty_us=2000., lock_path=DEFAULT_LOCK_PATH):
+                 max_drift_ppm=200., max_uncertainty_us=2000., lock_path=DEFAULT_LOCK_PATH,
+                 retry_interval=None):
+        if retry_interval is None:
+            retry_interval = min(RETRY_INTERVAL, refresh_interval)
         if not .05 <= query_timeout <= .1:
             raise ValueError('TSF query timeout must be between .05 and .1 seconds')
         if not all(math.isfinite(v) and v > 0 for v in
-                   (refresh_interval, max_age, max_drift_ppm, max_uncertainty_us)):
+                   (refresh_interval, max_age, max_drift_ppm, max_uncertainty_us, retry_interval)):
             raise ValueError('Clock limits must be finite and positive')
         if refresh_interval >= max_age:
             raise ValueError('Clock refresh interval must be shorter than maximum age')
+        if retry_interval > refresh_interval:
+            raise ValueError('Clock retry interval must not exceed the refresh interval')
         self.query_timeout = query_timeout
         self.refresh_interval = refresh_interval
+        self.retry_interval = retry_interval
         self.max_age_ns = int(max_age * 1e9)
         self.max_drift_ppm = max_drift_ppm
         self.max_uncertainty_us = max_uncertainty_us
@@ -501,8 +512,10 @@ class HardwareClock:
                 if self._closed:
                     return
                 missing = self._model is None
-            self._calibrate(BOOTSTRAP_SAMPLES if missing else 1)
-            self._wake.wait(self.refresh_interval)
+            published = self._calibrate(BOOTSTRAP_SAMPLES if missing else 1)
+            # The previous model stays published (and its uncertainty keeps
+            # growing) until a refresh succeeds, so retry a rejected one soon.
+            self._wake.wait(self.refresh_interval if published else self.retry_interval)
             self._wake.clear()
 
     def start(self):

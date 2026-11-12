@@ -1550,6 +1550,13 @@ def main():
     parser.add_argument('--no-addresses', action='store_true', help='player addresses already exist')
     args = parser.parse_args()
     status_path = args.leases_file.with_name('players-status.json')
+    # SIGHUP (the web interface after saving the config) restarts this process in place: same
+    # PID for bridge_run.sh, rooms and music service re-read, the radio link untouched. Handle
+    # it before the slow startup below: its default action would end the players, and a second
+    # save can arrive while an earlier reload is still starting. One caught here reloads again
+    # once startup finishes, so the config it announced is always read.
+    reload = threading.Event()
+    signal.signal(signal.SIGHUP, lambda *_: reload.set())
 
     zp = load_peer_module(args.peer_dir)
     configure_profile(zp, args.profile)
@@ -1597,10 +1604,6 @@ def main():
         log({'event': 'player', 'room': player.config.room, 'uuid': player.config.udn, 'icon': player.icon,
              'location': player.state.location,
              'backend': player.state.backend.ref if player.state.backend else None})
-    # SIGHUP (the web interface after saving the config) restarts this process in place: same
-    # PID for bridge_run.sh, rooms and music service re-read, the radio link untouched.
-    reload = threading.Event()
-    signal.signal(signal.SIGHUP, lambda *_: reload.set())
     try: publish_player_status(status_path, house, slots)
     except OSError as error: log({'event': 'player-status-unavailable', 'error': str(error)})
     status_generation = house.discovery_generation
@@ -1635,6 +1638,9 @@ def main():
         for i, arg in enumerate(argv):
             if arg == '--boot-sequence': del argv[i:i + 2]; break
             if arg.startswith('--boot-sequence='): del argv[i]; break
+        # exec resets a handled signal to its default (terminate) but keeps an ignored one.
+        # Ignore SIGHUP until the new image installs its handler, before it reads the config.
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         os.execv(sys.executable, [sys.executable] + argv)
 
 

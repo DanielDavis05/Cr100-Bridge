@@ -362,6 +362,26 @@ def test_silent_cr100_checked_with_tim_then_probed():
     assert link.stations[CR].searching and logs[-1]['reason'] == 'tim-unanswered'
 
 
+def test_unpolled_frames_expire_and_clear_tim_while_cr100_sleeps():
+    link, _, logs = make_link()
+    station = link.stations[CR]
+    tim_bit = lambda f: f[0] == 0x80 and f[f.index(bytes((5, 11))) + 5] == 0x02
+    station.associated, station.dozing = True, True
+    station.last_rx = time.monotonic() - 10
+    link.from_tap(b'\xff' * 6 + bytes(6) + b'\x08\x00' + b'x' * 40)
+    queued_at = time.monotonic() - sl.QUEUE_TTL - 0.1
+    station.queue[0] = (queued_at, station.queue[0][1])
+    with link.lock: link.service_stations(time.monotonic())
+    # The same pass still reports the unanswered TIM, then drops the frame.
+    assert station.searching and logs[-1]['reason'] == 'tim-unanswered'
+    assert not station.queue and station.stats['tx_expired'] == 1
+    link.radio.sent.clear()
+    link.start = time.monotonic()
+    link.run(seconds=0.25)
+    beacons = [f for f in link.radio.sent if f[0] == 0x80]
+    assert beacons and not any(tim_bit(f) for f in beacons)
+
+
 def test_unassociated_probes_often():
     # A searching CR100 only takes its AP from probe responses, caught while it dwells on
     # our channel; once associated they stop (see the test above).
@@ -401,6 +421,7 @@ if __name__ == '__main__':
     print('beacons: deterministic scheduling-grid error', test_beacons_on_tsf_grid(), 'µs')
     test_no_unprompted_frames_to_associated_cr100()
     test_silent_cr100_checked_with_tim_then_probed()
+    test_unpolled_frames_expire_and_clear_tim_while_cr100_sleeps()
     test_unassociated_probes_often()
     test_radio_loss_and_reopen()
     print('ok')

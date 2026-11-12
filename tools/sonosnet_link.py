@@ -95,6 +95,14 @@ LINK_SILENT = 30.0
 # In-place reopen cadence for isolated process-clock harnesses. Production
 # radio loss invalidates the clock and requires supervised startup validation.
 REOPEN_INTERVAL = 0.3
+# A stale hardware-clock model on an unchanged radio epoch is recalibrated in
+# place by the clock worker. Until then, withhold only timestamped frames
+# (beacons, probe responses) and keep every station's association, queues and
+# PNs. Restarting the link instead cost ~12 s of beacons and made every dozing
+# CR100 reassociate on its next wake (live 2026-11-08..10: eight restarts).
+# A clock that stays stale this long, a TSF reset or radio loss still exits
+# for supervised firmware/MPC validation and a fresh calibration.
+CLOCK_STALE_GRACE = 10.0
 RADIO_GONE = {errno.ENXIO, errno.ENETDOWN, errno.ENODEV, errno.EBADF, errno.EIO, errno.ENETRESET}
 RADIO_BUSY = {errno.EAGAIN, errno.ENOBUFS, errno.ENOMEM}
 FRAME_ERRORS = {errno.EMSGSIZE, errno.EINVAL}
@@ -218,6 +226,11 @@ class Link:
         # remains available only to isolated frame/test harnesses.
         self.hardware_clock = hardware_clock
         self.clock_failure_logged = False
+        self.clock_stale_since = None
+        # Hearing checks count silence only from here: no beacon carried a TIM
+        # bit while a stale clock withheld them (see check_hearing).
+        self.hearing_from = float('-inf')
+        self.clock_resets = None
         self.config_path = Path(config_path) if config_path is not None else None
         self.bssid = frames.mac_bytes(state['bssid'])
         # With an explicit config, fail closed for proactive probes until its
@@ -307,13 +320,28 @@ class Link:
             self.log({'event': 'clock-unavailable', 'error': str(error),
                       'clock': self.hardware_clock.status()})
 
+    def clock_stale(self, error, now=None):
+        """Main loop only: note a stale clock, and fail once it outlasts the grace."""
+        now = time.monotonic() if now is None else now
+        if self.clock_stale_since is None:
+            self.clock_stale_since = now
+            self.stats['clock_stale'] += 1
+            self.log({'event': 'clock-stale', 'error': str(error),
+                      'clock': self.hardware_clock.status()})
+        if now - self.clock_stale_since >= CLOCK_STALE_GRACE:
+            self.clock_unavailable(error)
+            raise error
+
+    def clock_fresh(self, now):
+        if self.clock_stale_since is not None:
+            self.log({'event': 'clock-recovered', 'seconds': round(now - self.clock_stale_since, 3)})
+            self.clock_stale_since = None
+            self.hearing_from = now
+
     def tsf(self):
+        """Raises ClockUnavailable while the hardware clock is stale; callers withhold the frame."""
         if self.hardware_clock is not None:
-            try:
-                return self.hardware_clock.tsf_us()
-            except ClockUnavailable as error:
-                self.clock_unavailable(error)
-                raise
+            return self.hardware_clock.tsf_us()
         return int((time.monotonic() - self.start) * 1e6)
 
     def air_tsf(self):
@@ -394,8 +422,12 @@ class Link:
                 continue
             # Build a probe's advertised TSF for this attempt, not for the
             # original request; socket or pacing backpressure can delay it.
-            body = (frames.probe_response_body(self.air_tsf(), self.household) if subtype == 5 else
-                    frames.association_response_body(station.aid))
+            # While the clock is stale the probe stays pending within its TTL.
+            try:
+                body = (frames.probe_response_body(self.air_tsf(), self.household) if subtype == 5 else
+                        frames.association_response_body(station.aid))
+            except ClockUnavailable:
+                continue
             result = self.send_mgmt(subtype, station.mac, body, from_ds=subtype in (1, 3), block=False)
             if result == BUSY or (result == FAILED and self.radio_down): return
             del station.management_replies[kind]
@@ -436,6 +468,17 @@ class Link:
                 self.count(station, 'tx_dropped')
             sent += 1
         return sent
+
+    def expire_queue(self, station, now):
+        """Drop frames never polled for within QUEUE_TTL; caller holds the lock.
+
+        flush() only expires frames it reaches, and a CR100 in standby powers
+        its radio off, so nothing reached them: live (2026-11-10) up to 69
+        frames sat for 100 minutes, holding its TIM bit in every beacon.
+        """
+        while station.queue and now - station.queue[0][0] > QUEUE_TTL:
+            station.queue.popleft()
+            self.count(station, 'tx_expired')
 
     def awake(self, station, now):
         return not station.dozing and now - station.last_pm_rx < AWAKE_TIMEOUT
@@ -615,9 +658,23 @@ class Link:
                 error = ClockUnavailable('Radio hardware clock worker stopped')
                 self.clock_unavailable(error)
                 raise error
-            # Fail closed. The supervisor restarts the link and verifies the
-            # firmware/MPC before calibrating a new epoch after radio recovery.
-            self.tsf()
+            # A reset epoch fails closed: the supervisor restarts the link and
+            # verifies the firmware/MPC before calibrating a new epoch.
+            resets = status.get('resets', 0)
+            if self.clock_resets is None:
+                self.clock_resets = resets
+            elif resets != self.clock_resets:
+                error = ClockUnavailable('Hardware TSF reset; supervised clock calibration is required')
+                self.clock_unavailable(error)
+                raise error
+            # A stale model on the same epoch only withholds timestamped frames
+            # (see CLOCK_STALE_GRACE); return whether they may be sent now.
+            try:
+                self.tsf()
+            except ClockUnavailable as error:
+                self.clock_stale(error)
+                return False
+        return True
 
     def radio_loop(self):
         while not self.stop.is_set():
@@ -664,11 +721,7 @@ class Link:
         share that clock and grid rather than a new process-start epoch.
         """
         if self.hardware_clock is not None:
-            try:
-                return self.hardware_clock.next_tbtt(now, frames.BEACON_INTERVAL_TU * 1024)
-            except ClockUnavailable as error:
-                self.clock_unavailable(error)
-                raise
+            return self.hardware_clock.next_tbtt(now, frames.BEACON_INTERVAL_TU * 1024)
         interval = frames.BEACON_INTERVAL_TU * 1024e-6
         deadline = self.start + (math.floor((now - self.start) / interval) + 1) * interval
         # Float subtraction can round an exact boundary just below its index.
@@ -701,10 +754,18 @@ class Link:
         """Decide whether a silent associated CR100 still hears the beacons; caller holds the
         lock. Any frame from it clears the check and the searching state (on_frame)."""
         if not station.associated or station.searching: return
-        if station.queue and now - station.queue[0][0] > CHECK_WINDOW and station.last_rx < station.queue[0][0]:
+        if self.clock_stale_since is not None:
+            # No beacons are on air, so an unanswered TIM proves nothing. Taking a dozing
+            # CR100 for a searching one sends it probe responses that knock it off.
+            station.check_from = None
+            return
+        # Silence and queue age count only while beacons carried the TIM bit.
+        since = self.hearing_from
+        if (station.queue and now - max(station.queue[0][0], since) > CHECK_WINDOW
+                and station.last_rx < station.queue[0][0]):
             reason = 'tim-unanswered'   # frames waited a whole window with TIM set
         elif station.check_from is None:
-            if now - station.last_rx > CHECK_SILENCE: station.check_from = now
+            if now - max(station.last_rx, since) > CHECK_SILENCE: station.check_from = now
             return
         elif now - station.check_from > CHECK_WINDOW:
             reason = 'check-unanswered'
@@ -729,10 +790,14 @@ class Link:
                 station.silent = True
                 self.station_log(station, event='link-silent', seconds=LINK_SILENT)
             if station.associated and station.queue and self.awake(station, now): self.flush(station)
-            self.check_hearing(station, now)
+            self.check_hearing(station, now)  # before expiry: queue age is its tim-unanswered evidence
+            self.expire_queue(station, now)
             if station.auto_reconnect and (not station.associated or station.searching) and now >= station.next_probe:
-                result = self.send_mgmt(5, station.mac, frames.probe_response_body(self.air_tsf(), self.household),
-                                        block=False)
+                try:
+                    body = frames.probe_response_body(self.air_tsf(), self.household)
+                except ClockUnavailable:
+                    continue  # stale clock: withhold timestamped frames (CLOCK_STALE_GRACE)
+                result = self.send_mgmt(5, station.mac, body, block=False)
                 if result == SENT: station.next_probe = now + SEARCH_PROBE_INTERVAL
 
     def station_status(self, station, now):
@@ -772,14 +837,23 @@ class Link:
                   'controllers': [frames.mac_text(mac) for mac in self.stations],
                   'channel': self.channel, 'household': self.household.decode(), 'tsf_lead_us': self.tsf_lead_us})
         next_stats = next_reopen = time.monotonic()
-        next_beacon = self.next_tbtt(next_stats)
+        next_beacon = None  # None: no beacon scheduled until the clock gives a grid point
         beacon_late = []
         while seconds is None or time.monotonic() - self.start < seconds:
-            self.check_workers()
+            clock_ok = self.check_workers()
             now = time.monotonic()
-            if now >= next_beacon:
-                beacon_late.append(self.send_beacon())
-                next_beacon = self.next_tbtt(time.monotonic())
+            if not clock_ok:
+                next_beacon = None
+            elif next_beacon is None:
+                next_beacon = self.beacon_deadline(now)
+            if next_beacon is not None and now >= next_beacon:
+                try:
+                    beacon_late.append(self.send_beacon())
+                except ClockUnavailable as error:
+                    self.clock_stale(error)
+                    next_beacon = None
+                else:
+                    next_beacon = self.beacon_deadline(time.monotonic())
                 now = time.monotonic()
             self.reload_reconnect_policy(now)
             now = time.monotonic()
@@ -815,8 +889,19 @@ class Link:
                               'beacon_grid_error_us_abs_max': max(abs(value) for value in late), **self.stats})
                     beacon_late = []
                     next_stats = now + 10
-            time.sleep(max(0.0, min(0.002, next_beacon - time.monotonic())))
+            wait = 0.002 if next_beacon is None else next_beacon - time.monotonic()
+            time.sleep(max(0.0, min(0.002, wait)))
         self.check_workers()
+
+    def beacon_deadline(self, now):
+        """Next beacon time, or None (stale clock) to retry on a later pass."""
+        try:
+            deadline = self.next_tbtt(now)
+        except ClockUnavailable as error:
+            self.clock_stale(error, now)
+            return None
+        self.clock_fresh(now)
+        return deadline
 
 
 def main():

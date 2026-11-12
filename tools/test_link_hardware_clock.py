@@ -57,14 +57,104 @@ class HardwareClockLink(unittest.TestCase):
         link = self.link(clock)
         self.assertEqual(link.send_beacon(), -50)
 
-    def test_stale_clock_or_failed_clock_worker_stops_before_injection(self):
-        for ready, alive in ((False, True), (True, False)):
-            with self.subTest(ready=ready, alive=alive):
-                clock = RadioClock()
-                clock.ready, clock.alive = ready, alive
-                link = self.link(clock)
-                with self.assertRaises(ClockUnavailable): link.run_main(.1)
-                self.assertEqual(link.radio.sent, [])
+    def test_failed_clock_worker_stops_before_injection(self):
+        clock = RadioClock()
+        clock.alive = False
+        link = self.link(clock)
+        with self.assertRaises(ClockUnavailable): link.run_main(.1)
+        self.assertEqual(link.radio.sent, [])
+
+    def test_stale_clock_withholds_beacons_then_fails_after_grace(self):
+        clock, records = RadioClock(), []
+        clock.ready = False
+        link = self.link(clock)
+        link.log = records.append
+        link.run_main(.1)  # inside the grace: keep running, transmit nothing timestamped
+        self.assertEqual(link.radio.sent, [])
+        self.assertEqual([r['event'] for r in records if 'clock' in r['event']], ['clock-stale'])
+        with patch.object(sl, 'CLOCK_STALE_GRACE', .05):
+            link.start = time.monotonic()
+            with self.assertRaises(ClockUnavailable): link.run_main(.5)
+        self.assertEqual(link.radio.sent, [])
+        self.assertEqual([r['event'] for r in records if 'clock' in r['event']],
+                         ['clock-stale', 'clock-unavailable'])
+
+    def test_transient_stale_clock_keeps_association_and_resumes_beacons(self):
+        clock, records = RadioClock(), []
+        clock.next_tbtt.side_effect = lambda now, interval: now + .01
+        link = self.link(clock)
+        link.log = records.append
+        station = next(iter(link.stations.values()))
+        station.associated, station.last_rx = True, time.monotonic()
+        station.queue.append((time.monotonic(), b'\x00' * 14))
+        clock.ready = False
+        link.run_main(.05)
+        self.assertEqual(link.stats['beacon_sent'], 0)
+        clock.ready = True
+        link.start = time.monotonic()
+        link.run_main(.1)
+        self.assertGreater(link.stats['beacon_sent'], 0)
+        self.assertTrue(station.associated)
+        events = [r['event'] for r in records if 'clock' in r['event']]
+        self.assertEqual(events, ['clock-stale', 'clock-recovered'])
+
+    def test_withheld_beacons_are_not_evidence_that_a_dozing_cr100_is_searching(self):
+        clock = RadioClock()
+        clock.next_tbtt.side_effect = lambda now, interval: now + .01
+        link = self.link(clock)
+        station = next(iter(link.stations.values()))
+        start = time.monotonic()
+        station.associated, station.dozing, station.last_rx = True, True, start - 60
+        clock.ready = False
+        self.assertFalse(link.check_workers())
+        # Silent and holding an unpolled frame well past both windows, with no beacon sent.
+        later = start + sl.CHECK_SILENCE + sl.CHECK_WINDOW + 1
+        station.queue.append((start, b'\x00' * 14))
+        with link.lock: link.check_hearing(station, later)
+        self.assertFalse(station.searching)
+        self.assertIsNone(station.check_from)
+        clock.ready = True
+        self.assertTrue(link.check_workers())
+        link.beacon_deadline(later)                 # recovery: beacons resume from here
+        with link.lock: link.check_hearing(station, later + .1)
+        self.assertFalse(station.searching)
+        self.assertIsNone(station.check_from)
+        # A full silence and check window of real beacons still finds a lost CR100.
+        with link.lock:
+            link.expire_queue(station, later + .1)
+            self.assertFalse(station.queue)
+            link.check_hearing(station, later + sl.CHECK_SILENCE + .1)
+            self.assertIsNotNone(station.check_from)
+            link.check_hearing(station, later + sl.CHECK_SILENCE + sl.CHECK_WINDOW + .3)
+        self.assertTrue(station.searching)
+
+    def test_tsf_reset_during_link_still_requires_supervised_restart(self):
+        clock, records = RadioClock(), []
+        resets = [0]
+        clock.status = lambda: {'ready': True, 'worker_alive': True, 'resets': resets[0]}
+        link = self.link(clock)
+        link.log = records.append
+        self.assertTrue(link.check_workers())
+        resets[0] = 1
+        with self.assertRaisesRegex(ClockUnavailable, 'reset'):
+            link.check_workers()
+        self.assertEqual([r['event'] for r in records], ['clock-unavailable'])
+
+    def test_stale_clock_withholds_probe_responses_without_failing_receive(self):
+        clock = RadioClock()
+        link = self.link(clock)
+        station = next(iter(link.stations.values()))
+        station.auto_reconnect = True
+        clock.ready = False
+        now = time.monotonic()
+        link.queue_mgmt_reply(station, 5, now)       # radio thread path
+        link.service_stations(now)                   # unsolicited search probe
+        self.assertEqual(link.radio.sent, [])
+        self.assertIn('probe', station.management_replies)
+        clock.ready = True
+        link.service_mgmt_replies(station, now)
+        self.assertEqual(len(link.radio.sent), 1)
+        self.assertNotIn('probe', station.management_replies)
 
     def test_clock_fault_is_logged_once_with_public_status_before_cleanup(self):
         clock, records = RadioClock(), []
@@ -75,8 +165,9 @@ class HardwareClockLink(unittest.TestCase):
                                                     'last_fault': 'Synthetic IPC timeout'}})
         link = self.link(clock)
         link.log = records.append
-        for call in (lambda: link.run_main(.1), link.tsf):
-            with self.assertRaises(ClockUnavailable): call()
+        with patch.object(sl, 'CLOCK_STALE_GRACE', 0):
+            for call in (lambda: link.run_main(.1), link.tsf):
+                with self.assertRaises(ClockUnavailable): call()
         faults = [record for record in records if record['event'] == 'clock-unavailable']
         self.assertEqual(len(faults), 1)
         self.assertEqual(faults[0]['clock']['last_error'], 'Synthetic sample timeout')
@@ -90,7 +181,8 @@ class HardwareClockLink(unittest.TestCase):
         clock.next_tbtt.side_effect = ClockUnavailable('Synthetic grid failure')
         link = self.link(clock)
         link.log = records.append
-        with self.assertRaises(ClockUnavailable): link.run_main(.1)
+        with patch.object(sl, 'CLOCK_STALE_GRACE', 0), self.assertRaises(ClockUnavailable):
+            link.run_main(.1)
         fault, = [record for record in records if record['event'] == 'clock-unavailable']
         self.assertEqual(fault['error'], 'Synthetic grid failure')
         self.assertTrue(fault['clock']['ready'])

@@ -224,7 +224,16 @@ def supervise(state_path, config_path, run_dir, stop=None):
         running = {}   # name -> {'process', 'started', 'failures', 'due' (restart time while down)}
 
         def start(name, failures=0):
-            process = launch(helpers[name])
+            # The players' PID is published below before they can install their SIGHUP
+            # handler. An ignored signal is inherited through exec, so a reload request
+            # that early is dropped (they have not read the config yet) instead of
+            # ending them. dnsmasq keeps its own SIGHUP meaning.
+            shield = name == 'players' and threading.current_thread() is threading.main_thread()
+            if shield: previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            try:
+                process = launch(helpers[name])
+            finally:
+                if shield: signal.signal(signal.SIGHUP, previous)
             running[name] = {'process': process, 'started': time.monotonic(), 'failures': failures, 'due': None}
             # The web interface signals the players to reload; it must reach the live process.
             if name == 'players': pid_path.write_text(str(process.pid) + '\n')

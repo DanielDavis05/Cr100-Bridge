@@ -516,6 +516,35 @@ class ClockModel(unittest.TestCase):
         self.assertTrue(clock._calibrate(1))
         self.assertTrue(clock.status()['ready'])
 
+    def test_rejected_refresh_retries_before_the_model_expires(self):
+        clock, fake, radio = self.make()
+        self.assertTrue(clock.bootstrap())
+        # Live failure: slow GET433 replies for a second or more. Each lacks
+        # refresh headroom; at one attempt per second the model expired.
+        radio.latencies = iter((3_900_000, 3_900_000, 200_000))
+        waits = []
+
+        class Wake:
+            def wait(self, timeout):
+                waits.append(timeout)
+                fake.advance(int(timeout * 1e9))
+                if len(waits) == 3:
+                    clock._closed = True
+
+            def clear(self): pass
+            def set(self): pass
+
+        clock._wake = Wake()
+        clock._run()
+        self.assertEqual(waits, [clock.retry_interval, clock.retry_interval, clock.refresh_interval])
+        self.assertEqual(clock._model.sample.rtt_ns, 200_000)
+        self.assertLess(sum(waits[:2]), 3)
+
+    def test_retry_interval_is_positive_and_within_refresh_interval(self):
+        for retry in (0, -1, float('nan'), 1.5):
+            with self.assertRaises(ValueError):
+                nc.HardwareClock(reader=lambda: 0, retry_interval=retry)
+
     def test_reset_or_excessive_drift_invalidates_then_rebootstraps(self):
         for reset in (True, False):
             clock, fake, radio = self.make()
