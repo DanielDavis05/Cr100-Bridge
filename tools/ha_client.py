@@ -12,6 +12,7 @@ import itertools
 import json
 import threading
 import urllib.request
+from urllib.parse import urljoin, urlsplit
 
 from websockets.asyncio.client import connect
 
@@ -22,6 +23,18 @@ CALL_TIMEOUT = 10
 
 class HAError(Exception):
     pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _origin(parsed):
+    try:
+        port = parsed.port
+        return parsed.scheme, parsed.hostname, port if port is not None else (443 if parsed.scheme == 'https' else 80)
+    except ValueError: return None
 
 
 class HomeAssistant:
@@ -179,7 +192,17 @@ class HomeAssistant:
 
     def fetch(self, path, timeout=CALL_TIMEOUT):
         """GET a Home Assistant URL (e.g. an entity_picture proxy path) or an absolute URL."""
-        url = path if path.startswith(('http://', 'https://')) else self.url + path
-        headers = {'Authorization': 'Bearer ' + self.token} if url.startswith(self.url) else {}
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
+        supplied = urlsplit(path)
+        if supplied.scheme and (supplied.scheme not in ('http', 'https') or not supplied.hostname):
+            raise ValueError('Picture URL must use HTTP or HTTPS and include a hostname')
+        url = urljoin(self.url + '/', path)
+        picture, origin = urlsplit(url), urlsplit(self.url)
+        if picture.scheme not in ('http', 'https') or not picture.hostname:
+            raise ValueError('Picture URL must use HTTP or HTTPS and include a hostname')
+        authorized = (_origin(picture) is not None and _origin(picture) == _origin(origin)
+                      and picture.username is None and picture.password is None)
+        headers = {'Authorization': 'Bearer ' + self.token} if authorized else {}
+        # urllib retains Authorization across redirects; authenticated art must not redirect.
+        open_url = urllib.request.build_opener(_NoRedirect()).open if authorized else urllib.request.urlopen
+        with open_url(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
             return response.read(8 * 1024 * 1024)
