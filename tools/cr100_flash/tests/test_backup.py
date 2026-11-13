@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -14,24 +13,20 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
-import pytest
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
 
 
-WORKSPACE = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(WORKSPACE / "cr100-bridge" / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import workspace
 
 from cr100_flash import backup  # noqa: E402
 
 
-ASSETS = WORKSPACE / "cr100-bridge" / "runs" / "physical-backup-tool-2026-11-04"
-SELECTOR = WORKSPACE / "cr100-bridge" / "runs" / "controller-native-install-2026-11-02" / "select_nand_boot.py"
+ASSETS = workspace.RUNS / "physical-backup-tool-2026-11-04"
+SELECTOR = workspace.RUNS / "controller-native-install-2026-11-02" / "select_nand_boot.py"
 LAB_NAND = ASSETS / "lab-backup-test.nand"
-
-
-@pytest.fixture(autouse=True)
-def require_lab_assets():
-    if not all(path.is_file() for path in (LAB_NAND, SELECTOR, ASSETS / "receive_dump.py", ASSETS / "receive_file.py")):
-        pytest.skip("Synthetic NAND and receiver assets are unavailable")
 
 
 class FakeShell:
@@ -123,10 +118,10 @@ def fake_receiver(*, corrupt_second=False, corrupt_status=False, jffs_change=Fal
     return receive
 
 
-def _capture(tmp_path, monkeypatch, *, shell=None, include_files=True, **fake_options):
+def _capture(tmp_path, case, *, shell=None, include_files=True, **fake_options):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    monkeypatch.setattr(backup, "_receive", fake_receiver(**fake_options))
+    case.patch(backup, "_receive", fake_receiver(**fake_options))
     return backup.capture_backup(
         run_dir, shell or FakeShell(), controller_ip="127.0.0.1",
         bind_ip="127.0.0.1", receiver_script=ASSETS / "receive_dump.py",
@@ -135,128 +130,136 @@ def _capture(tmp_path, monkeypatch, *, shell=None, include_files=True, **fake_op
     )
 
 
-def test_full_backup_validates_two_reads_and_all_files(tmp_path, monkeypatch):
-    report = _capture(tmp_path, monkeypatch)
-    assert report["status"] == "validated"
-    assert report["two_pass_match"] is True
-    assert report["nand_sha256"] == _hash(LAB_NAND)
-    assert report["boot_state"] == {"bank": 0, "generation": 1}
-    assert report["selection"]["selected_bank"] == 0
-    assert report["selection"]["partition_table"]["sha256"]
-    assert all(bank["strict_integrity_valid"] for bank in report["selection"]["banks"])
-    assert report["summary"]["files_captured"] == 22
-    assert report["summary"]["files_failed"] == 0
-    assert len(report["files"]) == 22
-    assert all(item["status"] == "captured" for item in report["files"])
-    report_path = Path(report["report_path"])
-    assert report_path.is_file()
-    assert report_path.stat().st_mode & 0o777 == 0o600
-    assert report_path.parent.stat().st_mode & 0o777 == 0o700
+class BackupTests(unittest.TestCase):
+    def setUp(self):
+        for asset in (LAB_NAND, SELECTOR, ASSETS / "receive_dump.py", ASSETS / "receive_file.py",
+                      ASSETS / "simulate_framed_send.py", ASSETS / "lab-backup-test.json"):
+            if not asset.is_file(): self.skipTest(f"Synthetic NAND or receiver asset unavailable: {asset}")
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp_path = Path(temporary.name)
 
+    def patch(self, target, name, value):
+        replacement = patch.object(target, name, value)
+        replacement.start()
+        self.addCleanup(replacement.stop)
 
-def test_rejects_different_nand_passes_and_keeps_evidence(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="differ outside JFFS"):
-        _capture(tmp_path, monkeypatch, include_files=False, corrupt_second=True)
-    failure = json.loads((tmp_path / "run" / "backup" / "failure.json").read_text())
-    assert failure["status"] == "failed"
-    assert len(failure["nand"]) == 2
-    assert (tmp_path / "run" / "backup" / "first.nand").is_file()
+    def test_full_backup_validates_two_reads_and_all_files(self):
+        report = _capture(self.tmp_path, self)
+        self.assertEqual(report['status'], 'validated')
+        self.assertIs(report['two_pass_match'], True)
+        self.assertEqual(report['nand_sha256'], _hash(LAB_NAND))
+        self.assertEqual(report['boot_state'], {'bank': 0, 'generation': 1})
+        self.assertEqual(report['selection']['selected_bank'], 0)
+        self.assertTrue(report['selection']['partition_table']['sha256'])
+        self.assertTrue(all((bank['strict_integrity_valid'] for bank in report['selection']['banks'])))
+        self.assertEqual(report['summary']['files_captured'], 22)
+        self.assertEqual(report['summary']['files_failed'], 0)
+        self.assertEqual(len(report['files']), 22)
+        self.assertTrue(all((item['status'] == 'captured' for item in report['files'])))
+        report_path = Path(report["report_path"])
+        self.assertTrue(report_path.is_file())
+        self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(report_path.parent.stat().st_mode & 0o777, 0o700)
 
+    def test_rejects_different_nand_passes_and_keeps_evidence(self):
+        with self.assertRaisesRegex(backup.BackupError, "differ outside JFFS"):
+            _capture(self.tmp_path, self, include_files=False, corrupt_second=True)
+        failure = json.loads((self.tmp_path / "run" / "backup" / "failure.json").read_text())
+        self.assertEqual(failure['status'], 'failed')
+        self.assertEqual(len(failure['nand']), 2)
+        self.assertTrue((self.tmp_path / 'run' / 'backup' / 'first.nand').is_file())
 
-def test_allows_jffs_only_changes_and_records_both_hashes(tmp_path, monkeypatch):
-    report = _capture(tmp_path, monkeypatch, include_files=False, jffs_change=True)
-    comparison = report["comparison"]
-    assert report["status"] == "validated"
-    assert report["two_pass_match"] is False
-    assert report["nand_hashes"][0] != report["nand_hashes"][1]
-    assert comparison["differing_pages"] == 2
-    assert comparison["regions"] == {"jffs": 2}
-    assert comparison["raw_differing_pages"] == 1
-    assert comparison["oob_status_differing_pages"] == 1
-    assert comparison["system_pages_match"] is True
+    def test_allows_jffs_only_changes_and_records_both_hashes(self):
+        report = _capture(self.tmp_path, self, include_files=False, jffs_change=True)
+        comparison = report["comparison"]
+        self.assertEqual(report['status'], 'validated')
+        self.assertIs(report['two_pass_match'], False)
+        self.assertNotEqual(report['nand_hashes'][0], report['nand_hashes'][1])
+        self.assertEqual(comparison['differing_pages'], 2)
+        self.assertEqual(comparison['regions'], {'jffs': 2})
+        self.assertEqual(comparison['raw_differing_pages'], 1)
+        self.assertEqual(comparison['oob_status_differing_pages'], 1)
+        self.assertIs(comparison['system_pages_match'], True)
 
+    def test_rejects_boot_area_status_difference(self):
+        with self.assertRaisesRegex(backup.BackupError, "differ outside JFFS"):
+            _capture(self.tmp_path, self, include_files=False, boot_status_change=True)
+        failure = json.loads((self.tmp_path / "run" / "backup" / "failure.json").read_text())
+        self.assertEqual(failure['comparison']['regions'], {'kernel-bank0': 1})
+        self.assertEqual(failure['comparison']['oob_status_differing_pages'], 1)
 
-def test_rejects_boot_area_status_difference(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="differ outside JFFS"):
-        _capture(tmp_path, monkeypatch, include_files=False, boot_status_change=True)
-    failure = json.loads((tmp_path / "run" / "backup" / "failure.json").read_text())
-    assert failure["comparison"]["regions"] == {"kernel-bank0": 1}
-    assert failure["comparison"]["oob_status_differing_pages"] == 1
+    def test_rejects_status_sidecar_hash_mismatch(self):
+        with self.assertRaisesRegex(backup.BackupError, "status hash mismatch"):
+            _capture(self.tmp_path, self, include_files=False, corrupt_status=True)
+        self.assertTrue((self.tmp_path / 'run' / 'backup' / 'failure.json').is_file())
 
+    def test_rejects_live_boot_state_different_from_nand(self):
+        with self.assertRaisesRegex(backup.BackupError, "Live boot state differs"):
+            _capture(self.tmp_path, self, include_files=False, shell=FakeShell(states=((1, 1),)))
 
-def test_rejects_status_sidecar_hash_mismatch(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="status hash mismatch"):
-        _capture(tmp_path, monkeypatch, include_files=False, corrupt_status=True)
-    assert (tmp_path / "run" / "backup" / "failure.json").is_file()
+    def test_rejects_boot_state_change_during_capture(self):
+        with self.assertRaisesRegex(backup.BackupError, "changed during backup"):
+            _capture(self.tmp_path, self, include_files=False, shell=FakeShell(states=((0, 1), (1, 1))))
 
+    def test_missing_critical_file_blocks_after_collecting_others(self):
+        with self.assertRaisesRegex(backup.BackupError, "Critical files could not be backed up"):
+            _capture(self.tmp_path, self, missing_file="/jffs/wifi.txt")
+        failure = json.loads((self.tmp_path / "run" / "backup" / "failure.json").read_text())
+        self.assertEqual(len(failure['files']), 22)
+        self.assertEqual(len([item for item in failure['files'] if item['status'] == 'failed']), 1)
 
-def test_rejects_live_boot_state_different_from_nand(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="Live boot state differs"):
-        _capture(tmp_path, monkeypatch, include_files=False, shell=FakeShell(states=((1, 1),)))
+    def test_missing_volatile_file_is_reported(self):
+        report = _capture(self.tmp_path, self, missing_file="/ramdisk/optlog/hh.anacapa.pid")
+        failures = [item for item in report["files"] if item["status"] == "failed"]
+        self.assertEqual([item['source_path'] for item in failures], ['/ramdisk/optlog/hh.anacapa.pid'])
+        self.assertEqual(report['status'], 'validated')
 
+    def test_real_file_receiver_with_fake_local_sender(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        payload = b"offline CR100 file stream test\n"
 
-def test_rejects_boot_state_change_during_capture(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="changed during backup"):
-        _capture(tmp_path, monkeypatch, include_files=False, shell=FakeShell(states=((0, 1), (1, 1))))
+        def shell(command: str, *, timeout: int):
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as stream:
+                stream.sendall(b"CRFILE2\0" + struct.pack("<I", len(payload)) + payload + struct.pack("<I", 0))
+            return SimpleNamespace(returncode=0, output="sent")
 
-
-def test_missing_critical_file_blocks_after_collecting_others(tmp_path, monkeypatch):
-    with pytest.raises(backup.BackupError, match="Critical files could not be backed up"):
-        _capture(tmp_path, monkeypatch, missing_file="/jffs/wifi.txt")
-    failure = json.loads((tmp_path / "run" / "backup" / "failure.json").read_text())
-    assert len(failure["files"]) == 22
-    assert len([item for item in failure["files"] if item["status"] == "failed"]) == 1
-
-
-def test_missing_volatile_file_is_reported(tmp_path, monkeypatch):
-    report = _capture(tmp_path, monkeypatch, missing_file="/ramdisk/optlog/hh.anacapa.pid")
-    failures = [item for item in report["files"] if item["status"] == "failed"]
-    assert [item["source_path"] for item in failures] == ["/ramdisk/optlog/hh.anacapa.pid"]
-    assert report["status"] == "validated"
-
-
-def test_real_file_receiver_with_fake_local_sender(tmp_path):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    payload = b"offline CR100 file stream test\n"
-
-    def shell(command: str, *, timeout: int):
-        with socket.create_connection(("127.0.0.1", port), timeout=3) as stream:
-            stream.sendall(b"CRFILE2\0" + struct.pack("<I", len(payload)) + payload + struct.pack("<I", 0))
-        return SimpleNamespace(returncode=0, output="sent")
-
-    destination = tmp_path / "received.txt"
-    backup._receive(
-        ASSETS / "receive_file.py", destination, bind_ip="127.0.0.1",
-        controller_ip="127.0.0.1", port=port, timeout=5, max_bytes=1024,
-        shell=shell, sender_command="synthetic sender",
-    )
-    assert destination.read_bytes() == payload
-    assert backup._file_receipt(destination, controller_ip="127.0.0.1")["sha256"] == hashlib.sha256(payload).hexdigest()
-
-
-def test_real_nand_receiver_with_synthetic_bad_blocks(tmp_path):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-
-    def shell(command: str, *, timeout: int):
-        result = subprocess.run(
-            [sys.executable, str(ASSETS / "simulate_framed_send.py"),
-             "--nand", str(LAB_NAND), "--receipt", str(ASSETS / "lab-backup-test.json"),
-             "--host", "127.0.0.1", "--port", str(port)],
-            capture_output=True, text=True, timeout=timeout,
+        destination = self.tmp_path / "received.txt"
+        backup._receive(
+            ASSETS / "receive_file.py", destination, bind_ip="127.0.0.1",
+            controller_ip="127.0.0.1", port=port, timeout=5, max_bytes=1024,
+            shell=shell, sender_command="synthetic sender",
         )
-        return SimpleNamespace(returncode=result.returncode, output=result.stdout + result.stderr)
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(backup._file_receipt(destination, controller_ip='127.0.0.1')['sha256'], hashlib.sha256(payload).hexdigest())
 
-    destination = tmp_path / "synthetic.nand"
-    backup._receive(
-        ASSETS / "receive_dump.py", destination, bind_ip="127.0.0.1",
-        controller_ip="127.0.0.1", port=port, timeout=60, max_bytes=None,
-        shell=shell, sender_command="synthetic NAND sender",
-    )
-    receipt = backup._nand_receipt(destination, controller_ip="127.0.0.1")
-    assert receipt["mtd_data_bytes"] == 16 << 20
-    assert receipt["main_error_pages"] == 128
-    assert receipt["oob_error_pages"] == 0
+    def test_real_nand_receiver_with_synthetic_bad_blocks(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        def shell(command: str, *, timeout: int):
+            result = subprocess.run(
+                [sys.executable, str(ASSETS / "simulate_framed_send.py"),
+                 "--nand", str(LAB_NAND), "--receipt", str(ASSETS / "lab-backup-test.json"),
+                 "--host", "127.0.0.1", "--port", str(port)],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return SimpleNamespace(returncode=result.returncode, output=result.stdout + result.stderr)
+
+        destination = self.tmp_path / "synthetic.nand"
+        backup._receive(
+            ASSETS / "receive_dump.py", destination, bind_ip="127.0.0.1",
+            controller_ip="127.0.0.1", port=port, timeout=60, max_bytes=None,
+            shell=shell, sender_command="synthetic NAND sender",
+        )
+        receipt = backup._nand_receipt(destination, controller_ip="127.0.0.1")
+        self.assertEqual(receipt['mtd_data_bytes'], 16 << 20)
+        self.assertEqual(receipt['main_error_pages'], 128)
+        self.assertEqual(receipt['oob_error_pages'], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

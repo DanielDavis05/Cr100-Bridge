@@ -15,35 +15,37 @@ import shutil
 from uuid import uuid4
 
 from .package import validate_candidate, validate_combined_release
+import workspace
 
 
-FW_ROOT = Path(__file__).resolve().parents[3]
-BRIDGE = FW_ROOT / "cr100-bridge"
+BRIDGE = workspace.BRIDGE
 HERE = Path(__file__).resolve().parent
 ZP80_FIXTURES = BRIDGE / "tools/zp80/fixtures"
 
 
 def sources(candidate: Path, profile: str = "ui-only") -> dict[str, Path]:
+    """Locate reviewed inputs, failing explicitly when a workspace asset is absent."""
     if profile == "ui-only":
-        public_key = BRIDGE / "runs/controller-deployment-2026-11-02/lab-upgradekey.pub"
+        public_key = workspace.RUNS / "controller-deployment-2026-11-02/lab-upgradekey.pub"
     elif profile == "combined-release":
-        public_key = FW_ROOT / "cr100-firmware/build/release/development-upgradekey.pub"
+        public_key = workspace.FIRMWARE / "build/release/development-upgradekey.pub"
     else:
         raise ValueError(f"unsupported profile: {profile}")
-    return {
+    if not ZP80_FIXTURES.is_dir(): raise FileNotFoundError(ZP80_FIXTURES)
+    mapping = {
         "assets/candidate.upd": candidate,
-        "assets/stock.upd": FW_ROOT / "update-analysis/7.1-access/cr100/downloads/25.2-50130-1-2.upd",
+        "assets/stock.upd": workspace.STOCK_UPD,
         "assets/lab.pub": public_key,
-        "assets/mcu_version": BRIDGE / "runs/physical-upgrade-preflight-2026-11-04/mcu_version",
-        "assets/mtd_stream": BRIDGE / "runs/physical-backup-tool-2026-11-04/mtd_stream",
-        "assets/file_stream": BRIDGE / "runs/physical-backup-tool-2026-11-04/file_stream",
-        "assets/receive_dump.py": BRIDGE / "runs/physical-backup-tool-2026-11-04/receive_dump.py",
-        "assets/receive_file.py": BRIDGE / "runs/physical-backup-tool-2026-11-04/receive_file.py",
-        "assets/select_nand_boot.py": BRIDGE / "runs/controller-native-install-2026-11-02/select_nand_boot.py",
-        "assets/rop/run_rop_shell.sh": BRIDGE / "runs/physical-preflight-2026-11-04/run_rop_shell.sh",
-        "assets/rop/wait_root_shell.py": BRIDGE / "runs/physical-preflight-2026-11-04/wait_root_shell.py",
-        "assets/rop/warmup_rop_art_fixture.py": BRIDGE / "runs/physical-rop-system-2026-11-04/warmup_rop_art_fixture.py",
-        "assets/rop/fixed-rop-system-root-shell.png": BRIDGE / "runs/physical-rop-system-2026-11-04/fixed-rop-system-root-shell.png",
+        "assets/mcu_version": workspace.RUNS / "physical-upgrade-preflight-2026-11-04/mcu_version",
+        "assets/mtd_stream": workspace.RUNS / "physical-backup-tool-2026-11-04/mtd_stream",
+        "assets/file_stream": workspace.RUNS / "physical-backup-tool-2026-11-04/file_stream",
+        "assets/receive_dump.py": workspace.RUNS / "physical-backup-tool-2026-11-04/receive_dump.py",
+        "assets/receive_file.py": workspace.RUNS / "physical-backup-tool-2026-11-04/receive_file.py",
+        "assets/select_nand_boot.py": workspace.RUNS / "controller-native-install-2026-11-02/select_nand_boot.py",
+        "assets/rop/run_rop_shell.sh": workspace.RUNS / "physical-preflight-2026-11-04/run_rop_shell.sh",
+        "assets/rop/wait_root_shell.py": workspace.RUNS / "physical-preflight-2026-11-04/wait_root_shell.py",
+        "assets/rop/warmup_rop_art_fixture.py": workspace.RUNS / "physical-rop-system-2026-11-04/warmup_rop_art_fixture.py",
+        "assets/rop/fixed-rop-system-root-shell.png": workspace.RUNS / "physical-rop-system-2026-11-04/fixed-rop-system-root-shell.png",
         "assets/zp80/zp80_peer.py": BRIDGE / "tools/zp80/zp80_peer.py",
         "assets/zp80/netstart_peer.py": BRIDGE / "tools/zp80/netstart_peer.py",
         **{f"assets/zp80/fixtures/{path.relative_to(ZP80_FIXTURES)}": path
@@ -53,6 +55,9 @@ def sources(candidate: Path, profile: str = "ui-only") -> dict[str, Path]:
             "__init__.py", "access.py", "backup.py", "flash.py", "launcher.py",
             "package.py", "server.py")},
     }
+    for path in mapping.values():
+        if not path.is_file(): raise FileNotFoundError(path)
+    return mapping
 
 
 def build_bundle(candidate: Path, output: Path, profile: str = "ui-only") -> dict:

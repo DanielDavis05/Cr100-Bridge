@@ -309,6 +309,8 @@ change. Playlist, album and track browsing uses the existing Web API connection.
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m unittest discover -s tools -p 'test_*.py' -q
+(cd firmware/nexmon-ownership && ../../.venv/bin/python -m unittest discover -p 'test_*.py' -q)
+(cd tools && ../.venv/bin/python -m unittest discover -s cr100_flash/tests -t . -p 'test_*.py' -q)
 .venv/bin/python tools/test_link.py
 python3 tools/distribution.py --archive /tmp/cr100-bridge.tar.gz
 ```
@@ -317,7 +319,10 @@ The archive uses an explicit file list and excludes local configuration, keys,
 tokens, research captures, logs, and caches. Extract it and run `install.sh` on
 the Pi. The same builder prepares the installed release. Tests use local fake
 Home Assistant/Spotify services. An optional private radio capture regression
-is skipped when its capture is absent; synthetic link tests still run.
+is skipped when its capture is absent; synthetic link tests still run. Optional
+Nexmon build and flash-package fixtures are skipped with a reason when their
+external workspace inputs are absent. Flash tooling stays outside the archive;
+its tests run from the checkout.
 
 ### Playback backends
 

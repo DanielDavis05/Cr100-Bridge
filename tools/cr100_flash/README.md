@@ -12,7 +12,7 @@ Pi bundle; the signing private key stays on the workstation. The stock key on
 the controller is not replaced.
 
 The separate `combined-release` profile is pinned to the exact
-`cr100-firmware/build/release/cr100-custom-4.3.2.upd` artifact. It permits
+`projects/cr100-firmware/build/release/cr100-custom-4.3.2.upd` artifact. It permits
 exactly two reviewed changes: `MainUI.swf` and the one-byte `/bin/upgrade`
 signature-policy patch. After boot, that updater accepts later packages even
 when their signature check fails. The initial install still uses the current
@@ -21,18 +21,20 @@ stock updater and the matching development public key.
 ## Make a bundle on the workstation
 
 Run from `/Users/daniel/Documents/fw` and choose a new output name for each
-package. The output directory must not already exist:
+package. The output directory must not already exist. Input locations follow
+`tools/workspace.py`; use `CR100_WORKSPACE`, `CR100_BRIDGE_RUNS`,
+`CR100_STOCK_UPD`, or `CR100_FIRMWARE` for another workspace layout:
 
 ```sh
-PYTHONPATH=cr100-bridge/tools python3 -m cr100_flash.make_bundle \
+PYTHONPATH=projects/cr100-bridge/tools python3 -m cr100_flash.make_bundle \
   --candidate /absolute/path/to/new-ui-lab-signed.upd \
-  --output /Users/daniel/Documents/fw/cr100-bridge/runs/future-ui-flash-bundle-01
-scp -rp /Users/daniel/Documents/fw/cr100-bridge/runs/future-ui-flash-bundle-01 \
+  --output /Users/daniel/Documents/fw/research/bridge-runs/future-ui-flash-bundle-01
+scp -rp /Users/daniel/Documents/fw/research/bridge-runs/future-ui-flash-bundle-01 \
   kali@10.0.0.170:/home/kali/
 ```
 
 For the exact combined release, add `--profile combined-release` and use
-`/Users/daniel/Documents/fw/cr100-firmware/build/release/cr100-custom-4.3.2.upd`
+`/Users/daniel/Documents/fw/projects/cr100-firmware/build/release/cr100-custom-4.3.2.upd`
 as the candidate. The bundle builder selects its development public key and
 checks both hashes against the reviewed release. A rebuilt package has a new
 hash and requires a separate review.
@@ -93,7 +95,7 @@ image. UI behavior still needs the on-device menu check after reboot.
 The successful Nov 4 install used a one-shot section-1/generation-10 launcher.
 This tool generates a new launcher from the live section/generation on every
 run. The existing package used that day is bundled at
-`runs/physical-upd-2026-11-04/future-flash-bundle-20261104` as an offline example; it
+`research/bridge-runs/physical-upd-2026-11-04/future-flash-bundle-20261104` as an offline example; it
 is already active on the controller and is not a new update to install.
 
 The generated bank-0/generation-11 launcher was also exercised in a disposable

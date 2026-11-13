@@ -4,13 +4,17 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
 import build as overlay
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE = Path(os.environ.get('CR100_NEXMON_BASE', ROOT / 'runs/stability-audit-2026-11-03/installed-nexmon.bin'))
+sys.path.insert(0, str(ROOT / 'tools'))
+import workspace
+
+BASE = Path(os.environ.get('CR100_NEXMON_BASE', workspace.RUNS / 'stability-audit-2026-11-03/installed-nexmon.bin'))
 NEXMON = Path(os.environ.get('CR100_NEXMON_SOURCE', '/private/tmp/cr100-nexmon-audit'))
 
 
@@ -29,6 +33,12 @@ def decode_bl(address, encoded):
 class OwnershipBuild(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        platform = 'osx' if sys.platform == 'darwin' else 'linux-x86'
+        toolchain = NEXMON / ('buildtools/gcc-arm-none-eabi-5_4-2016q2-%s/bin' % platform)
+        required = [BASE, NEXMON / 'firmwares/bcm43455c0/7_45_206/brcmfmac43455-sdio.bin']
+        required += [toolchain / ('arm-none-eabi-' + name) for name in ('gcc', 'objcopy', 'objdump')]
+        for path in required:
+            if not path.is_file(): raise unittest.SkipTest(f'Optional reviewed Nexmon build input unavailable: {path}')
         cls.temporary = tempfile.TemporaryDirectory()
         cls.output = Path(cls.temporary.name)
         cls.receipt = overlay.build(BASE, NEXMON, cls.output)
