@@ -107,12 +107,19 @@ class SonosCapabilities(unittest.TestCase):
             self.room.pause()
             call.assert_called_once_with('Stop')
 
-    def test_failed_read_withdraws_operations_but_preserves_about_then_event_recovers(self):
+    def test_persistent_failed_reads_withdraw_operations_but_preserve_about_then_event_recovers(self):
         self.a.audio_checked = True
         self.a.available = True
         changed = []
         self.backend.listeners.append(changed.append)
-        with patch('sonos_backend.soap', side_effect=UPnPFault('GetTransportInfo', None, 'offline')):
+        with patch('sonos_backend.soap', side_effect=UPnPFault('GetTransportInfo', None, 'offline')), \
+                patch('sonos_backend.time.monotonic') as clock:
+            for now in (100, 110):
+                clock.return_value = now
+                self.backend.read(self.a)
+                self.assertTrue(self.room.available)
+                self.assertEqual(changed, [])
+            clock.return_value = 120
             self.backend.read(self.a)
         self.assertEqual(changed, [A])
         self.assertFalse(self.room.available)

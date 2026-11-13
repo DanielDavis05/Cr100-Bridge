@@ -37,6 +37,9 @@ from sonos_upnp import UPnPFault, didl_entry, parse_didl, soap
 STARTUP_WAIT = 10        # s to wait for the first topology before naming rooms
 RESYNC_INTERVAL = 30     # s between full reads of every player, events or not
 POLL_INTERVAL = 3        # s between reads of a player whose events are not arriving
+# Slow S1 reads can fail transiently; withdraw only after both limits are met.
+READ_FAILURE_LIMIT = 3
+READ_FAILURE_GRACE = 20
 TOPOLOGY_INTERVAL = 60   # s between topology reads (also on its events)
 RETRY_TOPOLOGY = 5       # s between topology attempts until one succeeds
 POSITION_TTL = 5         # s a read position is interpolated before it is read again
@@ -70,6 +73,7 @@ class Speaker:
         self.position, self.position_at = 0.0, 0.0     # seconds, monotonic time read
         self.read_at, self.refresh_at = 0.0, []         # last full read; requested re-reads
         self.available = None                       # cached reachability; About metadata is independent
+        self.failures, self.failed_since = 0, None
         self.subscriptions = []
         self.audio_in = {'connected': False, 'name': 'Line-In', 'icon': ''}
         self.audio_subscription = None
@@ -156,7 +160,7 @@ class SonosBackend(Backend):
             found = []
             for speaker in self.speakers.values():
                 requested = [t for t in speaker.refresh_at if t <= now]
-                interval = RESYNC_INTERVAL if speaker.healthy and speaker.available is not False else POLL_INTERVAL
+                interval = RESYNC_INTERVAL if speaker.healthy and speaker.available is not False and not speaker.failures else POLL_INTERVAL
                 if requested or now - speaker.read_at > interval:
                     speaker.refresh_at = [t for t in speaker.refresh_at if t > now]
                     found.append(speaker)
@@ -179,6 +183,9 @@ class SonosBackend(Backend):
             self.log({'event': 'sonos-topology-failed', 'error': str(error)})
             return
         self.apply_topology(groups, zones)
+        with self.lock:
+            for speaker in self.speakers.values():
+                if speaker.base == base: speaker.failures, speaker.failed_since = 0, None
         if base != self.topology_base or self.topology_subscription is None:
             if self.topology_subscription: self.listener.unsubscribe(self.topology_subscription)
             self.topology_base = base
@@ -193,6 +200,9 @@ class SonosBackend(Backend):
         return available, pending
 
     def on_topology(self, values):
+        with self.lock:
+            for speaker in self.speakers.values():
+                if speaker.base == self.topology_base: speaker.failures, speaker.failed_since = 0, None
         if 'ZoneGroupState' not in values: return   # some S2 events leave it out: read it then
         if not values['ZoneGroupState']:
             self.topology_at = 0; self.wake.set(); return
@@ -277,10 +287,13 @@ class SonosBackend(Backend):
         except UPnPFault as error:
             with self.lock:
                 was_available = speaker.available
-                speaker.available = False
                 speaker.read_at = time.monotonic()
+                speaker.failures += 1
+                if speaker.failed_since is None: speaker.failed_since = speaker.read_at
+                if speaker.failures >= READ_FAILURE_LIMIT and speaker.read_at - speaker.failed_since >= READ_FAILURE_GRACE:
+                    speaker.available = False
             self.log({'event': 'sonos-read-failed', 'speaker': speaker.name, 'error': str(error)})
-            if was_available is not False: self.transport_changed(speaker.uuid)
+            if was_available is not speaker.available: self.transport_changed(speaker.uuid)
             return
         avt = {'TransportState': transport.get('CurrentTransportState', ''),
                'CurrentTrack': position.get('Track', ''), 'CurrentTrackDuration': position.get('TrackDuration', ''),
@@ -291,6 +304,7 @@ class SonosBackend(Backend):
         with self.lock:
             was_available = speaker.available
             speaker.available = True
+            speaker.failures, speaker.failed_since = 0, None
             speaker.read_at = time.monotonic()
             changed = any(speaker.avt.get(k) != v for k, v in avt.items())
             speaker.avt.update(avt)
@@ -319,12 +333,14 @@ class SonosBackend(Backend):
         with self.lock:
             speaker.audio_in.update(attributes)
             speaker.audio_checked = True
+            speaker.failures, speaker.failed_since = 0, None
         speaker.audio_subscription = self.listener.subscribe(
             speaker.base, 'AudioIn', lambda values: self.on_audio_in(speaker.uuid, values))
 
     def on_audio_in(self, uuid, values):
         speaker = self.speaker(uuid)
         if speaker is None: return
+        with self.lock: speaker.failures, speaker.failed_since = 0, None
         cached = self.settings.values(uuid)
         if any(name in values and str(values[name]) != str(cached.get(name))
                for name in ('AudioInputName', 'Icon', 'LeftLineInLevel', 'RightLineInLevel')):
@@ -352,6 +368,7 @@ class SonosBackend(Backend):
             if source in position}
         with self.lock:
             changed = any(speaker.avt.get(key) != value for key, value in track.items())
+            speaker.failures, speaker.failed_since = 0, None
             speaker.avt.update(track)
             speaker.position, speaker.position_at = seconds(position.get('RelTime')), time.monotonic()
         # GetPositionInfo is also our recovery path when Connect changes songs
@@ -372,6 +389,7 @@ class SonosBackend(Backend):
                                for key in ('AVTransportURI', 'CurrentTrackURI', 'CurrentTrack', 'TransportState'))
             incomplete = not parse_didl(update.get('CurrentTrackMetaData'))
             speaker.available = True
+            speaker.failures, speaker.failed_since = 0, None
             speaker.avt.update({k: v for k, v in update.items() if not k.startswith('Next')})
             if 'TransportState' in update or 'CurrentTrackURI' in update: speaker.position_at = 0   # read again
             if transitioned and incomplete:
@@ -392,6 +410,7 @@ class SonosBackend(Backend):
             document = ET.fromstring(raw)
         except ET.ParseError:
             return
+        with self.lock: speaker.failures, speaker.failed_since = 0, None
         cached = self.settings.values(uuid)
         needs_refresh = any(name in update and update[name] != cached.get(name)
                             for name in ('Bass', 'Treble', 'Loudness', 'OutputFixed'))
@@ -418,6 +437,8 @@ class SonosBackend(Backend):
     def on_content(self, uuid, values):
         updates = sonos_upnp.container_updates(values.get('ContainerUpdateIDs'))
         speaker = self.speaker(uuid)
+        if speaker:
+            with self.lock: speaker.failures, speaker.failed_since = 0, None
         if speaker and 'Q:0' in updates:
             with self.lock: speaker.queue_update = updates['Q:0']
             self.content.queue_changed(uuid)

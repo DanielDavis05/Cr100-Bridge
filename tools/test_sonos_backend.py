@@ -374,6 +374,98 @@ class SonosHousehold(unittest.TestCase):
         self.assertIsNone(self.backend.speaker(KITCHEN))
 
 
+class SpeakerReadFailures(unittest.TestCase):
+    def setUp(self):
+        self.fake = fake_sonos.FakeHousehold()
+        self.real = self.fake.add(KITCHEN, 'Kitchen')
+        self.addCleanup(self.fake.close)
+        self.logs = []
+        self.backend = sonos_backend.SonosBackend(log=self.logs.append)
+        self.backend.listener.start()
+        self.addCleanup(self.backend.close)
+        self.speaker = sonos_backend.Speaker(KITCHEN, self.real.base, 'Kitchen')
+        self.speaker.audio_checked = True
+        self.backend.speakers[KITCHEN] = self.speaker
+        self.backend.groups = [(KITCHEN, [KITCHEN])]
+        self.backend.read(self.speaker)
+        self.real.reject['GetTransportInfo'] = 501
+
+    def read_at(self, now):
+        with patch('sonos_backend.time.monotonic', return_value=now):
+            self.backend.read(self.speaker)
+
+    def test_one_failed_read_keeps_the_selected_room(self):
+        self.read_at(100)
+        available, pending = self.backend.selection_snapshot()
+        self.assertEqual(available, {'sonos:' + KITCHEN: 'Kitchen'})
+        self.assertEqual(pending, {})
+        self.assertEqual(self.speaker.failures, 1)
+        self.assertEqual(len([entry for entry in self.logs if entry['event'] == 'sonos-read-failed']), 1)
+
+    def test_withdrawal_requires_both_the_count_and_duration(self):
+        for now in (100, 101, 102, 119):
+            self.read_at(now)
+            self.assertTrue(self.speaker.available)
+        self.read_at(120)
+        self.assertFalse(self.speaker.available)
+        self.assertEqual(self.backend.selection_snapshot(), ({}, {}))
+
+    def test_two_failures_over_twenty_seconds_keep_the_room(self):
+        self.read_at(100)
+        self.read_at(125)
+        self.assertTrue(self.speaker.available)
+        self.read_at(126)
+        self.assertFalse(self.speaker.available)
+
+    def test_a_success_resets_the_failure_window(self):
+        self.read_at(100)
+        self.read_at(110)
+        self.real.reject.clear()
+        self.read_at(120)
+        self.assertEqual((self.speaker.failures, self.speaker.failed_since), (0, None))
+        self.real.reject['GetTransportInfo'] = 501
+        self.read_at(121)
+        self.read_at(130)
+        self.assertTrue(self.speaker.available)
+        self.assertEqual(self.speaker.failed_since, 121)
+
+    def test_events_reset_the_failure_window(self):
+        for callback, values in (
+                (self.backend.on_avt, {'LastChange': '<Event><InstanceID val="0"><TransportState val="PLAYING"/></InstanceID></Event>'}),
+                (self.backend.on_rendering, {'LastChange': '<Event><InstanceID val="0"><Volume channel="Master" val="20"/></InstanceID></Event>'}),
+                (self.backend.on_content, {'ContainerUpdateIDs': 'Q:0,1'}),
+                (self.backend.on_audio_in, {'LineInConnected': '0'})):
+            with self.subTest(event=callback.__name__):
+                self.read_at(100)
+                self.read_at(110)
+                callback(KITCHEN, values)
+                self.assertEqual((self.speaker.failures, self.speaker.failed_since), (0, None))
+                self.read_at(125)
+                self.assertTrue(self.speaker.available)
+
+    def test_topology_events_reset_the_reporting_players_failure_window(self):
+        self.read_at(100)
+        self.read_at(110)
+        self.backend.topology_base = self.real.base
+        self.backend.on_topology({'ZoneGroupState': self.fake.zone_group_state()})
+        self.assertEqual((self.speaker.failures, self.speaker.failed_since), (0, None))
+        self.read_at(125)
+        self.assertTrue(self.speaker.available)
+
+    def test_failing_players_are_polled_even_with_healthy_subscriptions(self):
+        self.speaker.subscriptions = [SimpleNamespace(healthy=True)]
+        self.addCleanup(self.speaker.subscriptions.clear)
+        self.read_at(100)
+        with patch('sonos_backend.time.monotonic', return_value=104):
+            self.assertEqual(self.backend.due(), [self.speaker])
+
+    def test_topology_removal_is_immediate_during_the_grace_period(self):
+        self.read_at(100)
+        self.backend.apply_topology([], {})
+        self.assertIsNone(self.backend.speaker(KITCHEN))
+        self.assertEqual(self.backend.selection_snapshot(), ({}, {}))
+
+
 class ConnectState(unittest.TestCase):
     """Connect keeps a session URI while GetPositionInfo changes the song."""
 
