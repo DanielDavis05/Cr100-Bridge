@@ -109,6 +109,63 @@ class Alarms(unittest.TestCase):
         alarm = self.save(**values); self.clock.advance(10); self.service.tick()
         return alarm, self.service.store.runs()[-1]
 
+    def test_stale_active_room_does_not_hide_another_rooms_active_alarm(self):
+        self.fire(room='removed', duration=None)
+        second = self.save(room='patio', duration=None)
+        self.service.run_now(second['id'])
+        def resolve(room):
+            if room == 'removed': raise AlarmError('Alarm room is not currently configured: removed', 701)
+            return room
+        self.service.room_resolver = resolve
+        self.assertEqual([run['alarm_id'] for run in self.service.active('patio')], [second['id']])
+        with self.assertRaises(AlarmError): self.service.active('removed')
+        self.assertEqual(self.service.action('AVTransport', 'GetRunningAlarmProperties', {}, 'patio')['AlarmID'], str(second['id']))
+
+    def test_unavailable_room_does_not_hide_other_native_alarms_or_delete_it(self):
+        first = self.save()
+        hidden = self.save(room='removed')
+        messages = []
+        self.service.log = messages.append
+        def resolve(room):
+            if room == 'removed': raise AlarmError('Alarm room is not currently configured: removed', 701)
+            return room
+        self.service.native_room = resolve
+        native = self.service.action('AlarmClock', 'ListAlarms', {})
+        self.assertEqual([int(item.get('ID')) for item in ET.fromstring(native['CurrentAlarmList'])], [first['id']])
+        self.assertEqual(messages, [{'event': 'alarm-room-unavailable', 'alarm_id': hidden['id']}])
+        self.assertEqual([item['id'] for item in self.service.list()], [first['id'], hidden['id']])
+        self.assertTrue(self.service.store.get(hidden['id'])['enabled'])
+        self.service.native_room = str
+        self.assertEqual(len(ET.fromstring(self.service.native_list()['CurrentAlarmList'])), 2)
+
+    def test_due_alarm_in_unavailable_room_is_recorded_as_failed(self):
+        alarm = self.save(room='removed')
+        def resolve(room): raise AlarmError('Alarm room is not currently configured: removed', 701)
+        self.service.room_resolver = resolve
+        self.clock.advance(10); self.service.tick(); self.service.tick()
+        run = self.service.store.runs()[-1]
+        self.assertEqual((run['alarm_id'], run['status']), (alarm['id'], 'failed'))
+        self.assertIn('not currently configured: removed', run['error'])
+        self.assertEqual(self.player.events, [])
+
+    def test_running_alarm_room_removal_does_not_break_tick_or_restart(self):
+        alarm, run = self.fire()
+        def resolve(room): raise AlarmError('Alarm room is not currently configured: kitchen', 701)
+        self.service.room_resolver = resolve
+        self.clock.advance(1); self.service.tick()
+        self.assertEqual(self.service.store.run(run['id'])['status'], 'failed')
+        # Recovery also tolerates a room removed while the bridge was stopped.
+        self.service.store.update_run(run['id'], status='playing')
+        self.close_service(self.service)
+        self.service = self.make(room_resolver=resolve)
+        self.assertEqual(self.service.store.run(run['id'])['status'], 'uncertain')
+
+    def test_informational_component_has_no_running_alarm(self):
+        def resolve(room): raise AlarmError('Not an alarm room', 701)
+        self.service.room_resolver = resolve
+        self.assertEqual(self.service.action('AVTransport', 'GetRunningAlarmProperties', {}, 'bridge'),
+                         {'AlarmID': '0', 'GroupID': '', 'LoggedStartTime': ''})
+
     def test_shutdown_waits_for_inflight_event_and_later_events_are_empty(self):
         entered, release, closing, closed = (threading.Event() for _ in range(4))
         errors, events = [], []

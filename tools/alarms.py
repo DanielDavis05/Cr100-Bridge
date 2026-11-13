@@ -643,8 +643,8 @@ class AlarmService:
         # A process may have died after commanding playback but before saving its
         # acknowledgement. Never dispatch those journal entries a second time.
         for run in self.store.runs(('claimed', 'preparing', 'playing', 'uncertain')):
-            context = self._context(run)
             try:
+                context = self._context(run)
                 handle = run.get('handle')
                 if handle and self.executor and self.executor.owns(context, handle) is True:
                     continue
@@ -721,7 +721,10 @@ class AlarmService:
             self.store.update_run(run['id'], status='missed', error='Alarm retry expired while bridge was unavailable')
             return
         run = self.store.update_run(run['id'], status='preparing', attempts=run['attempts'] + 1)
-        context = self._context(run)
+        try: context = self._context(run)
+        except AlarmError as error:
+            self.store.update_run(run['id'], status='failed', error=str(error))
+            return
         fallback, request = False, None
         try:
             reference = AlarmMediaRef.parse(context['media_ref'])
@@ -782,7 +785,12 @@ class AlarmService:
 
     def active(self, room):
         room = self.room_resolver(room)
-        return [r for r in self.store.runs(ACTIVE + ('snoozed',)) if self.room_resolver(r['context']['room']) == room]
+        runs = []
+        for run in self.store.runs(ACTIVE + ('snoozed',)):
+            try: target = self.room_resolver(run['context']['room'])
+            except AlarmError: continue  # Another room can disappear before its next tick.
+            if target == room: runs.append(run)
+        return runs
 
     def stop(self, room, run_id=None):
         runs = [r for r in self.active(room) if run_id is None or r['id'] == run_id]
@@ -871,7 +879,9 @@ class AlarmService:
                     self.store.update_run(run['id'], status='resumed')
                     if child: self._execute(child, now)
                 elif run['status'] in ('playing', 'uncertain'):
-                    context = self._context(run)
+                    try: context = self._context(run)
+                    except AlarmError as error:
+                        self.store.update_run(run['id'], status='failed', error=str(error)); continue
                     try:
                         handle = run.get('handle')
                         if not handle and self.executor:
@@ -952,12 +962,16 @@ class AlarmService:
         from xml.etree.ElementTree import Element, SubElement, tostring
         root = Element('Alarms')
         for alarm in self.store.records():
+            try: room = self.native_room(alarm['room'])
+            except AlarmError:
+                self.log({'event': 'alarm-room-unavailable', 'alarm_id': alarm['id']})
+                continue
             reference = AlarmMediaRef.parse(alarm['media_ref'])
             uri = 'x-rincon-buzzer:0' if reference.provider == 'chime' else reference.uri()
             item = SubElement(root, 'Alarm', {'ID': str(alarm['id']), 'StartTime': alarm['time'],
                 'Duration': '' if alarm['duration'] is None else hms(alarm['duration']),
                 'Recurrence': alarm['recurrence'], 'Enabled': '1' if alarm['enabled'] else '0',
-                'RoomUUID': self.native_room(alarm['room']), 'ProgramURI': uri,
+                'RoomUUID': room, 'ProgramURI': uri,
                 'ProgramMetaData': self._title_metadata(alarm['title']), 'PlayMode': alarm['play_mode'],
                 'Volume': str(alarm['volume']), 'IncludeLinkedZones': '1' if alarm['include_linked'] else '0'})
         return {'CurrentAlarmList': tostring(root, encoding='unicode'),
@@ -1055,7 +1069,8 @@ class AlarmService:
                         datetime.fromtimestamp(instant, UTC).year, instant=instant)}
         if service == 'AVTransport':
             if action == 'GetRunningAlarmProperties':
-                running = [r for r in self.active(room_key) if r['status'] in ('playing', 'snoozed')]
+                try: running = [r for r in self.active(room_key) if r['status'] in ('playing', 'snoozed')]
+                except AlarmError: running = []
                 run = running[-1] if running else None
                 return {'AlarmID': str(run['alarm_id']) if run else '0',
                         'GroupID': str(self.room_resolver(room_key)) if run else '',
