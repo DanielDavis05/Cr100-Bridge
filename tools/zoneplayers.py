@@ -1347,52 +1347,67 @@ class Household:
                 with player.request_context(address):
                     packet = player.ssdp_packet(target, alive=True)
                 if not alive: packet = packet.replace(b'NTS: ssdp:alive', b'NTS: ssdp:byebye')
-                try: senders[player.config.udn].sendto(packet, (address, SSDP_PORT))
-                except OSError: pass
+                sender = senders.get(player.config.udn)
+                if sender is None: continue
+                try: sender.sendto(packet, (address, SSDP_PORT))
+                except OSError as error:
+                    self.log({'event': 'ssdp-send-error', 'udn': player.config.udn, 'error': repr(error)})
 
         try:
             while not stop.is_set():
-                now = time.monotonic()
-                players = self.devices()
-                current = {p.config.udn: p for p in players}
-                for udn, player in current.items():
-                    if udn in senders: continue
-                    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-                    sender.bind((player.config.advertise_ip, 0))
-                    sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(player.config.advertise_ip))
-                    sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-                    senders[udn] = sender
-                if generation != self.discovery_generation:
-                    generation, next_alive = self.discovery_generation, 0
-                desired = {(address, player.config.udn): player for address, visible in self.discovery_views().items()
-                           for player in visible}
-                for address, udn in announced.keys() - desired.keys():
-                    announce(announced[(address, udn)], address, False)
-                for (address, udn), player in desired.items():
-                    if (address, udn) not in announced or now >= next_alive: announce(player, address, True)
-                announced = desired
-                for udn in set(senders) - set(current): senders.pop(udn).close()
-                if now >= next_alive: next_alive = now + ALIVE_INTERVAL
                 try:
-                    packet, source = listener.recvfrom(8192)
-                except socket.timeout:
-                    continue
-                if source[0] in {p.config.advertise_ip for p in players}: continue
-                now = time.monotonic()
-                key = (source, packet)
-                if now - recent.get(key, -1e9) < DUPLICATE_WINDOW: continue
-                recent = {k: t for k, t in recent.items() if now - t < DUPLICATE_WINDOW}
-                recent[key] = now
-                answered = 0
-                for player in self.devices(source[0]):
-                    with player.request_context(source[0]):
-                        responses = player.search_responses(packet)
-                    for response in responses:
-                        senders[player.config.udn].sendto(response, source)
-                        answered += 1
-                if answered:
-                    self.discovery_sources.add(source[0])
-                    self.log({'event': 'm-search', 'from': source[0], 'responses': answered})
+                    now = time.monotonic()
+                    players = self.devices()
+                    current = {p.config.udn: p for p in players}
+                    for udn, player in current.items():
+                        if udn in senders: continue
+                        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                        try:
+                            sender.bind((player.config.advertise_ip, 0))
+                            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(player.config.advertise_ip))
+                            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                        except Exception:
+                            sender.close()
+                            raise
+                        senders[udn] = sender
+                    if generation != self.discovery_generation:
+                        generation, next_alive = self.discovery_generation, 0
+                    desired = {(address, player.config.udn): player for address, visible in self.discovery_views().items()
+                               for player in visible if player.config.udn in senders}
+                    for address, udn in announced.keys() - desired.keys():
+                        announce(announced[(address, udn)], address, False)
+                    for (address, udn), player in desired.items():
+                        if (address, udn) not in announced or now >= next_alive: announce(player, address, True)
+                    announced = desired
+                    for udn in set(senders) - set(current): senders.pop(udn).close()
+                    if now >= next_alive: next_alive = now + ALIVE_INTERVAL
+                    try:
+                        packet, source = listener.recvfrom(8192)
+                    except socket.timeout:
+                        continue
+                    if source[0] in {p.config.advertise_ip for p in players}: continue
+                    now = time.monotonic()
+                    key = (source, packet)
+                    if now - recent.get(key, -1e9) < DUPLICATE_WINDOW: continue
+                    recent = {k: t for k, t in recent.items() if now - t < DUPLICATE_WINDOW}
+                    recent[key] = now
+                    answered = 0
+                    for player in self.devices(source[0]):
+                        with player.request_context(source[0]):
+                            responses = player.search_responses(packet)
+                        sender = senders.get(player.config.udn)
+                        if sender is None: continue  # A newly advertised component gets a sender next pass.
+                        for response in responses:
+                            try: sender.sendto(response, source)
+                            except OSError as error:
+                                self.log({'event': 'ssdp-send-error', 'udn': player.config.udn, 'error': repr(error)})
+                            else: answered += 1
+                    if answered:
+                        self.discovery_sources.add(source[0])
+                        self.log({'event': 'm-search', 'from': source[0], 'responses': answered})
+                except Exception as error:
+                    self.log({'event': 'ssdp-loop-error', 'error': repr(error)})
+                    stop.wait(.2)
         finally:
             listener.close()
             for (address, udn), player in announced.items(): announce(player, address, False)
