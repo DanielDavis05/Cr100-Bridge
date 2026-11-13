@@ -190,6 +190,28 @@ class Alarms(unittest.TestCase):
         self.assertEqual(self.service.store.run(run['id'])['status'], 'superseded')
         self.assertFalse(any(event[0] == 'stop' for event in self.player.events))
 
+    def test_duplicate_due_alarms_ring_once_without_changing_stored_alarms(self):
+        first, duplicate = self.save(), self.save()
+        self.clock.advance(10); self.service.tick()
+        runs = self.service.store.runs()
+        self.assertEqual([run['status'] for run in runs], ['playing', 'superseded'])
+        self.assertEqual(runs[1]['error'], 'Another alarm is already ringing in this room')
+        self.assertEqual([run['alarm_id'] for run in runs], [first['id'], duplicate['id']])
+        self.assertEqual(sum(event[0] == 'play' for event in self.player.events), 1)
+        self.assertTrue(all(alarm['enabled'] for alarm in self.service.list()))
+
+    def test_recent_alarm_in_another_room_does_not_suppress_due_alarm(self):
+        self.save(); self.save(room='patio')
+        self.clock.advance(10); self.service.tick()
+        self.assertEqual([run['status'] for run in self.service.store.runs()], ['playing', 'playing'])
+        self.assertEqual(sum(event[0] == 'play' for event in self.player.events), 2)
+
+    def test_alarm_that_started_over_a_minute_ago_does_not_suppress_due_alarm(self):
+        self.save(duration=None); self.save(time='12:01:01', duration=None)
+        self.clock.advance(10); self.service.tick()
+        self.clock.advance(61); self.service.tick()
+        self.assertEqual(sum(event[0] == 'play' for event in self.player.events), 2)
+
     def test_shutdown_waits_for_inflight_event_and_later_events_are_empty(self):
         entered, release, closing, closed = (threading.Event() for _ in range(4))
         errors, events = [], []

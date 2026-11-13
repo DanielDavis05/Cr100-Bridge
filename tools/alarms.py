@@ -856,7 +856,13 @@ class AlarmService:
                     if run:
                         if alarm['execution_owner'] == 'native':
                             self.store.update_run(run['id'], status='delegated', native_id=alarm.get('native_id'))
-                        else: self._execute(run, now)
+                        else:
+                            try: active = self.active(alarm['room'])
+                            except AlarmError: active = []  # Dispatch records an unavailable room's failure.
+                            if any(r['status'] == 'playing' and now - 60 <= r.get('started_at', r['created_at']) <= now for r in active):
+                                self.store.update_run(run['id'], status='superseded',
+                                    error='Another alarm is already ringing in this room')
+                            else: self._execute(run, now)
                     occurrence = next_occurrence(alarm, occurrence)
                 # Record a missed occurrence without playing it hours/days late.
                 if previous < floor:
