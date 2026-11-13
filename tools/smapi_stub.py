@@ -24,6 +24,10 @@ import xml.etree.ElementTree as ET
 from smapi_service import (ACCOUNT_NAME, LIST_VERSION, SERVICE_TYPE_SUFFIX, SMAPI_NS, SOAP_NS,
                            SmapiService, collection, text)
 
+# Compatibility exports used by existing service adapters and tests.
+__all__ = ['ACCOUNT_NAME', 'LIST_VERSION', 'SERVICE_TYPE_SUFFIX', 'SMAPI_NS', 'SOAP_NS',
+           'ID_PREFIX', 'SmapiService', 'SmapiStub', 'collection', 'text', 'track', 'build_tree', 'main']
+
 ID_PREFIX = 'bt:'
 
 

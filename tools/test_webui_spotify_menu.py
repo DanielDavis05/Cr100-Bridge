@@ -2,7 +2,6 @@
 import copy
 import http.client
 import json
-import os
 from pathlib import Path
 import tempfile
 import threading

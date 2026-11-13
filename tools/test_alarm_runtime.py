@@ -1,6 +1,5 @@
 """Global alarm production bindings, including real Sonos HTTP/SOAP callbacks."""
 import io
-import json
 from pathlib import Path
 import tempfile
 import threading
@@ -11,7 +10,7 @@ import wave
 
 from alarm_runtime import (HouseholdAlarmExecutor, RadioAlarmProvider, attach_alarms,
                            chime_wav)
-from alarms import AlarmError, AlarmMediaRef, AlarmProviderRegistry, AlarmService, AlarmStore, PlaybackRequest
+from alarms import AlarmError, AlarmMediaRef, AlarmProviderRegistry, AlarmService, AlarmStore
 from backends import BackendError
 from radio_catalog import RadioItem
 from radio_playback import RadioPlayback, radio_uri

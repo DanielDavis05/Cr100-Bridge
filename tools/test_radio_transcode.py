@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from urllib.parse import urlsplit
 

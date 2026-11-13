@@ -10,7 +10,6 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-import frames
 import sonosnet_link as sl
 from nexmon_clock import ClockUnavailable
 from test_link import STATE

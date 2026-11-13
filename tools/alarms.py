@@ -12,7 +12,7 @@ first occurrence. Missed alarms older than ``missed_grace`` are not played late.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as wall_time, timedelta, timezone
 import hashlib
 import html
@@ -22,7 +22,6 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Callable
 from urllib.parse import quote, unquote
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -984,7 +983,7 @@ class AlarmService:
                 continue
             reference = AlarmMediaRef.parse(alarm['media_ref'])
             uri = 'x-rincon-buzzer:0' if reference.provider == 'chime' else reference.uri()
-            item = SubElement(root, 'Alarm', {'ID': str(alarm['id']), 'StartTime': alarm['time'],
+            SubElement(root, 'Alarm', {'ID': str(alarm['id']), 'StartTime': alarm['time'],
                 'Duration': '' if alarm['duration'] is None else hms(alarm['duration']),
                 'Recurrence': alarm['recurrence'], 'Enabled': '1' if alarm['enabled'] else '0',
                 'RoomUUID': room, 'ProgramURI': uri,

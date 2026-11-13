@@ -526,7 +526,7 @@ class UpdateServiceIntegration(unittest.TestCase):
                     '<UpdateURL>%s</UpdateURL><Flags>%s</Flags>%s' % (html.escape(url), flags, extra))
 
     def test_only_selected_internal_stub_bypasses_real_backend_and_informational_guards(self):
-        item = self.check(demonstration=True)
+        self.check(demonstration=True)
         token = self.service.coordinator.status(A)['token']
         selected = '%s/updates/bridge/%s/begin' % (self.service.origin, token)
         for player in (self.room, self.bridge):

@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from radio_catalog import RadioCatalog
 from radio_store import RadioStore
-from radiotime import RadioTimeClient, RadioTimeError
+from radiotime import RadioTimeClient
 
 
 def station(number, title=None, **fields):

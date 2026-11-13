@@ -7,15 +7,13 @@ SystemProperties R_RadioLocation. The SMAPI listener only supplies the directory
 """
 from __future__ import annotations
 
-import base64
 import copy
 import html
-import json
 import re
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 import xml.etree.ElementTree as ET
 
-from smapi_service import SmapiService, SmapiFault, text
+from smapi_service import SmapiService, text
 
 SERVICE_ID = 254
 SERVICE_TYPE = 65031

@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from radio_playback import radio_uri
 from radio_runtime import configure_sources
@@ -24,7 +24,7 @@ class NativeRadioIntegration(unittest.TestCase):
         config = Path(self.temp.name) / 'config.json'
         config.write_text(json.dumps({'radio': {'port': 0}, 'alarms': {'timezone': 'America/New_York'}}))
         def transport(url, **kwargs):
-            parsed = urlsplit(url); query = parse_qs(parsed.query)
+            parsed = urlsplit(url)
             if parsed.path.endswith('Describe.ashx'):
                 body = [{'element': 'station', 'guide_id': 's1', 'name': 'Test Jazz',
                          'current_song': 'Blue Train', 'current_artist': 'John Coltrane',

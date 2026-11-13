@@ -360,7 +360,6 @@ class Client(unittest.TestCase):
         ha.start()
         try:
             self.assertTrue(ha.connected.wait(5))
-            port = fake.port
             fake.close()
             self.assertTrue(wait_for(lambda: not ha.connected.is_set()))
             fake2 = fake_ha.FakeHA([fake_ha.sonos_state('media_player.patio', 'Patio', 'playing')])

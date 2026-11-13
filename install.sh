@@ -137,6 +137,22 @@ systemctl stop cr100-bridge.service cr100-webui.service cr100-radio.service 2>/d
 OLD_RELEASE=$(readlink -e /opt/cr100-bridge/current 2>/dev/null || true)   # -e: empty on a first install
 ln -s "$RELEASE" /opt/cr100-bridge/.current-new
 mv -Tf /opt/cr100-bridge/.current-new /opt/cr100-bridge/current
+# Retain recent releases and both live/rollback targets; ignore unrelated paths.
+python3 - "$RELEASE" "$OLD_RELEASE" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+release = Path(sys.argv[1]).resolve()
+root = release.parent
+protected = {release, (root.parent / 'current').resolve()}
+if sys.argv[2]: protected.add(Path(sys.argv[2]).resolve())
+candidates = sorted((path for path in root.iterdir()
+                     if path.name.startswith('release-') and not path.is_symlink() and path.is_dir()
+                     and path.resolve() != release), key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+protected.update(path.resolve() for path in candidates[:2])
+for path in candidates:
+    if path.resolve() not in protected: shutil.rmtree(path)
+PY
 install -m 755 "$RELEASE/scripts/cr100-bridge" /usr/local/bin/cr100-bridge
 install -m 644 "$RELEASE"/systemd/*.service /etc/systemd/system/
 install -d -m 755 /etc/NetworkManager/conf.d

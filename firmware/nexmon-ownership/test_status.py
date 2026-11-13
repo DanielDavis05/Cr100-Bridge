@@ -1,7 +1,6 @@
 """Diagnostic ABI, GET-only requests, reply validation, and driver deadlines."""
 import ctypes
 import errno
-import fcntl
 import importlib.util
 import json
 import os

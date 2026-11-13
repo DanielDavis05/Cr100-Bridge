@@ -432,14 +432,14 @@ class SettingsProvider:
             if 'SetLEDState' in entry.actions[dp]: operations.add('led')
         # Legacy input-name popups read these independently of Master volume.
         # Preserve physical readback without enabling unimplemented setters.
-        for action, field, name in (
+        for action, result_field, name in (
                 ('GetAutoplayVolume', 'CurrentVolume', 'AutoplayVolume'),
                 ('GetUseAutoplayVolume', 'UseVolume', 'AutoplayUseVolume'),
                 ('GetAutoplayLinkedZones', 'IncludeLinkedZones', 'AutoplayIncludeLinkedZones'),
                 ('GetAutoplayRoomUUID', 'RoomUUID', 'AutoplayRoomUUID')):
             result = self.probe(entry, dp, action)
-            if result is None or field not in result: continue
-            value = result[field]
+            if result is None or result_field not in result: continue
+            value = result[result_field]
             try:
                 if name == 'AutoplayVolume': value = integer(value, 0, 100)
                 elif name != 'AutoplayRoomUUID': value = boolean(value)

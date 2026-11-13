@@ -1,7 +1,6 @@
 """Exact firmware patch verification and safe atomic installation on temp files."""
 import copy
 import fcntl
-import hashlib
 import importlib.util
 import json
 import os

@@ -26,7 +26,7 @@ from alarms import (AlarmError, AlarmMediaRef, AlarmProviderRegistry, AlarmServi
                     AlarmStore, CallbackAlarmExecutor, ExecutionUncertain,
                     PlaybackRequest)
 from backends import BackendError
-from radio_playback import RADIO_URI, radio_id
+from radio_playback import radio_id
 
 
 class RadioAlarmProvider:

@@ -11,7 +11,7 @@ import fake_ha
 import ha_backend
 from ha_client import HomeAssistant
 from spotify_service import SpotifyService
-from test_ha_backend import AVT, field, wait_for
+from test_ha_backend import AVT, field
 from test_ha_content import browse
 from test_smapi_stub import smapi, NS
 from test_zoneplayers import HOUSEHOLD, soap, zp

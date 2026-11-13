@@ -14,7 +14,7 @@ import struct
 import zlib
 
 from patch_controller_settings_ui import (SUPPORTED, Code, Patcher, action, array, call,
-    define, discard, fncall, inspect, literal, local, member, obj, push, records,
+    define, discard, fncall, inspect, literal, local, member, records,
     ret, setmember, setvar, u16, u32, var)
 
 def allow_zip_menu(body):

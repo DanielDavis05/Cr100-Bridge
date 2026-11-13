@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_ha
 import webui
 import zoneplayers
-from ha_client import HomeAssistant
 from test_zoneplayers import HOUSEHOLD, zp
 
 CR = '00:0e:58:12:34:56'

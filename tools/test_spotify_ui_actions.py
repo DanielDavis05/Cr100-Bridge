@@ -10,7 +10,6 @@ from xml.sax.saxutils import escape
 
 from backends import BackendError
 from fake_sonos import FakeHousehold, UPnPError
-from music_services import MusicServices
 from sonos_backend import SonosBackend, SonosRoom
 from sonos_upnp import UPnPFault
 from spotify_autoplay import NativeTransport, Run, SpotifyAutoplay

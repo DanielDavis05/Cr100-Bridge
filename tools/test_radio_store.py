@@ -1,5 +1,4 @@
 import concurrent.futures
-import json
 import multiprocessing
 from pathlib import Path
 import tempfile

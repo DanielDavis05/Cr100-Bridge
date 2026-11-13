@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from backends import BackendError
-from radio_playback import CoverLookup, RadioPlayback, RadioSession, radio_id, radio_uri
+from radio_playback import CoverLookup, RadioPlayback, radio_id, radio_uri
 
 
 class Room:

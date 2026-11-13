@@ -10,7 +10,6 @@ import collections
 import copy
 import dataclasses
 from datetime import datetime, timezone as datetime_timezone
-import hashlib
 import json
 import re
 import threading
@@ -18,7 +17,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from radio_store import RadioStore, DEFAULT_SETTINGS
-from radiotime import (RadioTimeClient, RadioTimeError, RadioStream, merge_metadata,
+from radiotime import (RadioTimeClient, RadioTimeError, merge_metadata,
                        outlines, unavailable_url)
 
 

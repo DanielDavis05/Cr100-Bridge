@@ -17,7 +17,6 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import socket
 import socketserver
 import tempfile
 import threading

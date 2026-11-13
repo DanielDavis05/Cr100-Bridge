@@ -49,7 +49,7 @@ import backends
 import build_info
 import room_icons
 from alarms import AlarmError
-from backends import LINE_IN_PREFIX, PLAY_MODES, BackendError
+from backends import LINE_IN_PREFIX, BackendError
 from content import ContentError, ContentSource, Node
 from controller_visibility import BRIDGE_COMPONENT, component_visible, room_component_key, visible_components
 

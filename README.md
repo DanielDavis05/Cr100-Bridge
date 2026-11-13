@@ -83,8 +83,9 @@ This is a headless setup: the installer prints the URL; it does not launch a
 desktop browser. The web interface is intended for a trusted home network.
 
 The isolated controller network uses `192.168.69.0/24`. An upstream network using
-that subnet is rejected. DHCP is bound to `sonos0` and advertises no DNS server
-or default gateway; the home network's DHCP/DNS configuration is untouched.
+that subnet is rejected. DHCP is bound to `sonos0` and advertises the bridge at
+`192.168.69.1` as DNS so update hostnames resolve locally. It advertises no default
+gateway; the home network's DHCP/DNS configuration is untouched.
 
 ## GitHub and streamed installation
 

@@ -35,7 +35,7 @@ def self_test():
 
 def serve(args):
     try:
-        import zlib
+        __import__('zlib')
     except ImportError:
         # The minimal SH4 lab Python omits its zlib extension. Use the guest's
         # real system libz for bounded parsing by unchanged production code.

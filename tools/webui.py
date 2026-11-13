@@ -43,7 +43,7 @@ from pathlib import Path
 
 import room_icons
 from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME, MAX_SLOTS,
-                           apply_rooms, reconcile_sonos_rooms, room_for, room_key,
+                           apply_rooms, reconcile_sonos_rooms, room_key,
                            room_key_ref, update_config_file, write_json)
 from controller_state import controller_records
 from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
@@ -957,7 +957,7 @@ class Bridge:
         _, kind, ident = uri.split(':')
         client, _ = self.spotify_resources()
         try: item = client.get('/%ss/%s' % (kind, ident))
-        except SpotifyError as error:
+        except SpotifyError:
             raise ApiError(400, 'Spotify could not read that item. Check the link and account access.') from None
         if not isinstance(item.get('name'), str): raise ApiError(502, 'Spotify returned an item without a name.')
         return {'uri': uri, 'name': item['name'], 'kind': 'single' if kind == 'album' and item.get('album_type') == 'single' else kind}

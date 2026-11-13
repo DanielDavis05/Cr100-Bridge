@@ -3,7 +3,6 @@ import errno
 import socket
 import struct
 import subprocess
-import threading
 import unittest
 from unittest.mock import Mock, patch
 

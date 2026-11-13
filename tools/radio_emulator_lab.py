@@ -6,7 +6,7 @@ sockets, token, private QEMU hub, and evidence directory. The original firmware
 runs in the guest; screenshots are the real framebuffer, not an HTML recreation.
 """
 from __future__ import annotations
-import argparse, base64, hashlib, json, os, secrets, shutil, socket, subprocess, sys, time
+import argparse, base64, hashlib, json, secrets, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

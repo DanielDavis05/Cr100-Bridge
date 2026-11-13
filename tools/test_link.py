@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Offline tests for sonosnet_link.py: fake radio and TAP, real CCMP, real captures."""
 import errno
-import os
 import socket
 import struct
 import sys

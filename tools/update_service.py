@@ -12,12 +12,14 @@ import html
 import re
 import secrets
 import threading
-import time
-from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import update_transport
 from online_updates import UpdateError, UpdateManager, version_tuple
-from update_transport import BridgeUpdateCoordinator, UpdateTransport, UpdateTransportError
+from update_transport import BridgeUpdateCoordinator, UpdateTransport
+
+# Compatibility alias used by update callers.
+UpdateTransportError = update_transport.UpdateTransportError
 
 ORIGIN = 'http://update.sonos.com'
 BASE_FLOOR = '24.1-00000'

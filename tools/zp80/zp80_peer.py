@@ -32,7 +32,6 @@ from pathlib import Path
 import re
 import socket
 import socketserver
-import struct
 import sys
 import threading
 import time

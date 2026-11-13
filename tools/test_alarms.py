@@ -9,7 +9,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from alarms import (AlarmError, AlarmMediaRef, AlarmProviderRegistry, AlarmService,
-                    AlarmStore, CallbackAlarmExecutor, ExecutionUncertain,
+                    CallbackAlarmExecutor,
                     NativeAlarmProgram, PlaybackRequest, next_occurrence)
 
 
@@ -427,7 +427,7 @@ class Alarms(unittest.TestCase):
 
     def test_global_second_provider_works_without_scheduler_changes(self):
         spotify = Provider('spotify', 'queue'); self.registry.register('spotify', spotify)
-        alarm = self.save(media_ref={'provider': 'spotify', 'content_id': 'spotify:playlist:fixture', 'account_ref': 'household-account'})
+        self.save(media_ref={'provider': 'spotify', 'content_id': 'spotify:playlist:fixture', 'account_ref': 'household-account'})
         self.clock.advance(10); self.service.tick()
         self.assertEqual(self.player.events[0][:3], ('play', 'queue', False))
         self.assertEqual(spotify.calls[0][0].account_ref, 'household-account')
@@ -665,7 +665,7 @@ class Alarms(unittest.TestCase):
         self.assertEqual(self.service.store.get(alarm['id'])['execution_owner'], 'bridge')
 
     def test_two_services_cannot_claim_one_occurrence_twice(self):
-        alarm = self.save(); other = self.make()
+        self.save(); other = self.make()
         self.clock.advance(10)
         barrier = threading.Barrier(2)
         failures = []

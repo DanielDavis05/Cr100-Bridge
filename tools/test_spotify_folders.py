@@ -278,7 +278,7 @@ class FolderTests(unittest.TestCase):
         self.assertEqual(len([r for r in self.requests if r[0] == 'POST']), 1)
 
     def test_cache_reload_corruption_and_auto_refresh_interval(self):
-        old = self.provider.refresh(); other = self.make()
+        self.provider.refresh(); other = self.make()
         self.response['contents']['metaItems'][1]['attributes']['name'] = 'Changed elsewhere'
         self.provider.refresh()
         self.assertEqual(other.get_tree()[0]['children'][0]['name'], 'Changed elsewhere')

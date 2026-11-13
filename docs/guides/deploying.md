@@ -73,7 +73,9 @@ opens. A green status page alone does not prove the controller can discover room
 
 ## Rolling back
 
-Every previous release stays under `/opt/cr100-bridge/releases/`. To go back:
+The installer keeps the new release and the two most recently modified other
+release directories under `/opt/cr100-bridge/releases/`. It also protects the
+current and previous release targets, even when they are older. To go back:
 
 ```sh
 ssh $PI 'ls -1t /opt/cr100-bridge/releases/ | head'
