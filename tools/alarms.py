@@ -467,7 +467,10 @@ class AlarmService:
         self._edit_lock = threading.RLock()
         self._closed = False
         self.store.set_meta('timezone', self.store.get_meta('timezone', str(_zone(timezone))))
-        self.store.set_meta('scheduler_cursor', self.store.get_meta('scheduler_cursor', self.clock()))
+        cursor = self.store.get_meta('scheduler_cursor')
+        self._scheduler_cursor = self.clock() if cursor is None else float(cursor)
+        self._cursor_persisted_at = self._scheduler_cursor
+        if cursor is None: self.store.set_meta('scheduler_cursor', self._scheduler_cursor)
         self.scheduler = AlarmScheduler(self)
         if self.executor is not None: self._recover()
         if autostart: self.start()
@@ -595,7 +598,7 @@ class AlarmService:
                 'version': self.store.version,
                 'runs': [self._public_run(r) for r in self.store.runs()[-100:]],
                 'commands': self.store.commands()[-100:],
-                'scheduler': {'last_tick': self.store.get_meta('scheduler_cursor')}}
+                'scheduler': {'last_tick': self._scheduler_cursor if self.executor is not None else self.store.get_meta('scheduler_cursor')}}
 
     def command(self, action, *, room=None, alarm_id=None, run_id=None, seconds=540, request_id=None):
         """Durable web->player command. Reusing request_id does not dispatch twice."""
@@ -840,8 +843,9 @@ class AlarmService:
             now = self.clock() if now is None else float(now)
             if self.executor is None:
                 raise AlarmError('Only the player process with an executor may run the scheduler')
+            changes = self.store.db.total_changes
             self._commands(now)
-            previous = float(self.store.get_meta('scheduler_cursor', now))
+            previous = self._scheduler_cursor
             if now < previous: previous = now - 1   # wall-clock adjustment; journal still deduplicates
             floor = max(previous, now - self.missed_grace)
             for alarm in self.store.records():
@@ -910,7 +914,12 @@ class AlarmService:
                     self.store.save_sleep(timer['room'], {**timer, 'expires': None,
                                                          'generation': timer['generation'] + 1})
                     self._notify('sleep-timer-changed', room=timer['room'])
-            self.store.set_meta('scheduler_cursor', now)
+            self._scheduler_cursor = now
+            # Restart scanning is bounded by missed_grace; a cursor up to 60
+            # seconds old is safe because the occurrence journal deduplicates.
+            if self.store.db.total_changes != changes or now - self._cursor_persisted_at >= 60 or now < self._cursor_persisted_at:
+                self.store.set_meta('scheduler_cursor', now)
+                self._cursor_persisted_at = now
         finally: self._tick_lock.release()
 
     def run_now(self, alarm_id, *, occurrence=None):
@@ -962,6 +971,7 @@ class AlarmService:
                       'time_generation': self.store.get_meta('time_generation', 1) + 1}
             self.store.db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)',
                                       [(key, json.dumps(value)) for key, value in values.items()])
+            self._scheduler_cursor = self._cursor_persisted_at = values['scheduler_cursor']
         self._notify('alarm-clock-changed')
 
     def native_list(self):
@@ -1137,4 +1147,5 @@ class AlarmService:
         with self.store.lock:
             if self._closed: return
             self._closed = True
+            if self.executor is not None: self.store.set_meta('scheduler_cursor', self._scheduler_cursor)
             self.store.close()

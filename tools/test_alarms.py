@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from alarms import (AlarmError, AlarmMediaRef, AlarmProviderRegistry, AlarmService,
@@ -211,6 +212,48 @@ class Alarms(unittest.TestCase):
         self.clock.advance(10); self.service.tick()
         self.clock.advance(61); self.service.tick()
         self.assertEqual(sum(event[0] == 'play' for event in self.player.events), 2)
+
+    def test_idle_scheduler_persists_cursor_at_most_twice_per_hundred_ticks(self):
+        with patch.object(self.service.store, 'set_meta', wraps=self.service.store.set_meta) as write:
+            for _ in range(100):
+                self.clock.advance(1); self.service.tick()
+            cursor_writes = [call for call in write.call_args_list if call.args[0] == 'scheduler_cursor']
+        self.assertLessEqual(len(cursor_writes), 2)
+        self.assertGreaterEqual(len(cursor_writes), 1)
+        self.assertLess(self.clock() - self.service.store.get_meta('scheduler_cursor'), 60)
+        self.assertEqual(self.service.snapshot()['scheduler']['last_tick'], self.clock())
+
+    def test_restart_keeps_last_persist_deadline(self):
+        self.service.store.set_meta('scheduler_cursor', self.clock() - 59)
+        restarted = self.make()
+        self.clock.advance(1); restarted.tick()
+        self.assertEqual(restarted.store.get_meta('scheduler_cursor'), self.clock())
+
+    def test_claimed_and_changed_runs_persist_cursor_immediately(self):
+        self.save(duration=10)
+        with patch.object(self.service.store, 'set_meta', wraps=self.service.store.set_meta) as write:
+            self.clock.advance(10); self.service.tick()
+            self.assertIn(('scheduler_cursor', self.clock()), [call.args for call in write.call_args_list])
+            write.reset_mock()
+            self.clock.advance(10); self.service.tick()
+            self.assertEqual(self.service.store.runs()[-1]['status'], 'expired')
+            self.assertIn(('scheduler_cursor', self.clock()), [call.args for call in write.call_args_list])
+
+    def test_shutdown_flushes_cursor_and_web_reader_does_not_overwrite_it(self):
+        web = self.make(executor=False)
+        self.clock.advance(7); self.service.tick()
+        self.close_service(self.service)
+        self.assertEqual(web.store.get_meta('scheduler_cursor'), self.clock())
+        self.close_service(web)
+        self.service = self.make()
+        self.assertEqual(self.service.store.get_meta('scheduler_cursor'), self.clock())
+
+    def test_clock_adjustment_moves_in_memory_scheduler_cursor(self):
+        self.save(time='13:00:00')
+        self.service.set_clock_offset(3600, time_server='')
+        self.service.tick()
+        self.assertEqual(self.player.events, [])
+        self.assertEqual(self.service.snapshot()['scheduler']['last_tick'], self.service.clock())
 
     def test_shutdown_waits_for_inflight_event_and_later_events_are_empty(self):
         entered, release, closing, closed = (threading.Event() for _ in range(4))
