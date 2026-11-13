@@ -374,6 +374,26 @@ class SonosHousehold(unittest.TestCase):
         self.assertIsNone(self.backend.speaker(KITCHEN))
 
 
+class AlbumArtFetch(unittest.TestCase):
+    def setUp(self):
+        self.backend = object.__new__(sonos_backend.SonosBackend)
+
+    def test_non_http_schemes_and_missing_hosts_never_reach_the_opener(self):
+        for picture in ('file:///etc/hostname', 'ftp://speaker/picture', 'data:image/png,test',
+                        'http:///picture', '/getaa', 'https:picture'):
+            with self.subTest(picture=picture), patch('sonos_backend.urllib.request.urlopen') as open_url:
+                with self.assertRaises(ValueError): self.backend.fetch(picture)
+                open_url.assert_not_called()
+
+    def test_http_and_https_art_keep_the_existing_limit_and_timeout(self):
+        for picture in ('http://speaker/getaa', 'https://speaker/getaa'):
+            with self.subTest(picture=picture), patch('sonos_backend.urllib.request.urlopen') as open_url:
+                open_url.return_value.__enter__.return_value.read.return_value = b'picture'
+                self.assertEqual(self.backend.fetch(picture), b'picture')
+                open_url.assert_called_once_with(picture, timeout=10)
+                open_url.return_value.__enter__.return_value.read.assert_called_once_with(sonos_backend.ART_LIMIT)
+
+
 class SpeakerReadFailures(unittest.TestCase):
     def setUp(self):
         self.fake = fake_sonos.FakeHousehold()

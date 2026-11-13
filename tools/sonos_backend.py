@@ -539,6 +539,9 @@ class SonosBackend(Backend):
         return urljoin(base + '/', art) if art else ''
 
     def fetch(self, picture):
+        parsed = urlsplit(picture)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError('Album art URL must use HTTP or HTTPS and include a hostname')
         with urllib.request.urlopen(picture, timeout=10) as response:
             return response.read(ART_LIMIT)
 
