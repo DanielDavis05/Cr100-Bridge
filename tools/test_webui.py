@@ -368,10 +368,11 @@ class Http(Fixture):
         self.server.shutdown(); self.server.server_close()
         super().tearDown()
 
-    def call(self, method, path, body=None, header=True):
+    def call(self, method, path, body=None, header=True, host=None):
         c = http.client.HTTPConnection('127.0.0.1', self.server.server_address[1], timeout=10)
         headers = {'Content-Type': 'application/json'}
         if header: headers['X-Bridge'] = '1'
+        if host is not None: headers['Host'] = host
         if self.cookie: headers['Cookie'] = self.cookie
         c.request(method, path, json.dumps(body) if body is not None else None, headers)
         r = c.getresponse()
@@ -405,12 +406,128 @@ class Http(Fixture):
         self.assertEqual(self.call('GET', '/static/../webui.py')[0], 404)
         self.assertEqual(self.call('GET', '/static/%2e%2e/webui.py')[0], 404)
 
+    def test_host_header_is_checked_for_api_and_static_routes(self):
+        for path in ('/api/session', '/'):
+            with self.subTest(path=path):
+                status, body = self.call('GET', path, host='evil.example')
+                self.assertEqual(status, 421)
+                self.assertIn('error', body)
+                for host in ('10.0.0.170:8080', 'localhost:8080', '[::1]:8080',
+                             webui.socket.gethostname(), webui.socket.gethostname() + '.local'):
+                    self.assertEqual(self.call('GET', path, host=host)[0], 200, host)
+        for host in ('localhost@evil.example', 'localhost:bad', 'localhost/evil.example'):
+            self.assertEqual(self.call('GET', '/api/session', host=host)[0], 421, host)
+
+    def test_setup_is_atomic(self):
+        second_entered = threading.Event()
+        results, calls = [], []
+        original = self.auth.set_password
+        def set_password(password):
+            calls.append(password)
+            if len(calls) == 2: second_entered.set()
+            second_entered.wait(.15)
+            original(password)
+        def setup(password):
+            results.append(self.call('POST', '/api/setup', {'password': password})[0])
+        with patch.object(self.auth, 'set_password', side_effect=set_password):
+            threads = [threading.Thread(target=setup, args=(password,))
+                       for password in ('first password', 'second password')]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(5)
+        self.assertEqual(sorted(results), [200, 409])
+        self.assertEqual(len(calls), 1)
+
+    def test_login_limiter_returns_429_before_checking_password(self):
+        with patch.object(self.auth, 'check', return_value=False) as check:
+            for _ in range(5):
+                self.assertEqual(self.call('POST', '/api/login', {'password': 'wrong'})[0], 401)
+            self.assertEqual(self.call('POST', '/api/login', {'password': 'wrong'})[0], 429)
+        self.assertEqual(check.call_count, 5)
+
+    def test_password_change_keeps_only_callers_session(self):
+        self.call('POST', '/api/setup', {'password': 'long enough'})
+        caller = self.cookie.split('=', 1)[1]
+        other = self.auth.new_session()
+        self.assertEqual(self.call('POST', '/api/password', {'current': 'long enough',
+                                                            'password': 'new password'})[0], 200)
+        self.assertTrue(self.auth.valid(caller))
+        self.assertFalse(self.auth.valid(other))
+
+    def test_password_change_revokes_a_concurrent_verified_login(self):
+        self.call('POST', '/api/setup', {'password': 'long enough'})
+        caller = self.cookie.split('=', 1)[1]
+        verified, release, changed = threading.Event(), threading.Event(), threading.Event()
+        original, results = self.auth.login, []
+        def login(password, address):
+            accepted = original(password, address)
+            verified.set(); release.wait(3)
+            return accepted
+        def sign_in(): results.append(self.call('POST', '/api/login', {'password': 'long enough'})[0])
+        def change():
+            results.append(self.call('POST', '/api/password', {'current': 'long enough',
+                                                              'password': 'new password'})[0])
+            changed.set()
+        threads = [threading.Thread(target=sign_in), threading.Thread(target=change)]
+        with patch.object(self.auth, 'check', return_value=True), \
+                patch.object(self.auth, 'set_password'), patch.object(self.auth, 'login', side_effect=login):
+            try:
+                threads[0].start(); self.assertTrue(verified.wait(2))
+                threads[1].start(); changed.wait(.25)
+            finally:
+                release.set()
+                for thread in threads:
+                    if thread.ident is not None: thread.join(5)
+        self.assertEqual(results, [200, 200])
+        self.assertEqual(set(self.auth.sessions), {caller})
+
+    def test_non_ascii_spotify_state_is_a_bad_request(self):
+        self.call('POST', '/api/setup', {'password': 'long enough'})
+        self.bridge.spotify_begin()
+        status, _ = self.call('POST', '/api/spotify/finish', {'address':
+                            'http://127.0.0.1:8888/callback?code=abc&state=%C3%A9'})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.exchanges, [])
+
+    def test_unexpected_error_is_logged_without_exposing_details(self):
+        self.call('POST', '/api/setup', {'password': 'long enough'})
+        with patch.object(self.bridge, 'overview', side_effect=RuntimeError('PRIVATE_DETAIL')):
+            status, body = self.call('GET', '/api/overview')
+        self.assertEqual(status, 500)
+        self.assertEqual(body, {'error': 'Something went wrong on the bridge. Check its log.'})
+        self.assertIn('PRIVATE_DETAIL', repr(self.logs))
+
     def test_controller_network_is_refused(self):
         handler = webui.make_handler(self.bridge, self.auth, self.logs.append)
         probe = handler.__new__(handler)
         for address, allowed in [('192.168.69.52', False), ('192.168.1.20', True), ('::ffff:192.168.69.60', False)]:
             probe.client_address = (address, 1234)
             self.assertEqual(probe.allowed_client(), allowed, address)
+
+
+class LoginLimiter(unittest.TestCase):
+    def test_expiry_success_and_address_independence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth = webui.Auth(webui.DataFile(Path(directory) / 'auth.json'))
+            with patch.object(auth, 'check', return_value=False), patch('webui.time.monotonic', return_value=100):
+                for _ in range(5): self.assertFalse(auth.login('wrong', 'one'))
+                with self.assertRaises(webui.ApiError) as failure: auth.login('wrong', 'one')
+                self.assertEqual(failure.exception.status, 429)
+                self.assertFalse(auth.login('wrong', 'two'))
+            with patch.object(auth, 'check', return_value=True), patch('webui.time.monotonic', return_value=160):
+                self.assertTrue(auth.login('correct', 'one'))
+            with patch.object(auth, 'check', return_value=False), patch('webui.time.monotonic', return_value=161):
+                for _ in range(5): self.assertFalse(auth.login('wrong', 'one'))
+                with self.assertRaises(webui.ApiError): auth.login('wrong', 'one')
+
+    def test_old_failures_expire_and_table_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth = webui.Auth(webui.DataFile(Path(directory) / 'auth.json'))
+            with patch.object(auth, 'check', return_value=False), patch('webui.time.monotonic', return_value=100):
+                for _ in range(4): self.assertFalse(auth.login('wrong', 'one'))
+            with patch.object(auth, 'check', return_value=False), patch('webui.time.monotonic', return_value=161):
+                for _ in range(4): self.assertFalse(auth.login('wrong', 'one'))
+                for address in range(webui.MAX_LOGIN_CLIENTS + 1): auth.login('wrong', str(address))
+            self.assertLessEqual(len(auth.login_failures), webui.MAX_LOGIN_CLIENTS)
 
 
 class Listening(unittest.TestCase):

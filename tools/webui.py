@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,9 @@ MIN_PASSWORD = 8
 PBKDF2_ROUNDS = 300_000
 SESSION_SECONDS = 30 * 24 * 3600
 SESSION_COOKIE = 'bridge_session'
+LOGIN_WINDOW = 60
+LOGIN_FAILURES = 5
+MAX_LOGIN_CLIENTS = 1024
 BODY_LIMIT = 64 * 1024
 FIRMWARE_BODY_LIMIT = 16 * 1024 * 1024
 LINK_FRESH = 30                # s: a stats line older than this means the radio link is not running
@@ -101,7 +105,8 @@ def resolve(base_file, value, default):
 class Auth:
     """One password for the page, stored as a PBKDF2 hash in the web interface's data file."""
     def __init__(self, data):
-        self.data, self.sessions, self.lock = data, {}, threading.Lock()
+        self.data, self.sessions, self.lock = data, {}, threading.RLock()
+        self.login_failures = {}
 
     @property
     def password_set(self):
@@ -119,6 +124,28 @@ class Auth:
         if not stored or not isinstance(password, str): return False
         digest = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(stored['salt']), stored['rounds'])
         return hmac.compare_digest(digest.hex(), stored['hash'])
+
+    def login(self, password, address):
+        # Serialize the check and failure count so concurrent requests share the limit.
+        with self.lock:
+            now = time.monotonic()
+            failures, blocked = self.login_failures.get(address, ([], 0))
+            if blocked > now:
+                raise ApiError(429, 'Too many sign-in attempts. Try again in a minute.')
+            failures = [stamp for stamp in failures if now - stamp < LOGIN_WINDOW]
+            if self.check(password):
+                self.login_failures.pop(address, None)
+                return True
+            failures.append(now)
+            self.login_failures.pop(address, None)
+            while len(self.login_failures) >= MAX_LOGIN_CLIENTS:
+                self.login_failures.pop(next(iter(self.login_failures)))
+            self.login_failures[address] = (failures, now + LOGIN_WINDOW if len(failures) >= LOGIN_FAILURES else 0)
+            return False
+
+    def keep_session(self, token):
+        with self.lock:
+            self.sessions = {key: expiry for key, expiry in self.sessions.items() if key == token}
 
     def new_session(self):
         token = secrets.token_urlsafe(32)
@@ -1051,7 +1078,7 @@ class Bridge:
         codes, states = values.get('code', []), values.get('state', [])
         if len(codes) != 1 or len(states) != 1:
             raise ApiError(400, 'Paste the whole address from the page Spotify sent you to. It contains "code=".')
-        if not hmac.compare_digest(states[0], pending['state']):
+        if not hmac.compare_digest(states[0].encode('utf-8'), pending['state'].encode('ascii')):
             raise ApiError(400, 'That address is from a different sign-in. Start again with Sign in to Spotify.')
         _, token_file = self.spotify_settings()
         self.token_exchange(pending, codes[0], token_file)
@@ -1240,19 +1267,21 @@ def make_handler(bridge, auth, log):
 
     @route('POST', '/api/setup', public=True)
     def setup(handler, body, match):
-        if auth.password_set: raise ApiError(409, 'A password is already set. Sign in with it.')
-        auth.set_password(body.get('password'))
+        with auth.lock:
+            if auth.password_set: raise ApiError(409, 'A password is already set. Sign in with it.')
+            auth.set_password(body.get('password'))
         log({'event': 'password-set', 'from': handler.client_address[0]})
         handler.new_cookie = auth.new_session()
         return {'authenticated': True}
 
     @route('POST', '/api/login', public=True)
     def login(handler, body, match):
-        if not auth.check(body.get('password')):
-            time.sleep(1)   # slow down guessing
-            log({'event': 'login-failed', 'from': handler.client_address[0]})
-            raise ApiError(401, 'That password is not right.')
-        handler.new_cookie = auth.new_session()
+        # A password change must also revoke logins already being verified.
+        with auth.lock:
+            if not auth.login(body.get('password'), handler.client_address[0]):
+                log({'event': 'login-failed', 'from': handler.client_address[0]})
+                raise ApiError(401, 'That password is not right.')
+            handler.new_cookie = auth.new_session()
         return {'authenticated': True}
 
     @route('POST', '/api/logout', public=True)
@@ -1263,8 +1292,10 @@ def make_handler(bridge, auth, log):
 
     @route('POST', '/api/password')
     def change_password(handler, body, match):
-        if not auth.check(body.get('current')): raise ApiError(400, 'The current password is not right.')
-        auth.set_password(body.get('password'))
+        with auth.lock:
+            if not auth.check(body.get('current')): raise ApiError(400, 'The current password is not right.')
+            auth.set_password(body.get('password'))
+            auth.keep_session(handler.session_token())
         return {'message': 'Password changed.'}
 
     route('GET', '/api/overview')(lambda h, b, m: bridge.overview())
@@ -1339,11 +1370,31 @@ def make_handler(bridge, auth, log):
             if address.version == 6 and address.ipv4_mapped: address = address.ipv4_mapped
             return address not in CR100_NETWORK
 
+        def allowed_host(self):
+            hosts = self.headers.get_all('Host', [])
+            if len(hosts) != 1: return False
+            host = hosts[0]
+            if any(character.isspace() for character in host): return False
+            try:
+                parsed = urllib.parse.urlsplit('//' + host)
+                if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+                        or parsed.path or parsed.query or parsed.fragment): return False
+                parsed.port  # reject malformed or out-of-range ports
+                try: ipaddress.ip_address(parsed.hostname)
+                except ValueError:
+                    hostname = socket.gethostname().lower()
+                    return parsed.hostname in {'localhost', hostname, hostname + '.local'}
+                return True
+            except ValueError:
+                return False
+
         def do_GET(self): self.dispatch('GET')
         def do_POST(self): self.dispatch('POST')
         def do_PUT(self): self.dispatch('PUT')
 
         def dispatch(self, method):
+            if not self.allowed_host():
+                return self.reply(421, {'error': 'This address is not a bridge settings host.'})
             if not self.allowed_client():
                 return self.reply(403, {'error': 'The bridge settings are not available from the controller network.'})
             path = urllib.parse.urlsplit(self.path).path
@@ -1373,7 +1424,7 @@ def make_handler(bridge, auth, log):
                     return self.reply(error.status, {'error': error.message})
                 except Exception as error:
                     log({'event': 'api-error', 'path': path, 'error': repr(error)})
-                    return self.reply(500, {'error': 'Something went wrong on the bridge: %s' % error})
+                    return self.reply(500, {'error': 'Something went wrong on the bridge. Check its log.'})
             self.reply(404, {'error': 'Not found.'})
 
         def read_body(self):
