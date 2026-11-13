@@ -1091,9 +1091,9 @@ class Bridge:
         return {'message': 'Signed in to Spotify.'}
 
     def spotify_sign_out(self):
-        from spotify_client import write_token_file
+        from spotify_client import token_file_lock, write_token_file
         settings, token_file = self.spotify_settings()
-        write_token_file(token_file, {'client_id': settings.get('client_id', ''), 'authorization_required': True})
+        with token_file_lock(token_file): write_token_file(token_file, {'client_id': settings.get('client_id', ''), 'authorization_required': True})
         self.data.update(spotify_account=None)
         self.log({'event': 'spotify-signed-out'})
         return {'message': 'Signed out of Spotify.'}
@@ -1235,12 +1235,13 @@ def default_ha_factory(url, token, log):
 
 def default_token_exchange(pending, code, token_file):
     from spotify_auth import TOKEN_ENDPOINT
-    from spotify_client import SpotifyError, _json_request, save_token_response
+    from spotify_client import SpotifyError, _json_request, save_token_response, token_file_lock
     try:
-        response = _json_request('POST', TOKEN_ENDPOINT, fields={
-            'grant_type': 'authorization_code', 'client_id': pending['client_id'], 'code': code,
-            'redirect_uri': pending['redirect_uri'], 'code_verifier': pending['verifier']})
-        save_token_response(token_file, pending['client_id'], response)
+        with token_file_lock(token_file):
+            response = _json_request('POST', TOKEN_ENDPOINT, fields={
+                'grant_type': 'authorization_code', 'client_id': pending['client_id'], 'code': code,
+                'redirect_uri': pending['redirect_uri'], 'code_verifier': pending['verifier']})
+            save_token_response(token_file, pending['client_id'], response)
     except SpotifyError as error:
         raise ApiError(400, 'Spotify did not accept that sign-in (%s). Start again.' % error.message) from None
 

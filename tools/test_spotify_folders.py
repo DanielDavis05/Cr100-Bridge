@@ -320,7 +320,7 @@ import spotify_folders as f
 try:
     with f.folder_token_lock(sys.argv[1], timeout=.1):
         print('ACQUIRED')
-except f.FolderError:
+except f.SpotifyError:
     print('LOCKED')
 '''
         args = [sys.executable, '-c', code, str(self.token)]

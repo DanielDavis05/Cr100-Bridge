@@ -2,6 +2,7 @@
 import http.server
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -158,6 +159,123 @@ class SpotifyClientTests(unittest.TestCase):
         with self.assertRaises(spotify.SpotifyError):
             self.client.get('/me')
         self.assertEqual(len(self.fake.requests), 1)
+
+    def test_two_clients_share_one_rotating_refresh(self):
+        self.token(expired=True)
+        original = spotify.read_token_file
+        barrier, endpoint_lock = threading.Barrier(2), threading.Lock()
+        initial_reads, current_refresh, refreshes = set(), ['REFRESH_SECRET'], []
+        def read_token(path, client_id):
+            token = original(path, client_id)
+            thread = threading.get_ident()
+            if thread not in initial_reads:
+                initial_reads.add(thread)
+                barrier.wait(3)
+            return token
+        def token_endpoint(request):
+            supplied = urllib.parse.parse_qs(request['body'].decode())['refresh_token'][0]
+            with endpoint_lock:
+                refreshes.append(supplied)
+                if supplied != current_refresh[0]: return 400, {'error': 'invalid_grant'}, {}
+                current_refresh[0] = 'ROTATED_REFRESH_SECRET'
+            time.sleep(.05)
+            return 200, {'access_token': 'NEW_ACCESS_SECRET', 'refresh_token': current_refresh[0],
+                         'expires_in': 3600}, {}
+        self.fake.routes[('POST', '/token')] = token_endpoint
+        self.fake.reply('GET', '/v1/me', payload={'ok': True})
+        clients = [self.client, spotify.SpotifyClient('test-client', self.path, log=self.logs.append)]
+        results, failures = [], []
+        def get(client):
+            try: results.append(client.get('/me'))
+            except Exception as error: failures.append(error)
+        with patch.object(spotify, 'read_token_file', side_effect=read_token):
+            threads = [threading.Thread(target=get, args=(client,)) for client in clients]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(5)
+        self.assertEqual(failures, [])
+        self.assertEqual(results, [{'ok': True}, {'ok': True}])
+        self.assertEqual(refreshes, ['REFRESH_SECRET'])
+        self.assertEqual(json.loads(self.path.read_text())['refresh_token'], current_refresh[0])
+
+    def test_invalid_grant_retries_a_newer_refresh_token_once(self):
+        self.token(expired=True)
+        refreshes = []
+        def token_endpoint(request):
+            supplied = urllib.parse.parse_qs(request['body'].decode())['refresh_token'][0]
+            refreshes.append(supplied)
+            if len(refreshes) == 1:
+                spotify.write_token_file(self.path, {'client_id': 'test-client', 'access_token': 'OTHER_ACCESS',
+                    'refresh_token': 'OTHER_REFRESH', 'expires_at': time.time() - 10})
+                return 400, {'error': 'invalid_grant'}, {}
+            return 200, {'access_token': 'NEW_ACCESS_SECRET', 'refresh_token': 'ROTATED_REFRESH_SECRET',
+                         'expires_in': 3600}, {}
+        self.fake.routes[('POST', '/token')] = token_endpoint
+        self.fake.reply('GET', '/v1/me', payload={'ok': True})
+        self.assertEqual(self.client.get('/me'), {'ok': True})
+        self.assertEqual(refreshes, ['REFRESH_SECRET', 'OTHER_REFRESH'])
+        self.assertEqual(json.loads(self.path.read_text())['refresh_token'], 'ROTATED_REFRESH_SECRET')
+
+    def test_invalid_grant_with_changing_tokens_only_retries_once(self):
+        self.token(expired=True)
+        refreshes = []
+        def token_endpoint(request):
+            refreshes.append(urllib.parse.parse_qs(request['body'].decode())['refresh_token'][0])
+            spotify.write_token_file(self.path, {'client_id': 'test-client', 'access_token': 'OTHER_ACCESS',
+                'refresh_token': 'OTHER_REFRESH_%d' % len(refreshes), 'expires_at': time.time() - 10})
+            return 400, {'error': 'invalid_grant'}, {}
+        self.fake.routes[('POST', '/token')] = token_endpoint
+        with self.assertRaises(spotify.SpotifyError) as failure: self.client.get('/me')
+        self.assertEqual(failure.exception.status, 401)
+        self.assertEqual(refreshes, ['REFRESH_SECRET', 'OTHER_REFRESH_1'])
+        self.assertTrue(json.loads(self.path.read_text())['authorization_required'])
+
+    def test_ordinary_api_call_does_not_take_credential_lock(self):
+        self.token()
+        self.fake.reply('GET', '/v1/me', payload={'ok': True})
+        with patch.object(spotify, 'token_file_lock', side_effect=AssertionError('API call took token lock')):
+            self.assertEqual(self.client.get('/me'), {'ok': True})
+
+    def test_token_lock_excludes_other_processes_and_allows_nesting(self):
+        code = '''
+import sys
+import spotify_client as spotify
+try:
+    with spotify.token_file_lock(sys.argv[1], timeout=.1): print('ACQUIRED')
+except spotify.SpotifyError:
+    print('LOCKED')
+'''
+        args = [sys.executable, '-c', code, str(self.path)]
+        with spotify.token_file_lock(self.path), spotify.token_file_lock(self.path):
+            result = subprocess.run(args, cwd=Path(__file__).parent, capture_output=True, text=True, timeout=3, check=True)
+        self.assertEqual(result.stdout.strip(), 'LOCKED')
+        result = subprocess.run(args, cwd=Path(__file__).parent, capture_output=True, text=True, timeout=3, check=True)
+        self.assertEqual(result.stdout.strip(), 'ACQUIRED')
+
+    def test_token_lock_survives_atomic_replacement_of_a_symlink(self):
+        self.token()
+        target = self.path.with_name('original-token.json')
+        self.path.rename(target); self.path.symlink_to(target.name)
+        directory_alias = self.path.parent / 'directory-alias'
+        directory_alias.symlink_to(self.path.parent, target_is_directory=True)
+        paths = (self.path, directory_alias / self.path.name)
+        code = '''
+import sys
+import spotify_client as spotify
+try:
+    with spotify.token_file_lock(sys.argv[1], timeout=.1): print('ACQUIRED')
+except spotify.SpotifyError:
+    print('LOCKED')
+'''
+        def attempt(path):
+            return subprocess.run([sys.executable, '-c', code, str(path)], cwd=Path(__file__).parent,
+                                  capture_output=True, text=True, timeout=3, check=True).stdout.strip()
+        with spotify.token_file_lock(self.path):
+            self.token()
+            self.assertFalse(self.path.is_symlink())
+            for path in paths:
+                with self.subTest(path=path): self.assertEqual(attempt(path), 'LOCKED')
+        for path in paths:
+            with self.subTest(path=path): self.assertEqual(attempt(path), 'ACQUIRED')
 
     def test_untrusted_paths_redirects_and_bad_responses_are_bounded(self):
         self.token()

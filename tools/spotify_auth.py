@@ -29,7 +29,7 @@ import webbrowser
 from pathlib import Path
 
 from music_service_registry import provider_settings
-from spotify_client import SpotifyError, _json_request, read_token_file, save_token_response
+from spotify_client import SpotifyError, _json_request, read_token_file, save_token_response, token_file_lock
 
 AUTHORIZE_ENDPOINT = 'https://accounts.spotify.com/authorize'
 TOKEN_ENDPOINT = 'https://accounts.spotify.com/api/token'
@@ -148,10 +148,11 @@ def login(client_id, token_file, redirect_uri=DEFAULT_REDIRECT_URI, *, no_browse
             except webbrowser.Error:
                 pass  # The printed link also works when no browser is installed.
         code = callback.wait(timeout)
-        response = _json_request('POST', TOKEN_ENDPOINT, fields={
-            'grant_type': 'authorization_code', 'client_id': client_id, 'code': code,
-            'redirect_uri': callback.redirect_uri, 'code_verifier': verifier})
-    save_token_response(token_file, client_id, response)
+        with token_file_lock(token_file):
+            response = _json_request('POST', TOKEN_ENDPOINT, fields={
+                'grant_type': 'authorization_code', 'client_id': client_id, 'code': code,
+                'redirect_uri': callback.redirect_uri, 'code_verifier': verifier})
+            save_token_response(token_file, client_id, response)
     output('Spotify connected. Credentials saved to ' + str(Path(token_file).expanduser()))
 
 

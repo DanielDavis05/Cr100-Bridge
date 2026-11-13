@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote_to_bytes, urlencode
 
 from spotify_client import (REFRESH_MARGIN, TOKEN_ENDPOINT, SpotifyError, _json_request,
-                            read_token_file, save_token_response, write_token_file)
+                            read_token_file, save_token_response, token_file_lock as folder_token_lock, write_token_file)
 
 FOLDER_CLIENT_ID = '65b708073fc0480ea92a077233ca87bd'
 FOLDER_REDIRECT_URI = 'http://127.0.0.1:8898/login'
@@ -64,11 +64,6 @@ def _file_lock(path, timeout=LOCK_TIMEOUT):
         yield
     finally:
         os.close(fd)
-
-
-def folder_token_lock(token_file, timeout=LOCK_TIMEOUT):
-    """Use around replacing a folder grant; refreshers use this same lock."""
-    return _file_lock(str(token_file) + '.lock', timeout)
 
 
 def _atomic_json(path, value):

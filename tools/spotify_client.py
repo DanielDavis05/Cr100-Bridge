@@ -11,6 +11,8 @@ bodies, authorization codes, tokens, or request query strings.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import math
 import os
@@ -28,6 +30,8 @@ REQUEST_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_RATE_WAIT = 5
 REFRESH_MARGIN = 30
+TOKEN_LOCK_TIMEOUT = REQUEST_TIMEOUT + 5  # let another process finish its HTTP refresh
+_TOKEN_LOCKS = threading.local()
 
 
 class SpotifyError(Exception):
@@ -36,6 +40,38 @@ class SpotifyError(Exception):
         self.status, self.message = int(status), message
         self.retry_after, self.code = retry_after, code
         super().__init__(message)
+
+
+@contextlib.contextmanager
+def token_file_lock(token_file, timeout=TOKEN_LOCK_TIMEOUT):
+    """Serialize credential changes across processes, allowing nested callers."""
+    token_path = Path(token_file).expanduser()
+    # Atomic writes replace this entry, including a symlink, rather than its target.
+    path = token_path.parent.resolve() / (token_path.name + '.lock')
+    held = getattr(_TOKEN_LOCKS, 'held', None)
+    if held is None: held = _TOKEN_LOCKS.held = set()
+    key = (os.getpid(), str(path))
+    if key in held:
+        yield
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SpotifyError(503, 'Spotify credentials are busy; try again shortly.') from None
+                time.sleep(0.05)
+        held.add(key)
+        try: yield
+        finally: held.remove(key)
+    finally:
+        os.close(fd)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -176,23 +212,34 @@ class SpotifyClient:
         self.rate_limit_until = 0.0
 
     def _refresh(self, token):
-        refresh = token.get('refresh_token')
-        if not refresh:
-            raise SpotifyError(401, 'Spotify authorization is required; run spotify_auth.py login')
-        try:
-            response = _json_request('POST', TOKEN_ENDPOINT,
-                                     fields={'grant_type': 'refresh_token', 'refresh_token': refresh,
-                                             'client_id': self.client_id})
-        except SpotifyError as error:
-            if error.code == 'invalid_grant':
-                write_token_file(self.token_file, {'client_id': self.client_id, 'authorization_required': True})
-            if error.status == 429:
-                self.rate_limit_until = time.monotonic() + (error.retry_after or 1)
-            self.log({'event': 'spotify-token-refresh-failed', 'status': error.status})
-            raise
-        updated = save_token_response(self.token_file, self.client_id, response, previous=token)
-        self.log({'event': 'spotify-token-refreshed'})
-        return updated
+        with token_file_lock(self.token_file):
+            current = read_token_file(self.token_file, self.client_id)
+            # Another process may have refreshed while this caller waited.
+            if current != token and current.get('access_token') and float(current.get('expires_at', 0)) > time.time() + REFRESH_MARGIN:
+                return current
+            token = current
+            for attempt in range(2):
+                refresh = token.get('refresh_token')
+                if not refresh:
+                    raise SpotifyError(401, 'Spotify authorization is required; run spotify_auth.py login')
+                try:
+                    response = _json_request('POST', TOKEN_ENDPOINT,
+                                             fields={'grant_type': 'refresh_token', 'refresh_token': refresh,
+                                                     'client_id': self.client_id})
+                except SpotifyError as error:
+                    if error.code == 'invalid_grant':
+                        current = read_token_file(self.token_file, self.client_id)
+                        if not attempt and current.get('refresh_token') and current['refresh_token'] != refresh:
+                            token = current
+                            continue
+                        write_token_file(self.token_file, {'client_id': self.client_id, 'authorization_required': True})
+                    if error.status == 429:
+                        self.rate_limit_until = time.monotonic() + (error.retry_after or 1)
+                    self.log({'event': 'spotify-token-refresh-failed', 'status': error.status})
+                    raise
+                updated = save_token_response(self.token_file, self.client_id, response, previous=token)
+                self.log({'event': 'spotify-token-refreshed'})
+                return updated
 
     def get(self, path: str, params: dict | None = None) -> dict:
         """Read one API resource; retry one expired token and one short rate limit.

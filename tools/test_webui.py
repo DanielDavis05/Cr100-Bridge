@@ -2,6 +2,7 @@
 """Offline tests for the web interface (webui.py) and the player side it drives
 (zoneplayers room slots and the Music menu's library speaker). Home Assistant is
 fake_ha.py; Spotify's token exchange and profile are stand-ins."""
+import contextlib
 import http.client
 import json
 import os
@@ -232,6 +233,28 @@ class Controllers(Fixture):
 
 
 class Spotify(Fixture):
+    def test_oauth_exchange_and_sign_out_hold_credential_lock(self):
+        import spotify_client
+        _, token_file = self.bridge.spotify_settings()
+        events = []
+        @contextlib.contextmanager
+        def locked(path):
+            self.assertEqual(Path(path), token_file)
+            events.append('lock')
+            yield
+            events.append('unlock')
+        pending = {'client_id': 'client', 'redirect_uri': 'http://127.0.0.1/callback', 'verifier': 'verifier'}
+        with patch.object(spotify_client, 'token_file_lock', side_effect=locked), \
+                patch.object(spotify_client, '_json_request', side_effect=lambda *a, **k: events.append('exchange') or {}), \
+                patch.object(spotify_client, 'save_token_response', side_effect=lambda *a, **k: events.append('save')):
+            webui.default_token_exchange(pending, 'code', token_file)
+        self.assertEqual(events, ['lock', 'exchange', 'save', 'unlock'])
+        events.clear()
+        with patch.object(spotify_client, 'token_file_lock', side_effect=locked), \
+                patch.object(spotify_client, 'write_token_file', side_effect=lambda *a, **k: events.append('sign-out')):
+            self.bridge.spotify_sign_out()
+        self.assertEqual(events, ['lock', 'sign-out', 'unlock'])
+
     def test_sign_in_round_trip(self):
         self.assertFalse(self.bridge.spotify()['authorized'])
         url = self.bridge.spotify_begin()['url']

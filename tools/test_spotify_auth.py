@@ -1,5 +1,6 @@
 """PKCE and loopback state checks with local HTTP and invented credentials."""
 import base64
+import contextlib
 import hashlib
 import http.client
 import json
@@ -121,6 +122,26 @@ class SpotifyAuthTests(unittest.TestCase):
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         finally:
             fake.close()
+
+    def test_cli_login_locks_exchange_and_save_after_the_callback(self):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'token.json'
+            @contextlib.contextmanager
+            def locked(token_file):
+                self.assertEqual(token_file, path)
+                events.append('lock')
+                yield
+                events.append('unlock')
+            with patch.object(auth, 'CallbackServer') as server, \
+                    patch.object(auth, 'token_file_lock', side_effect=locked, create=True), \
+                    patch.object(auth, '_json_request', side_effect=lambda *a, **k: events.append('exchange') or {}), \
+                    patch.object(auth, 'save_token_response', side_effect=lambda *a, **k: events.append('save')):
+                callback = server.return_value.__enter__.return_value
+                callback.redirect_uri = 'http://127.0.0.1:8888/callback'
+                callback.wait.side_effect = lambda timeout: events.append('wait') or 'code'
+                auth.login('public-client', path, no_browser=True, output=lambda message: None)
+        self.assertEqual(events, ['wait', 'lock', 'exchange', 'save', 'unlock'])
 
     def test_config_and_cli_token_paths_expand_home_before_config_resolution(self):
         with tempfile.TemporaryDirectory() as directory:
