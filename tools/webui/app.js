@@ -1294,7 +1294,7 @@ views.alarms = {
   title: 'Alarms',
   async open(main) {
     const data = await api('GET', '/api/alarms');
-    main.innerHTML = '<p class="lede">Household alarms share one schedule across Radio and future music providers.</p><section class="popup"><div id="alarm-list"></div><button class="inline-button" id="alarm-add">Add alarm</button></section>';
+    main.innerHTML = '<p class="lede">Household alarms share one schedule across Radio and future music providers.</p><p class="hint">For Snooze and Stop Alarm on a CR100, edit the alarm on that controller, choose <strong>Advanced → Show Clock on this controller → Yes</strong>, then save. Set this separately on each controller.</p><section class="popup"><div id="alarm-list"></div><button class="inline-button" id="alarm-add">Add alarm</button></section>';
     const list = $('#alarm-list', main);
     const refresh = () => show('alarms');
     const editor = (alarm = null, trigger = $('#alarm-add', main)) => {

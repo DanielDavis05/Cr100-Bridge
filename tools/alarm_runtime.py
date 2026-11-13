@@ -138,6 +138,12 @@ class HouseholdAlarmExecutor:
             raise AlarmError('Alarm speaker is unavailable')
         return player
 
+    def group_id(self, key):
+        udn = self.udn(key)
+        # Alarm events hold the store lock; taking the household lock here can
+        # deadlock a topology publisher. Full-group identity ignores view masking.
+        return self.house.coordinator.copy().get(udn, udn) + ':1'
+
     def _counter(self, udn): return self.store.get_meta('playback-generation:' + udn, 0)
 
     def before_action(self, room_key, service, action, args, *, coordinator=True):
@@ -348,7 +354,8 @@ def attach_alarms(house, config_path, catalog, store):
                            room_resolver=runtime.udn, native_room=runtime.udn, log=log,
                            on_change=changed, handle_sleep=True, bridge_sleep=runtime.bridge_sleep,
                            timezone_from_index=native_timezone,
-                           topology_identity=runtime.topology_identity)
+                           topology_identity=runtime.topology_identity,
+                           group_id_resolver=runtime.group_id)
     if alarm_store.get_meta('timezone_index') is None:
         alarm_store.set_meta('timezone_index', native_timezone_index(service.timezone))
         alarm_store.set_meta('timezone_dst', service.timezone not in ('UTC', 'Etc/UTC', 'GMT'))

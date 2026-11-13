@@ -851,7 +851,11 @@ class Household:
     def source_action(self, state, service, action, args):
         if self.alarms:
             result = self.alarms.action(service, action, args, state.config.udn)
-            if result is not None: return result
+            if result is not None:
+                if service == 'AVTransport' and action == 'GetRunningAlarmProperties' and result.get('AlarmID', '0') != '0':
+                    # The alarm panel resolves this against the controller's topology view.
+                    result['GroupID'] = state.group_id
+                return result
         if self.radio_service:
             handler = getattr(self.radio_service, 'native_action', None)
             if handler:

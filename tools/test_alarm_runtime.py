@@ -61,6 +61,8 @@ class Household:
     def members(self, udn):
         coordinator = self.coordinator[udn]
         return [p for p in self.players if self.coordinator[p.config.udn] == coordinator]
+    def group_id(self, udn):
+        with self.lock: return self.coordinator[udn] + ':1'
 
 
 class Runtime(unittest.TestCase):
@@ -82,7 +84,8 @@ class Runtime(unittest.TestCase):
         runtime = HouseholdAlarmExecutor(self.house,store,config,clock=self.clock)
         registry = AlarmProviderRegistry(); registry.register('radio',RadioAlarmProvider(self.catalog,self.radio))
         service = AlarmService(store,providers=registry,executor=runtime.callbacks(),clock=self.clock,
-            log=lambda _:None,room_resolver=runtime.udn,handle_sleep=True,bridge_sleep=runtime.bridge_sleep)
+            log=lambda _:None,room_resolver=runtime.udn,handle_sleep=True,bridge_sleep=runtime.bridge_sleep,
+            group_id_resolver=runtime.group_id)
         self.addCleanup(service.close)
         return service,runtime
 
@@ -107,6 +110,137 @@ class Runtime(unittest.TestCase):
         self.assertEqual(self.house.coordinator['patio'],'patio')
         self.assertFalse(any(c[0]=='radio' for c in self.house.players[0].state.backend.calls))
         self.assertIn(('radio','https://station.example/live.mp3'),self.house.players[1].state.backend.calls)
+
+    def test_linked_alarm_is_visible_to_coordinator_and_member(self):
+        service,runtime = self.setup_service(); alarm = self.alarm(service,room='patio')
+        self.clock.advance(10); service.tick()
+        for room in ('kitchen','patio'):
+            running = service.action('AVTransport','GetRunningAlarmProperties',{},room)
+            self.assertEqual(running['GroupID'],'kitchen:1')
+            self.assertEqual(running['AlarmID'],str(alarm['id']))
+            self.assertEqual(service.event_values('AVTransport',room)['AlarmRunning'],'1')
+        service.snooze('kitchen')
+        self.assertEqual(service.active('patio')[0]['status'],'snoozed')
+        self.assertEqual(service.action('AVTransport','GetRunningAlarmProperties',{},'patio')['GroupID'],'kitchen:1')
+        service.stop('patio')
+        self.assertEqual(service.active('kitchen'),[])
+
+    def test_pause_cancels_owned_snooze_without_stopping_speaker_again_or_resuming(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='patio',duration=None,
+                   media_ref={'provider':'chime','content_id':'default'})
+        self.clock.advance(10); service.tick()
+        run = service.store.runs()[-1]
+        room = self.house.players[0].state.backend
+        service.snooze('kitchen')
+        self.assertEqual(room.avt['AVTransportURI'],'x-rincon-buzzer:0')
+        self.assertTrue(runtime.owns(run['context'],run['handle']))
+        self.assertEqual(service.action('AVTransport','Pause',{},'patio'),{})
+        self.assertEqual(service.store.run(run['id'])['status'],'stopped')
+        for member in ('kitchen','patio'):
+            events = service.event_values('AVTransport',member)
+            self.assertEqual((events['AlarmRunning'],events['SnoozeRunning']),('0','0'))
+        self.clock.advance(541); service.tick()
+        self.assertEqual(service.store.run(run['id'])['status'],'stopped')
+        self.assertEqual(len([call for call in room.calls if call[0]=='stop']),1)
+        self.assertEqual(len([call for call in room.calls if call[0]=='radio']),1)
+
+    def test_pause_after_manual_selection_during_snooze_is_forwarded(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,media_ref={'provider':'chime','content_id':'default'})
+        self.clock.advance(10); service.tick()
+        run = service.store.runs()[-1]
+        room = self.house.players[0].state.backend
+        service.snooze('kitchen')
+        runtime.before_action('component:kitchen','AVTransport','SetAVTransportURI',
+                              {'CurrentURI':room.avt['AVTransportURI']})
+        self.assertFalse(runtime.owns(run['context'],run['handle']))
+        self.assertIsNone(service.action('AVTransport','Pause',{},'kitchen'))
+        self.assertEqual(service.store.run(run['id'])['status'],'snoozed')
+        self.assertEqual(len([call for call in room.calls if call[0]=='stop']),1)
+
+    def test_unjoined_alarm_is_visible_only_in_its_new_group(self):
+        service,runtime = self.setup_service(); self.alarm(service,room='patio',include_linked=False)
+        self.clock.advance(10); service.tick()
+        self.assertEqual(service.action('AVTransport','GetRunningAlarmProperties',{},'patio')['GroupID'],'patio:1')
+        self.assertEqual(service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen')['AlarmID'],'0')
+        self.assertEqual(service.active('kitchen'),[])
+
+    def test_regrouped_target_revokes_alarm_ownership_without_stopping_previous_group(self):
+        service,runtime = self.setup_service(); self.alarm(service,room='patio')
+        self.clock.advance(10); service.tick()
+        run = service.store.runs()[-1]
+        self.house.coordinator['patio'] = 'patio'
+        self.assertEqual(service.active('kitchen'),[])
+        self.assertFalse(runtime.owns(run['context'],run['handle']))
+        self.clock.advance(1); service.tick()
+        self.assertEqual(service.store.run(run['id'])['status'],'superseded')
+        self.assertNotIn(('stop',),self.house.players[0].state.backend.calls)
+
+    def test_same_group_occurrences_do_not_restart_a_linked_alarm(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='kitchen'); self.alarm(service,room='patio')
+        self.clock.advance(10); service.tick()
+        plays = [call for player in self.house.players for call in player.state.backend.calls if call[0]=='radio']
+        self.assertEqual(len(plays),1)
+        self.assertEqual(sorted(run['status'] for run in service.store.runs()),['playing','superseded'])
+
+    def test_standalone_occurrence_can_leave_a_ringing_linked_group(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='kitchen'); self.alarm(service,room='patio',include_linked=False)
+        self.clock.advance(10); service.tick()
+        self.assertEqual(self.house.coordinator['patio'],'patio')
+        self.assertEqual([run['status'] for run in service.store.runs()],['playing','playing'])
+        for player in self.house.players:
+            self.assertEqual(len([call for call in player.state.backend.calls if call[0]=='radio']),1)
+        service.stop('patio')
+        self.assertEqual(service.active('kitchen')[0]['status'],'playing')
+        self.assertNotIn(('stop',),self.house.players[0].state.backend.calls)
+
+    def test_duplicate_standalone_occurrence_in_same_room_stays_superseded(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='patio',include_linked=False)
+        self.alarm(service,room='patio',include_linked=False)
+        self.clock.advance(10); service.tick()
+        self.assertEqual([run['status'] for run in service.store.runs()],['playing','superseded'])
+        self.assertEqual(len([call for call in self.house.players[1].state.backend.calls if call[0]=='radio']),1)
+
+    def test_duplicate_standalone_occurrences_use_canonical_backend_room_alias(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='sonos:patio',include_linked=False)
+        self.alarm(service,room='sonos:patio',include_linked=False)
+        self.clock.advance(10); service.tick()
+        self.assertEqual([run['status'] for run in service.store.runs()],['playing','superseded'])
+        self.assertEqual(len([call for call in self.house.players[1].state.backend.calls if call[0]=='radio']),1)
+
+    def test_duplicate_standalone_occurrences_match_mixed_room_aliases(self):
+        service,runtime = self.setup_service()
+        self.alarm(service,room='component:patio',include_linked=False)
+        self.alarm(service,room='patio',include_linked=False)
+        self.clock.advance(10); service.tick()
+        self.assertEqual([run['status'] for run in service.store.runs()],['playing','superseded'])
+        self.assertEqual(len([call for call in self.house.players[1].state.backend.calls if call[0]=='radio']),1)
+
+    def test_alarm_events_do_not_wait_for_household_lock(self):
+        service,runtime = self.setup_service(); self.alarm(service,room='patio')
+        self.clock.advance(10); service.tick()
+        locked,release,done = threading.Event(),threading.Event(),threading.Event()
+        result,errors = [],[]
+        def hold_household():
+            with self.house.lock:
+                locked.set(); release.wait(3)
+        def read_events():
+            try: result.append(service.event_values('AVTransport','kitchen'))
+            except Exception as error: errors.append(error)
+            finally: done.set()
+        holder = threading.Thread(target=hold_household); holder.start()
+        self.assertTrue(locked.wait(1))
+        reader = threading.Thread(target=read_events); reader.start()
+        try: self.assertTrue(done.wait(1),'Alarm event acquired household lock while holding the alarm store')
+        finally:
+            release.set(); holder.join(2); reader.join(2)
+        self.assertEqual(errors,[])
+        self.assertEqual(result[0]['AlarmRunning'],'1')
 
     def test_same_uri_manual_selection_revokes_alarm_duration(self):
         service,runtime = self.setup_service(); self.alarm(service)
@@ -276,6 +410,34 @@ class SonosHTTP(unittest.TestCase):
         root = ET.fromstring(body)
         self.assertEqual(root.findtext('.//{urn:schemas-upnp-org:control-1-0}errorCode'), '501')
         self.assertIsNone(root.find('.//HouseholdUTCTime'))
+
+    def test_running_alarm_group_matches_current_topology_over_soap(self):
+        from test_ha_backend import wait_for
+        from test_zoneplayers import soap
+        import xml.etree.ElementTree as ET
+        self.fake.regroup(self.patio.uuid,self.kitchen.uuid)
+        self.assertTrue(wait_for(lambda:self.house.coordinator[self.vpatio.config.udn]==self.vkitchen.config.udn))
+        alarm = self.service.save({'media_ref':{'provider':'chime','content_id':'default'},
+            'room':self.vpatio.config.udn,'time':'12:00:00','duration':60,'include_linked':True})
+        self.service.run_now(alarm['id'])
+        for player in (self.vkitchen,self.vpatio):
+            status,body = soap(player,'/MediaRenderer/AVTransport/Control','AVTransport',
+                               'GetRunningAlarmProperties','<InstanceID>0</InstanceID>')
+            self.assertEqual(status,200,body)
+            root = ET.fromstring(body)
+            self.assertEqual(root.findtext('.//AlarmID'),str(alarm['id']))
+            self.assertEqual(root.findtext('.//GroupID'),player.state.group_id)
+
+    def test_unjoined_alarm_group_matches_standalone_topology(self):
+        from test_ha_backend import wait_for
+        self.fake.regroup(self.patio.uuid,self.kitchen.uuid)
+        self.assertTrue(wait_for(lambda:self.house.coordinator[self.vpatio.config.udn]==self.vkitchen.config.udn))
+        alarm = self.service.save({'media_ref':{'provider':'chime','content_id':'default'},
+            'room':self.vpatio.config.udn,'time':'12:00:00','duration':60,'include_linked':False})
+        self.service.run_now(alarm['id'])
+        running = self.service.action('AVTransport','GetRunningAlarmProperties',{},self.vpatio.config.udn)
+        self.assertEqual(running['GroupID'],self.house.group_id(self.vpatio.config.udn))
+        self.assertEqual(running['GroupID'],self.vpatio.config.udn+':1')
 
     def test_alarm_reaches_sonos_transport_volume_and_preserves_saved_queue(self):
         from test_sonos_backend import calls

@@ -634,6 +634,51 @@ class Alarms(unittest.TestCase):
         self.service.stop('kitchen')
         self.assertEqual(self.service.event_values('AVTransport','kitchen')['AlarmRunning'],'0')
 
+    def test_native_snooze_accepts_unpadded_controller_duration(self):
+        for duration, seconds in (('0:9:0', 540), ('0:09:00', 540),
+                                  ('0:0:1', 1), ('1:2:3', 3723), ('24:0:0', 86400)):
+            with self.subTest(duration=duration):
+                alarm = self.save()
+                run = self.service.run_now(alarm['id'])
+                self.assertEqual(self.service.action('AVTransport', 'SnoozeAlarm',
+                                                    {'Duration': duration}, 'kitchen'), {})
+                stored = self.service.store.run(run['id'])
+                self.assertEqual((stored['status'], stored['resume_at']),
+                                 ('snoozed', self.clock() + seconds))
+                self.service.stop('kitchen')
+
+    def test_native_snooze_rejects_invalid_or_out_of_range_duration(self):
+        alarm, run = self.fire()
+        for duration in ('0:60:0', '0:0:60', '25:0:0', '0:0:0', '-1:9:0',
+                         '0:009:0', '0:9', '0:9:0x', ' 0:9:0'):
+            with self.subTest(duration=duration), self.assertRaises(AlarmError) as caught:
+                self.service.action('AVTransport', 'SnoozeAlarm', {'Duration': duration}, 'kitchen')
+            self.assertEqual(caught.exception.code, 402)
+            self.assertEqual(self.service.store.run(run['id'])['status'], 'playing')
+
+    def test_native_snooze_normalization_does_not_relax_alarm_validation(self):
+        with self.assertRaises(AlarmError): self.save(duration='0:9:0')
+
+    def test_running_alarm_properties_identify_a_group_not_a_room(self):
+        alarm, run = self.fire()
+        running = self.service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen')
+        self.assertEqual(running['AlarmID'], str(alarm['id']))
+        self.assertEqual(running['GroupID'], 'kitchen:1')
+        self.service.snooze('kitchen')
+        self.assertEqual(self.service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen')['GroupID'], 'kitchen:1')
+        self.service.stop('kitchen')
+        self.assertEqual(self.service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen'),
+                         {'AlarmID':'0','GroupID':'','LoggedStartTime':''})
+
+    def test_running_alarm_uses_injected_group_identity(self):
+        groups = {'kitchen':'group-current'}
+        service = self.make(group_id_resolver=groups.__getitem__)
+        alarm = self.save()
+        service.run_now(alarm['id'])
+        self.assertEqual(service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen')['GroupID'], 'group-current')
+        groups['kitchen'] = 'group-after-regroup'
+        self.assertEqual(service.action('AVTransport','GetRunningAlarmProperties',{},'kitchen')['GroupID'], 'group-after-regroup')
+
     def test_web_delete_queues_stop_for_active_occurrence(self):
         alarm,run = self.fire(); web = self.make(executor=False)
         web.delete(alarm['id']); self.service.tick()

@@ -68,6 +68,13 @@ def _duration(value, *, allow_empty=True):
     return _integer(seconds, 1, 7 * 86400, 'duration')
 
 
+def _native_snooze_duration(value):
+    # The CR100 sends unpadded fields (for example, 0:9:0 for nine minutes).
+    match = re.fullmatch(r'(\d{1,3}):([0-5]?\d):([0-5]?\d)', str(value))
+    if match: value = '%s:%02d:%02d' % (match[1], int(match[2]), int(match[3]))
+    return _duration(value, allow_empty=False)
+
+
 def hms(seconds):
     seconds = max(0, int(seconds))
     return '%d:%02d:%02d' % (seconds // 3600, seconds // 60 % 60, seconds % 60)
@@ -450,13 +457,14 @@ class AlarmService:
                  on_change=None, log=print, room_resolver=None, native_room=None,
                  missed_grace=300, retry_delay=5, max_attempts=2, handle_sleep=False,
                  native_delegate=None, timezone_from_index=None, autostart=False,
-                 bridge_sleep=None, topology_identity=None):
+                 bridge_sleep=None, topology_identity=None, group_id_resolver=None):
         self.store = path if isinstance(path, AlarmStore) else AlarmStore(path)
         self.providers = providers if providers is not None else AlarmProviderRegistry()
         self.executor, self.system_clock = executor, clock
         self.clock = lambda: self.system_clock() + float(self.store.get_meta('clock_offset', 0))
         self.on_change, self.log = on_change, log
         self.room_resolver, self.native_room = room_resolver or str, native_room or str
+        self.group_id_resolver = group_id_resolver or (lambda room: self.native_room(room) + ':1')
         self.missed_grace, self.retry_delay, self.max_attempts = missed_grace, retry_delay, max_attempts
         self.handle_sleep, self.native_delegate = handle_sleep, native_delegate
         self.bridge_sleep = bridge_sleep or (lambda room: True)
@@ -787,11 +795,13 @@ class AlarmService:
 
     def active(self, room):
         room = self.room_resolver(room)
+        # A linked group's coordinator serves transport controls for every member.
+        group = self.group_id_resolver(room)
         runs = []
         for run in self.store.runs(ACTIVE + ('snoozed',)):
-            try: target = self.room_resolver(run['context']['room'])
+            try: target = self.group_id_resolver(self.room_resolver(run['context']['room']))
             except AlarmError: continue  # Another room can disappear before its next tick.
-            if target == room: runs.append(run)
+            if target == group: runs.append(run)
         return runs
 
     def stop(self, room, run_id=None):
@@ -860,7 +870,18 @@ class AlarmService:
                         if alarm['execution_owner'] == 'native':
                             self.store.update_run(run['id'], status='delegated', native_id=alarm.get('native_id'))
                         else:
-                            try: active = self.active(alarm['room'])
+                            try:
+                                active = self.active(alarm['room'])
+                                if not alarm['include_linked']:
+                                    # This occurrence unjoins its selected room before playing;
+                                    # another member's ringing group must not suppress it.
+                                    room = self.room_resolver(alarm['room'])
+                                    selected = []
+                                    for candidate in active:
+                                        try: target = self.room_resolver(candidate['context']['room'])
+                                        except AlarmError: continue
+                                        if target == room: selected.append(candidate)
+                                    active = selected
                             except AlarmError: active = []  # Dispatch records an unavailable room's failure.
                             if any(r['status'] == 'playing' and now - 60 <= r.get('started_at', r['created_at']) <= now for r in active):
                                 self.store.update_run(run['id'], status='superseded',
@@ -1088,16 +1109,25 @@ class AlarmService:
                 except AlarmError: running = []
                 run = running[-1] if running else None
                 return {'AlarmID': str(run['alarm_id']) if run else '0',
-                        'GroupID': str(self.room_resolver(room_key)) if run else '',
+                        'GroupID': str(self.group_id_resolver(self.room_resolver(room_key))) if run else '',
                         'LoggedStartTime': datetime.fromtimestamp(run.get('started_at', run['created_at']), UTC).strftime('%Y-%m-%d %H:%M:%S') if run else ''}
             if action == 'SnoozeAlarm':
-                self.snooze(room_key, _duration(args.get('Duration') or '0:09:00', allow_empty=False)); return {}
+                self.snooze(room_key, _native_snooze_duration(args.get('Duration') or '0:09:00')); return {}
             if action == 'RunAlarm':
                 self.run_now(args.get('AlarmID')); return {}
             if action in ('Stop', 'Pause'):
                 runs = self.active(room_key)
                 if any(r['status'] in ('playing', 'uncertain') for r in runs) or (action == 'Stop' and runs):
                     self.stop(room_key); return {}
+                # CR100 Stop Alarm also sends Pause while snoozed. Claim it only
+                # while the retained source is still ours; newer playback must
+                # continue to receive ordinary Pause through its backend.
+                owned_snoozed = [r for r in runs if r['status'] == 'snoozed'
+                                 and self.executor and r.get('handle')
+                                 and self.executor.owns(self._context(r), r['handle']) is True]
+                if owned_snoozed:
+                    for run in owned_snoozed: self._stop_run(run)
+                    return {}
             if self.handle_sleep and self.bridge_sleep(room_key) and action == 'ConfigureSleepTimer':
                 self.set_sleep_timer(room_key, _duration(args.get('NewSleepTimerDuration'))); return {}
             if self.handle_sleep and self.bridge_sleep(room_key) and action == 'GetRemainingSleepTimerDuration': return self.sleep_timer(room_key)

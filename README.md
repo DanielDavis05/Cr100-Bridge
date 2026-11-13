@@ -437,6 +437,10 @@ Playback publishes current metadata and cached album artwork while live radio
 preserves the music queue. The web UI manages Radio and household alarms; the
 shared alarm scheduler supports additional source providers later.
 
+To show the alarm clock with **Snooze** and **Stop Alarm** on a CR100, edit the
+alarm on that controller, set **Advanced > Show Clock on this controller > Yes**,
+then save. Repeat on each controller that should show the alarm.
+
 Clock and Alarms uses native Sonos timezone rules for the controller, with current
 daylight-saving transitions. Manual time persists as a household clock offset
 shared by the controller and alarm scheduler. Enabling Internet time returns to

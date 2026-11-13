@@ -186,6 +186,20 @@ class AlarmPresentation(unittest.TestCase):
         self.assertEqual(values['TransportState'], 'PAUSED_PLAYBACK')
         self.assertEqual(values['CurrentTransportState'], 'PAUSED_PLAYBACK')
 
+    def test_alarm_panel_uses_the_group_visible_to_the_requesting_controller(self):
+        self.house.coordinator[self.patio.config.udn] = self.kitchen.config.udn
+        self.house.controller_resolver = lambda _: 'controller-a'
+        self.house.controller_config = {'controllers': {'controller-a': {'visible_components': ['memory:patio']}}}
+        self.service.group_id_resolver = lambda room: self.house.coordinator[room] + ':1'
+        alarm = self.service.save({'room': self.patio.config.udn, 'time': '12:00:00',
+                                  'media_ref': {'provider': 'chime', 'content_id': 'default'}})
+        self.service.run_now(alarm['id'])
+        status, body = soap(self.patio, '/MediaRenderer/AVTransport/Control', 'AVTransport',
+                            'GetRunningAlarmProperties', '<InstanceID>0</InstanceID>')
+        self.assertEqual(status, 200)
+        self.assertEqual(ET.fromstring(body).find('.//AlarmID').text, str(alarm['id']))
+        self.assertEqual(ET.fromstring(body).find('.//GroupID').text, self.patio.config.udn + ':1')
+
     def test_regular_radio_alarm_retains_its_backend_source_values(self):
         self.start_alarm('radio')
         self.assertFalse(self.service.store.runs()[-1]['fallback'])
