@@ -127,5 +127,79 @@ class Household(unittest.TestCase):
         self.assertFalse(self.house.leave(self.kitchen.config.udn))
 
 
+class AlarmPresentation(unittest.TestCase):
+    def setUp(self):
+        from alarms import AlarmProviderRegistry, AlarmService
+        from test_alarms import Clock, Player, Provider
+        from test_backends import MemoryBackend
+        self.clock, self.player, self.provider = Clock(), Player(), Provider()
+        self.backend = MemoryBackend('memory')
+        self.house = zoneplayers.Household(zp, HOUSEHOLD, ['Kitchen', 'Patio'], ['127.0.0.1'] * 2,
+            lambda _: None, port=0, backends=[self.backend], refs=[('memory', 'kitchen'), ('memory', 'patio')])
+        self.addCleanup(self.house.close)
+        registry = AlarmProviderRegistry(); registry.register('radio', self.provider)
+        self.service = AlarmService(':memory:', providers=registry, executor=self.player.executor(),
+            clock=self.clock, log=lambda _: None, max_attempts=1)
+        self.house.alarms = self.service
+        self.kitchen, self.patio = self.house.players
+        # Sonos reports PLAYING without track metadata for its buzzer transport.
+        self.kitchen.state.backend.transport = 'PLAYING'
+        self.baseline = self.kitchen.state.backend_values()
+        self.house.start('127.0.0.1', ssdp=False)
+
+    def start_alarm(self, provider='chime'):
+        alarm = self.service.save({'room': self.kitchen.config.udn, 'time': '12:00:00',
+            'media_ref': {'provider': provider, 'content_id': 'default' if provider == 'chime' else 'station:s1'}})
+        self.service.run_now(alarm['id'])
+        return alarm
+
+    def assert_chime(self, alarm):
+        values = self.kitchen.state.backend_values()
+        for name in ('AVTransportURI', 'CurrentTrackURI', 'CurrentURI', 'TrackURI'):
+            self.assertEqual(values[name], 'x-rincon-buzzer:0')
+        for name in ('NumberOfTracks', 'CurrentTrack', 'NrTracks', 'Track'):
+            self.assertEqual(values[name], '1')
+        for name in ('AVTransportURIMetaData', 'CurrentTrackMetaData', 'CurrentURIMetaData', 'TrackMetaData'):
+            metadata = ET.fromstring(values[name])
+            self.assertEqual(metadata.find('.//{http://purl.org/dc/elements/1.1/}title').text, alarm['title'])
+        last_change = ET.fromstring(self.kitchen.state.last_change())
+        for name in ('AVTransportURI', 'CurrentTrackURI', 'NumberOfTracks', 'CurrentTrackMetaData'):
+            self.assertEqual(last_change.find('.//{*}' + name).get('val'), values[name])
+        self.assertEqual(self.patio.state.backend_values()['AVTransportURI'], '')
+        status, body = soap(self.kitchen, '/MediaRenderer/AVTransport/Control', 'AVTransport', 'GetMediaInfo', '<InstanceID>0</InstanceID>')
+        self.assertEqual(status, 200)
+        self.assertEqual(ET.fromstring(body).find('.//CurrentURI').text, 'x-rincon-buzzer:0')
+        self.assertEqual(ET.fromstring(body).find('.//NrTracks').text, '1')
+
+    def test_playing_chime_has_source_title_and_one_track_until_stopped(self):
+        self.assertEqual((self.baseline['AVTransportURI'], self.baseline['NumberOfTracks']), ('', '0'))
+        alarm = self.start_alarm()
+        self.assert_chime(alarm)
+        self.service.stop(self.kitchen.config.udn)
+        self.assertEqual(self.kitchen.state.backend_values(), self.baseline)
+
+    def test_chime_metadata_does_not_override_reported_backend_pause(self):
+        self.start_alarm()
+        self.kitchen.state.backend.transport = 'PAUSED_PLAYBACK'
+        values = self.kitchen.state.backend_values()
+        self.assertEqual(values['AVTransportURI'], 'x-rincon-buzzer:0')
+        self.assertEqual(values['TransportState'], 'PAUSED_PLAYBACK')
+        self.assertEqual(values['CurrentTransportState'], 'PAUSED_PLAYBACK')
+
+    def test_regular_radio_alarm_retains_its_backend_source_values(self):
+        self.start_alarm('radio')
+        self.assertFalse(self.service.store.runs()[-1]['fallback'])
+        self.assertEqual(self.kitchen.state.backend_values(), self.baseline)
+
+    def test_radio_fallback_chime_keeps_alarm_title_and_snooze_removes_overlay(self):
+        from alarms import AlarmError
+        self.provider.failure = AlarmError('Station unavailable')
+        alarm = self.start_alarm('radio')
+        self.assertTrue(self.service.store.runs()[-1]['fallback'])
+        self.assert_chime(alarm)
+        self.service.snooze(self.kitchen.config.udn)
+        self.assertEqual(self.kitchen.state.backend_values(), self.baseline)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

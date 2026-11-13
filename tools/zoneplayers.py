@@ -48,6 +48,7 @@ from urllib.parse import urlsplit
 import backends
 import build_info
 import room_icons
+from alarms import AlarmError
 from backends import LINE_IN_PREFIX, PLAY_MODES, BackendError
 from content import ContentError, ContentSource, Node
 from controller_visibility import BRIDGE_COMPONENT, component_visible, room_component_key, visible_components
@@ -165,7 +166,7 @@ def build_classes(zp):
                               CurrentMediaDuration='0:00:00', AVTransportURI=self.uri,
                               AVTransportURIMetaData=self.metadata, CurrentTrackURI=self.uri,
                               CurrentTrackMetaData=self.metadata, CurrentTransportActions='Play,Stop,Pause')
-                return self.household.source_values(self.config.udn, values)
+                return self.alarm_values(self.household.source_values(self.config.udn, values))
             source = self.backend.line_in_source()
             uri = self.household.line_in_uri(self.backend.backend, source) if source is not None else None
             metadata = ''
@@ -180,7 +181,25 @@ def build_classes(zp):
                 node = Node('AI:0', 'AI:', info['name'] if info and source_visible else 'Line-In', source,
                             'line_in', False, 'object.item.audioItem', uri=uri)
                 metadata = self.household.line_in_content.didl([node], self.config.udn)
-            return self.household.source_values(self.config.udn, self.backend.values(self.config.udn, uri, metadata))
+            return self.alarm_values(self.household.source_values(self.config.udn, self.backend.values(self.config.udn, uri, metadata)))
+
+        def alarm_values(self, values):
+            alarms = self.household.alarms
+            if alarms is None: return values
+            try: runs = [run for run in alarms.active(self.config.udn) if run['status'] == 'playing']
+            except AlarmError: return values  # Informational components have no alarm source.
+            if not runs: return values
+            run = runs[-1]
+            if not run.get('fallback') and run['context']['media_ref']['provider'] != 'chime': return values
+            # Buzzer playback has no backend track title; publish its alarm source
+            # in events and SOAP results so the controller can display it.
+            uri = 'x-rincon-buzzer:0'
+            metadata = backends.didl(run['snapshot']['title'], uri=uri, item_id='alarm:' + run['id'])
+            values.update(AVTransportURI=uri, CurrentTrackURI=uri, CurrentURI=uri, TrackURI=uri,
+                          AVTransportURIMetaData=metadata, CurrentTrackMetaData=metadata,
+                          CurrentURIMetaData=metadata, TrackMetaData=metadata,
+                          NumberOfTracks='1', CurrentTrack='1', NrTracks='1', Track='1')
+            return values
 
         def last_change(self, rendering=False):
             if not self.backend and not (self.household.radio_playback and
