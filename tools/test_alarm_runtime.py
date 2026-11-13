@@ -149,6 +149,24 @@ class Runtime(unittest.TestCase):
         runtime.stop(context,handle)
         self.assertIn(('stop',),self.house.players[0].state.backend.calls)
 
+    def test_owned_alarm_stops_without_advertised_stop_action(self):
+        service, runtime = self.setup_service()
+        context = {'run_id':'no-stop-action','room':'patio','include_linked':True,'volume':20}
+        handle = runtime.fallback(context)
+        room = self.house.players[0].state.backend
+        room.operations.remove('stop')
+        self.assertTrue(runtime.stop(context, handle))
+        self.assertEqual(room.calls.count(('stop',)), 1)
+
+    def test_stop_backend_failure_has_readable_alarm_error(self):
+        service, runtime = self.setup_service()
+        context = {'run_id':'stop-error','room':'patio','include_linked':True,'volume':20}
+        handle = runtime.fallback(context)
+        room = self.house.players[0].state.backend
+        with patch.object(room, 'stop', side_effect=BackendError('speaker disconnected')):
+            with self.assertRaisesRegex(AlarmError, 'Could not stop alarm playback: speaker disconnected'):
+                runtime.stop(context, handle)
+
     def test_generic_chime_uses_configured_renderer_reachable_wav(self):
         self.house.players[0].state.backend.binding.is_sonos = False
         self.house.players[0].state.backend.backend.name = 'ha'

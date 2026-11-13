@@ -1079,7 +1079,10 @@ class AlarmService:
                 self.snooze(room_key, _duration(args.get('Duration') or '0:09:00', allow_empty=False)); return {}
             if action == 'RunAlarm':
                 self.run_now(args.get('AlarmID')); return {}
-            if action == 'Stop' and self.active(room_key): self.stop(room_key); return {}
+            if action in ('Stop', 'Pause'):
+                runs = self.active(room_key)
+                if any(r['status'] in ('playing', 'uncertain') for r in runs) or (action == 'Stop' and runs):
+                    self.stop(room_key); return {}
             if self.handle_sleep and self.bridge_sleep(room_key) and action == 'ConfigureSleepTimer':
                 self.set_sleep_timer(room_key, _duration(args.get('NewSleepTimerDuration'))); return {}
             if self.handle_sleep and self.bridge_sleep(room_key) and action == 'GetRemainingSleepTimerDuration': return self.sleep_timer(room_key)

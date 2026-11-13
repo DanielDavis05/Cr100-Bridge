@@ -166,6 +166,30 @@ class Alarms(unittest.TestCase):
         self.assertEqual(self.service.action('AVTransport', 'GetRunningAlarmProperties', {}, 'bridge'),
                          {'AlarmID': '0', 'GroupID': '', 'LoggedStartTime': ''})
 
+    def test_pause_stops_playing_or_uncertain_alarm_and_clears_running_event(self):
+        for status in ('playing', 'uncertain'):
+            with self.subTest(status=status):
+                alarm, run = self.fire()
+                self.service.store.update_run(run['id'], status=status)
+                before = sum(event[0] == 'stop' for event in self.player.events)
+                self.assertEqual(self.service.action('AVTransport', 'Pause', {}, 'kitchen'), {})
+                self.assertEqual(sum(event[0] == 'stop' for event in self.player.events), before + 1)
+                self.assertEqual(self.service.store.run(run['id'])['status'], 'stopped')
+                self.assertEqual(self.service.event_values('AVTransport', 'kitchen')['AlarmRunning'], '0')
+
+    def test_pause_without_ringing_alarm_is_forwarded_to_speaker(self):
+        self.assertIsNone(self.service.action('AVTransport', 'Pause', {}, 'kitchen'))
+        alarm, run = self.fire(); self.service.snooze('kitchen')
+        self.assertIsNone(self.service.action('AVTransport', 'Pause', {}, 'kitchen'))
+        self.assertEqual(self.service.store.run(run['id'])['status'], 'snoozed')
+
+    def test_pause_does_not_stop_playback_after_manual_takeover(self):
+        alarm, run = self.fire()
+        self.player.current['kitchen'] = 'manual-selection'
+        self.assertEqual(self.service.action('AVTransport', 'Pause', {}, 'kitchen'), {})
+        self.assertEqual(self.service.store.run(run['id'])['status'], 'superseded')
+        self.assertFalse(any(event[0] == 'stop' for event in self.player.events))
+
     def test_shutdown_waits_for_inflight_event_and_later_events_are_empty(self):
         entered, release, closing, closed = (threading.Event() for _ in range(4))
         errors, events = [], []

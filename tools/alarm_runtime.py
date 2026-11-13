@@ -265,8 +265,10 @@ class HouseholdAlarmExecutor:
         if self.owns(context, handle) is not True:
             raise AlarmError('Alarm no longer owns this playback')
         player = self.player(context['room'])
-        player.state.backend.require('stop')
-        player.state.backend.stop()
+        # Owned buzzer playback may omit Stop from its advertised actions.
+        try: player.state.backend.stop()
+        except BackendError as error:
+            raise AlarmError('Could not stop alarm playback: ' + str(error)) from error
         self.house.radio_playback.cancel(player.config.udn)
         return True
 
