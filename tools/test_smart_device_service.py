@@ -361,14 +361,14 @@ class SmartDevicesHTTP(unittest.TestCase):
                 self.assertEqual(self.hub.client.state('light.lantern_counter_left')['state'], 'off')
             finally:
                 release.set()
-            self.assertTrue(wait_for(lambda: all(receipt.is_set() for _, receipt in self.service.uncertain)))
+            self.assertTrue(wait_for(lambda: all(entry[1].is_set() for entry in self.service.uncertain)))
             retry = self.send('devices.power', {**self.token(individual, 'light.lantern_counter_left'), 'desired': 'on'})
             self.assertTrue(self.finished(retry))
             self.assertEqual(self.result(retry)['status'], 'ok')
         self.assertEqual(len(self.fake.calls), 3)
         self.assertEqual(self.fake.calls[-1][1], ['light.lantern_counter_left'])
 
-    def test_timed_out_service_stays_quarantined_after_disconnect_and_reconnect(self):
+    def test_timed_out_service_is_released_after_disconnect_and_reconnect(self):
         root, _ = self.browse()
         actual_result = self.fake.result
         entered = threading.Event()
@@ -395,12 +395,12 @@ class SmartDevicesHTTP(unittest.TestCase):
             root, _ = self.browse()
             overlap = self.send('devices.power', {**self.token(root, 'SD:all:lantern'), 'desired': 'on'})
             self.assertTrue(self.finished(overlap))
-            self.assertEqual(self.result(overlap)['code'], 'busy')
+            self.assertEqual(self.result(overlap)['status'], 'ok')
             unrelated = self.send('devices.power', {**self.token(root, 'switch.lantern_plug'), 'desired': 'off'})
             self.assertTrue(self.finished(unrelated))
             self.assertEqual(self.result(unrelated)['status'], 'ok')
             self.assertFalse(receipt.is_set())
-        self.assertEqual(len(self.fake.calls), 2)
+        self.assertEqual(len(self.fake.calls), 3)
 
     def test_actual_late_ha_failure_acknowledges_timed_out_target(self):
         root, _ = self.browse()
@@ -435,7 +435,7 @@ class SmartDevicesHTTP(unittest.TestCase):
             self.assertEqual(self.result(retry)['status'], 'ok')
         self.assertEqual(len(self.fake.calls), 2)
 
-    def test_disconnect_during_call_quarantines_unacknowledged_target_after_reconnect(self):
+    def test_disconnect_during_call_releases_unacknowledged_target_after_reconnect(self):
         root, _ = self.browse()
         actual_result = self.fake.result
         dropped = threading.Event()
@@ -461,12 +461,12 @@ class SmartDevicesHTTP(unittest.TestCase):
             root, _ = self.browse()
             overlap = self.send('devices.power', {**self.token(root, 'SD:all:lantern'), 'desired': 'on'})
             self.assertTrue(self.finished(overlap))
-            self.assertEqual(self.result(overlap)['code'], 'busy')
+            self.assertEqual(self.result(overlap)['status'], 'ok')
             unrelated = self.send('devices.power', {**self.token(root, 'switch.lantern_plug'), 'desired': 'off'})
             self.assertTrue(self.finished(unrelated))
             self.assertEqual(self.result(unrelated)['status'], 'ok')
             self.assertFalse(receipt.is_set())
-        self.assertEqual(len(self.fake.calls), 2)
+        self.assertEqual(len(self.fake.calls), 3)
 
     def test_partial_overlap_keeps_only_unsuperseded_members_of_queued_all_lights(self):
         root, _ = self.browse()
@@ -556,7 +556,7 @@ class SmartDevicesHTTP(unittest.TestCase):
             if registry_change:
                 with self.hub.lock:
                     entry = next(e for e in self.hub.registries['entities'] if e['entity_id'] == 'light.lantern_ceiling')
-                    entry['name'] = 'Lantern Renamed Ceiling'
+                    entry['name'] = 'Lantern Renamed Ceiling'; self.hub.revision += 1
                 self.service.refresh_all = True
             self.service.changed_entities.update(changes)
             revision = self.service.revision
@@ -614,7 +614,7 @@ class SmartDevicesHTTP(unittest.TestCase):
         # synthetic All Lights targets only its own separate physical lamps.
         entity = 'light.workshop_nested_group'
         with self.hub.lock:
-            self.hub.registries['entities'].append({'entity_id': entity, 'platform': 'hue', 'area_id': 'workshop'})
+            self.hub.registries['entities'].append({'entity_id': entity, 'platform': 'hue', 'area_id': 'workshop'}); self.hub.revision += 1
         self.hub.client.states[entity] = {'entity_id': entity, 'state': 'on', 'attributes': {
             'friendly_name': 'Workshop Nested Group', 'entity_id': ['light.lantern_counter'],
             'supported_color_modes': ['brightness'], 'brightness': 102}}

@@ -23,6 +23,7 @@ CONFIRM_TIMEOUT = 3.0
 MAX_VIEWS = 512
 MAX_PENDING = 64
 ACTION_TIMEOUT = 10.0
+UNCERTAIN_LIMIT = 30.0
 DOMAINS = {'light', 'switch', 'input_boolean', 'fan', 'scene', 'script'}
 
 
@@ -62,11 +63,13 @@ class SmartDeviceService:
         self.pending, self.confirmations = [], []
         self.feedback_modes = OrderedDict()
         self.state_versions = {}
-        self.uncertain = []  # (expanded targets, actual HA result acknowledgement)
+        # (expanded targets, HA result acknowledgement, connection generation, deadline)
+        self.uncertain = []
+        self.snapshot, self.snapshot_revision = hub.snapshot(), hub.revision
         self.changed_entities, self.refresh_all = set(), True
         self.own_until, self.entity_index = {}, {}
         self.closed, self.revision = False, 0
-        self.catalogue = SmartCatalogue(hub.snapshot(), dict(self.client.states))
+        self.catalogue = SmartCatalogue(self.snapshot, dict(self.client.states))
         self.connected = self.client.connected.is_set()
         self._index()
         self._state_listener = self.state_changed
@@ -183,7 +186,12 @@ class SmartDeviceService:
         connected = self.client.connected.is_set()
         availability = connected != self.connected
         self.connected = connected
-        self.catalogue = SmartCatalogue(self.hub.snapshot(), states, previous=previous)
+        # The catalogue only reads the registries, so copy them again only
+        # when the hub has published a new revision.
+        with self.hub.lock:
+            if self.hub.revision != self.snapshot_revision:
+                self.snapshot, self.snapshot_revision = self.hub.snapshot(), self.hub.revision
+        self.catalogue = SmartCatalogue(self.snapshot, states, previous=previous)
         self._index()
         for key, view in list(self.views.items()):
             rooms = self._rooms(view.udn, view.address)
@@ -365,9 +373,13 @@ class SmartDeviceService:
                 raise UIEventError('unsupported_action', 'Device has no level control')
         elif action != 'activate' or row.domain not in ('scene', 'script'):
             raise UIEventError('unsupported_action', 'Device cannot be started')
-        self.uncertain = [(targets, receipt) for targets, receipt in self.uncertain if not receipt.is_set()]
+        # An unanswered call blocks its targets only while its answer can still
+        # arrive: until HA answers, the connection is replaced, or a time limit.
+        now, generation = self.clock(), self.client.connection_generation
+        self.uncertain = [entry for entry in self.uncertain
+                          if not entry[1].is_set() and entry[2] == generation and entry[3] > now]
         affected = self._expanded_targets(row, row.targets)
-        if any(affected.intersection(targets) for targets, _ in self.uncertain):
+        if any(affected.intersection(entry[0]) for entry in self.uncertain):
             raise UIEventError('busy', 'Device busy. Try again.')
         return row
 
@@ -446,6 +458,7 @@ class SmartDeviceService:
                 versions = tuple(self.state_versions.get(t, 0) for t in targets)
                 affected = self._expanded_targets(row, targets)
                 for target in affected: self.own_until[target] = self.clock() + 10 + CONFIRM_TIMEOUT
+                generation = self.client.connection_generation
             if not targets: return self._finish(job, outcome='superseded')
             action = job.context.action.rsplit('.', 1)[-1]
             data = {}
@@ -467,7 +480,7 @@ class SmartDeviceService:
             self._finish(job, error)
         except HARequestUncertain as error:
             with self.condition:
-                self.uncertain.append((affected, error.acknowledged))
+                self.uncertain.append((affected, error.acknowledged, generation, self.clock() + UNCERTAIN_LIMIT))
             message = 'Light not responding' if row and row.domain == 'light' else 'Device not responding'
             self._finish(job, UIEventError('device_failed', message))
         except Exception:
