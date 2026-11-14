@@ -47,6 +47,36 @@ class SmartFixture(unittest.TestCase):
         self.assertTrue(all(not device.get('configuration_url') for device in snapshot['devices']))
         self.assertEqual(self.fake.calls, [])
 
+    def test_settling_light_walks_to_its_target_in_several_events_and_groups_follow(self):
+        self.fake.settle = {'steps': 4, 'span': .2}
+        seen = []
+        self.ha.listeners.append(lambda entity, state: seen.append(
+            (entity, state['attributes'].get('brightness'))) if entity.startswith('light.') else None)
+        self.ha.call_service('light', 'turn_on', ['light.lantern_ceiling'], {'brightness_pct': 100})
+        self.assertTrue(wait_for(lambda: self.ha.state('light.lantern_ceiling')['attributes']['brightness'] == 255))
+        ceiling = [value for entity, value in seen if entity == 'light.lantern_ceiling']
+        self.assertEqual(len(ceiling), 4)
+        self.assertEqual(ceiling, sorted(ceiling))
+        self.assertGreater(ceiling[0], 153)
+        self.assertEqual(ceiling[-1], 255)
+        self.assertTrue(wait_for(lambda: self.ha.state('light.lantern_all')['attributes']['brightness'] == round((255 + 102) / 2)))
+        self.assertGreater(len([1 for entity, _ in seen if entity == 'light.lantern_all']), 1)
+        # A newer command replaces the walk in progress and ends on its own target.
+        self.ha.call_service('light', 'turn_on', ['light.lantern_ceiling'], {'brightness_pct': 10})
+        self.ha.call_service('light', 'turn_on', ['light.lantern_ceiling'], {'brightness_pct': 50})
+        self.assertTrue(wait_for(lambda: self.ha.state('light.lantern_ceiling')['attributes']['brightness'] == 128))
+        time.sleep(.4)
+        self.assertEqual(self.ha.state('light.lantern_ceiling')['attributes']['brightness'], 128)
+        self.assertEqual(self.fake.settling, {})
+
+    def test_default_light_levels_arrive_in_one_event_per_light(self):
+        seen = []
+        self.ha.listeners.append(lambda entity, state: seen.append(entity) if entity == 'light.lantern_ceiling' else None)
+        self.ha.call_service('light', 'turn_on', ['light.lantern_ceiling'], {'brightness_pct': 100})
+        self.assertTrue(wait_for(lambda: self.ha.state('light.lantern_ceiling')['attributes']['brightness'] == 255))
+        time.sleep(.2)
+        self.assertEqual(seen, ['light.lantern_ceiling'])
+
     def test_absolute_power_list_targets_and_light_levels_emit_state_events(self):
         events = []
         self.ha.listeners.append(lambda entity, state: events.append(entity))

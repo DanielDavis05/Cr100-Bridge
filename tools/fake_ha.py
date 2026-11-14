@@ -121,6 +121,11 @@ class FakeHA:
         self.config_entries = {}       # entity -> HA integration instance / grouping scope
         self.registry_entries = {}     # optional realistic registry identity overrides
         self.service_requests = []     # includes read-only actions and their domains
+        # None: a light reaches a commanded brightness in one state_changed.
+        # {'steps': n, 'span': seconds}: it walks there in n events over the span
+        # (a light with a transition), and its groups follow each step.
+        self.settle = None
+        self.settling = {}             # entity -> running settle task
         registries = registries or {}
         self.entities = copy.deepcopy(registries.get('entities'))  # None preserves legacy auto-registry
         self.devices = copy.deepcopy(registries.get('devices') or [])
@@ -279,12 +284,32 @@ class FakeHA:
             changes = {}
             if domain == 'light' and 'brightness_pct' in data:
                 changes['brightness'] = round(max(0, min(100, data['brightness_pct'])) * 255 / 100)
+                if self.settle and service == 'turn_on' and attributes.get('brightness') is not None:
+                    previous = self.settling.pop(entity, None)
+                    if previous: previous.cancel()
+                    start = attributes['brightness']
+                    if self.states[entity]['state'] != 'on': await self.change(entity, 'on')
+                    self.settling[entity] = asyncio.ensure_future(
+                        self.walk(entity, start, changes['brightness'], dict(self.settle)))
+                    return
             if domain == 'fan' and 'percentage' in attributes:
                 changes['percentage'] = (attributes.get('percentage') or 100) if service == 'turn_on' else 0
             await self.change(entity, 'on' if service == 'turn_on' else 'off', **changes)
         elif domain == 'fan' and service == 'set_percentage':
             percentage = max(0, min(100, data['percentage']))
             await self.change(entity, 'on' if percentage else 'off', percentage=percentage)
+
+    async def walk(self, entity, start, end, settle):
+        steps, span = max(1, int(settle['steps'])), float(settle['span'])
+        try:
+            for index in range(1, steps + 1):
+                await asyncio.sleep(span / steps)
+                await self.change(entity, 'on', brightness=round(start + (end - start) * index / steps))
+                await self.refresh_light_groups()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.settling.get(entity) is asyncio.current_task(): self.settling.pop(entity, None)
 
     async def refresh_light_groups(self):
         for entity, state in list(self.states.items()):
