@@ -351,6 +351,24 @@ class SonosHousehold(unittest.TestCase):
             room.pause()
             self.assertEqual(player.calls[-1][0], 'Stop')
 
+    def test_tv_input_shows_tv_not_the_player_uuid(self):
+        # A soundbar playing its TV input reports its own UUID as the track title.
+        room = self.vkitchen.state.backend
+        self.kitchen.uri = 'x-sonos-htastream:' + KITCHEN + ':spdif'
+        self.kitchen.transport = 'PLAYING'
+        self.kitchen.actions = 'Set, Stop, Play'
+        self.kitchen.track_metadata = DIDL_OPEN + entry('-1', KITCHEN, '-1', 'object.item.audioItem') + '</DIDL-Lite>'
+        self.kitchen.track_duration = '0:00:00'
+        self.kitchen.notify('AVTransport')
+        self.assertTrue(wait_for(lambda: room.tv_source() == KITCHEN), self.logs)
+        self.assertEqual(room.track(), ('TV', '', 'Kitchen', '', None))
+        self.assertEqual(room.position(), 0)
+        self.assertEqual(room.queue_numbers(), (1, 1))
+        self.assertNotIn('seek', room.capabilities())
+        self.assertNotIn(KITCHEN, room.values(self.vkitchen.config.udn)['CurrentTrackMetaData'])
+        room.pause()
+        self.assertEqual(self.kitchen.calls[-1][0], 'Stop')
+
     def test_select_line_in_uses_the_source_uuid_and_destination_coordinator(self):
         self.connect_line_in()
         self.fake.regroup(PATIO, KITCHEN)

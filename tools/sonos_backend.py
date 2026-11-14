@@ -50,6 +50,7 @@ READ_TIMEOUT = 8
 ART_LIMIT = 8 * 1024 * 1024
 QUEUE_PREFIX = 'x-rincon-queue:'
 LINE_IN_PREFIX = 'x-rincon-stream:'
+TV_PREFIX = 'x-sonos-htastream:'   # a home-theater player's TV input: x-sonos-htastream:RINCON_...:spdif
 IGNORED_STREAM = re.compile(r'^(ZPSTR_\w+|)$')   # buffering/connecting placeholders, not titles
 
 
@@ -637,6 +638,17 @@ class SonosRoom(NativeSettingsRoom):
         uri = avt.get('AVTransportURI') or avt.get('CurrentTrackURI', '')
         return uri[len(LINE_IN_PREFIX):].split('?', 1)[0] if uri.startswith(LINE_IN_PREFIX) else None
 
+    def tv_source(self):
+        """The home-theater player whose TV input is playing, or None.
+
+        The player reports its own UUID as the track title, which must not
+        reach the controller as if it were a song name.
+        """
+        avt = self.avt
+        uri = avt.get('AVTransportURI') or avt.get('CurrentTrackURI', '')
+        if not uri.startswith(TV_PREFIX): return None
+        return uri[len(TV_PREFIX):].split(':', 1)[0] or None
+
     def track_reference(self):
         coordinator, avt = self.coordinator, self.avt
         return '%s:%s' % (coordinator.uuid if coordinator else self.key,
@@ -651,6 +663,10 @@ class SonosRoom(NativeSettingsRoom):
             source = self.backend.speaker(source_id)
             title = source.audio_in['name'] if source else 'Line-In'
             return title, '', source.name if source else '', '', None
+        tv_id = self.tv_source()
+        if tv_id:
+            source = self.backend.speaker(tv_id)
+            return 'TV', '', source.name if source else '', '', None
         entry = next(iter(parse_didl(avt.get('CurrentTrackMetaData'))), {})
         context = next(iter(parse_didl(avt.get('AVTransportURIMetaData'))), {}) \
             if not self.playing_queue(avt) else {}
@@ -676,7 +692,7 @@ class SonosRoom(NativeSettingsRoom):
         return title, artist, album, self.backend.art.path_for(art, revision=revision), duration or None
 
     def position(self):
-        if self.line_in_source(): return 0
+        if self.line_in_source() or self.tv_source(): return 0
         coordinator = self.coordinator
         if coordinator is None: return 0
         if time.monotonic() - coordinator.position_at > POSITION_TTL: self.backend.read_position(coordinator)
