@@ -12,6 +12,7 @@ import itertools
 import json
 import threading
 import urllib.request
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from urllib.parse import urljoin, urlsplit
 
 from websockets.asyncio.client import connect
@@ -23,6 +24,17 @@ CALL_TIMEOUT = 10
 
 class HAError(Exception):
     pass
+
+
+class HARequestUncertain(HAError):
+    """A request may have been sent, but no explicit HA result was received."""
+    def __init__(self, acknowledged):
+        super().__init__('Home Assistant request has no acknowledgement')
+        self.acknowledged = acknowledged
+
+
+class HARequestTimeout(HARequestUncertain):
+    """The caller's time budget expired while the request remains unresolved."""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -42,10 +54,13 @@ class HomeAssistant:
         self.url, self.token, self.log = url.rstrip('/'), token, log
         self.states = {}          # entity_id -> HA state object
         self.listeners = []       # fn(entity_id, new_state or None), run on the client thread
+        self.connection_listeners = []  # fn(), after connect/disconnect; must not block
+        self.connection_generation = 0
         self.connected = threading.Event()
         self.loop = asyncio.new_event_loop()
         self.ids = itertools.count(1)
         self.pending = {}
+        self.acknowledgements = {}
         self.ws = None
         self.closing = False
         self.close_lock = threading.Lock()
@@ -108,7 +123,10 @@ class HomeAssistant:
                 for future in self.pending.values():
                     if not future.done(): future.set_exception(HAError('Connection lost'))
                 self.pending.clear()
-                if was_connected: self.notify_cached_states()
+                self.acknowledgements.clear()
+                if was_connected:
+                    self.notify_connection()
+                    self.notify_cached_states()
             await asyncio.sleep(delay)
 
     async def session(self):
@@ -129,6 +147,8 @@ class HomeAssistant:
                     if self.states.get(entity_id) != states.get(entity_id):
                         self.update(entity_id, states.get(entity_id))
                 self.connected.set()
+                self.connection_generation += 1
+                self.notify_connection()
                 self.notify_cached_states()
                 self.log({'event': 'ha-connected', 'version': reply.get('ha_version'), 'entities': len(states)})
                 await reader
@@ -143,6 +163,8 @@ class HomeAssistant:
                 data = message['event']['data']
                 self.update(data['entity_id'], data.get('new_state'))
             elif message.get('type') == 'result':
+                acknowledged = self.acknowledgements.pop(message.get('id'), None)
+                if acknowledged is not None: acknowledged.set()
                 future = self.pending.pop(message.get('id'), None)
                 if future is None or future.done(): continue
                 if message.get('success'): future.set_result(message.get('result'))
@@ -167,20 +189,46 @@ class HomeAssistant:
             try: listener(entity_id, state)
             except Exception as error: self.log({'event': 'ha-listener-error', 'error': repr(error)})
 
-    async def request(self, payload, message_id=None):
+    def notify_connection(self):
+        for listener in list(self.connection_listeners):
+            try: listener()
+            except Exception as error: self.log({'event': 'ha-listener-error', 'error': repr(error)})
+
+    async def request(self, payload, message_id=None, acknowledged=None, attempted=None):
         if self.ws is None: raise HAError('Not connected')
         message_id = message_id or next(self.ids)
         future = self.loop.create_future()
         self.pending[message_id] = future
-        await self.ws.send(json.dumps({**payload, 'id': message_id}))
+        if acknowledged is not None: self.acknowledgements[message_id] = acknowledged
+        wire = json.dumps({**payload, 'id': message_id})
+        if attempted is not None: attempted.set()
+        await self.ws.send(wire)
         return await future
 
     # --- thread-safe API --------------------------------------------------------
     def call(self, payload, timeout=CALL_TIMEOUT):
         if not self.connected.is_set(): raise HAError('Home Assistant is not connected')
-        return asyncio.run_coroutine_threadsafe(self.request(payload), self.loop).result(timeout)
+        acknowledged, attempted = threading.Event(), threading.Event()
+        request = asyncio.run_coroutine_threadsafe(
+            self.request(payload, acknowledged=acknowledged, attempted=attempted), self.loop)
+        try:
+            return request.result(timeout)
+        except FutureTimeoutError:
+            # Do not cancel: HA may already be executing the service. Consumers
+            # can retain target ownership until the actual result arrives.
+            raise HARequestTimeout(acknowledged) from None
+        except Exception as error:
+            if attempted.is_set() and not acknowledged.is_set():
+                raise HARequestUncertain(acknowledged) from error
+            raise
 
     def call_service(self, domain, service, entity_id, data=None, response=False, timeout=CALL_TIMEOUT):
+        """Call an absolute service for one entity id or an explicit list of ids."""
+        if not isinstance(entity_id, str):
+            if not isinstance(entity_id, (list, tuple)) or not entity_id \
+                    or not all(isinstance(entity, str) and entity for entity in entity_id):
+                raise ValueError('Expected an entity id or a non-empty list of entity ids')
+            entity_id = list(entity_id)
         payload = {'type': 'call_service', 'domain': domain, 'service': service,
                    'service_data': data or {}, 'target': {'entity_id': entity_id}}
         if response: payload['return_response'] = True

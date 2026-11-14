@@ -326,6 +326,7 @@ class SpeakerSource(Fixture):
 
     def test_switching_sets_rooms_aside_and_brings_them_back(self):
         ha_rooms = self.saved()['rooms']
+        ha_settings = self.saved()['home_assistant']
         self.bridge.save_sonos([self.host])
         with self.assertRaises(webui.ApiError):
             self.bridge.switch_source('spotify')
@@ -336,6 +337,7 @@ class SpeakerSource(Fixture):
             self.bridge.switch_source('sonos')
         config = self.saved()
         self.assertEqual(config['backend'], 'sonos')
+        self.assertEqual(config['home_assistant'], ha_settings)  # player hub can still read HA credentials
         self.assertEqual([(r['backend'], r['id']) for r in config['rooms']],
                          [('sonos', self.KITCHEN), ('sonos', self.BEDROOM)])   # every Sonos speaker, first time
         self.assertEqual(config['stashed_sources']['ha'], {'rooms': ha_rooms,

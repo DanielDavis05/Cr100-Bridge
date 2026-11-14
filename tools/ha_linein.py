@@ -47,6 +47,10 @@ class SonosLineIn:
         self.stop = threading.Event()
         self.thread = None
         self.closed_listener = False
+        self.hub = getattr(ha, 'ha_hub', None)
+        self.registry_changed = threading.Event()
+        self._registry_listener = self.registry_changed.set
+        if self.hub: self.hub.listeners.append(self._registry_listener)
 
     def start(self):
         self.thread = threading.Thread(target=self.run, name='ha-sonos-inputs', daemon=True)
@@ -57,6 +61,9 @@ class SonosLineIn:
 
     def close(self):
         self.stop.set()
+        self.registry_changed.set()
+        if self.hub and self._registry_listener in self.hub.listeners:
+            self.hub.listeners.remove(self._registry_listener)
         # Registry, input, and identity reads may still be in flight.
         # The worker owns listener shutdown until that in-flight operation ends.
         if self.thread: self.thread.join(NETWORK_TIMEOUT * 3 + sonos_upnp.SOAP_TIMEOUT + 1)
@@ -74,7 +81,8 @@ class SonosLineIn:
             while not self.stop.is_set():
                 now = time.monotonic()
                 try:
-                    if now >= next_registry:
+                    if now >= next_registry or self.registry_changed.is_set():
+                        self.registry_changed.clear()
                         next_registry = now + (REGISTRY_INTERVAL if self.refresh() else RETRY_INTERVAL)
                         next_identity = time.monotonic() + RETRY_INTERVAL
                     elif now >= next_identity:
@@ -88,15 +96,23 @@ class SonosLineIn:
                 except Exception:
                     next_registry = now + RETRY_INTERVAL
                     self.log({'event': 'line-in-discovery-unavailable'})
-                self.stop.wait(1)
+                self.registry_changed.wait(1)
         finally:
             self.close_listener()
 
     def refresh(self):
         """Resolve only Sonos entities and literal port-1400 registry addresses."""
         try:
-            entities = self.ha.call({'type': 'config/entity_registry/list'}, NETWORK_TIMEOUT)
-            devices = self.ha.call({'type': 'config/device_registry/list'}, NETWORK_TIMEOUT)
+            if self.hub:
+                if not self.hub.ready.wait(NETWORK_TIMEOUT * 2):
+                    raise ValueError('Home Assistant registry not ready')
+                snapshot = self.hub.snapshot()
+                entities, devices = snapshot['entities'], snapshot['devices']
+            else:
+                # Standalone callers without a player-process hub retain the
+                # previous injectable API (including downstream extensions).
+                entities = self.ha.call({'type': 'config/entity_registry/list'}, NETWORK_TIMEOUT)
+                devices = self.ha.call({'type': 'config/device_registry/list'}, NETWORK_TIMEOUT)
             if not isinstance(entities, list) or not isinstance(devices, list):
                 raise ValueError('Missing Sonos registry')
             devices = {d.get('id'): d for d in devices if isinstance(d, dict)}

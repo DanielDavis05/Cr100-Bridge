@@ -115,6 +115,11 @@ def apply_rooms(config, wanted, library, source, listing, platforms, automatic=F
             custom = name
         names.add(name.lower())
         room = room_for(ref) if ref else {}
+        previous = existing.get(key, {})
+        if source == 'sonos' and not previous:
+            previous = ((config.get('sonos') or {}).get('room_preferences') or {}).get(key, {})
+        # An explicit empty area means no area; truthiness would lose that choice.
+        if 'devices_area' in previous: room['devices_area'] = previous['devices_area']
         if custom or not ref or (source != 'sonos' and not listing.get(ref)): room['name'] = name
         if source == 'sonos' and ref:
             room['last_known_name'] = listing.get(ref) or existing.get(key, {}).get('last_known_name') or name

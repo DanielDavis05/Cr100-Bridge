@@ -20,6 +20,7 @@ by default and remains an explicit compatibility option for stock firmware.
 - [Deploying and updating](docs/guides/deploying.md): build an archive, install it on the Pi, roll back
 - [Health checks](docs/guides/health-checks.md): confirm the Pi, radio, controller link and speakers are working
 - [Troubleshooting](docs/guides/troubleshooting.md): known symptoms and their fixes
+- [Home Assistant devices](docs/features/SMART-DEVICES.md): Music → Devices controls, area mapping and configuration (requires Devices-capable controller firmware)
 - Feature notes are in [docs/features](docs/features/); research records are in [docs/research](docs/research/).
 
 ## Supported installation

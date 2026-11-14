@@ -433,6 +433,15 @@ views.controllers = {
   title: 'Controllers',
   async open(main) {
     const firmwarePanels = new Map();
+    const updateDevicesStatus = (data) => {
+      const node = $('.smart-device-status', main);
+      if (!node) return;
+      const status = data.smart_devices;
+      node.hidden = !status;
+      if (!status) { node.textContent = ''; return; }
+      const rooms = (status.rooms || []).map((room) => `${room.room}: ${room.area || 'No area'}`).join('; ');
+      node.textContent = `Home Assistant devices ${status.connected ? 'connected' : 'not connected'}${status.enabled === false ? ' (disabled)' : ''} · ${status.areas || 0} areas · ${status.devices || 0} devices${rooms ? ' · ' + rooms : ''}.`;
+    };
     const updateBridgeStatus = (data) => {
       const node = $('.bridge-update-status', main);
       if (!node) return;
@@ -448,6 +457,8 @@ views.controllers = {
     const render = (data) => {
       main.innerHTML = '';
       main.append(el(`<p class="lede">CR100 controllers paired with this bridge. A controller can sleep while idle. Resume reconnect attempts before using a controller whose attempts are paused.</p>`));
+      main.append(el('<p class="hint smart-device-status" hidden></p>'));
+      updateDevicesStatus(data);
       if (!data.radio_running) {
         main.append(el(`<div class="popup"><h3>The bridge radio is not running</h3><p>Controllers cannot connect until the bridge is started on the Pi.</p></div>`));
       }
@@ -718,6 +729,7 @@ views.controllers = {
       if (passive && (document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
         for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware);
         updateBridgeStatus(data);
+        updateDevicesStatus(data);
         return;
       }
       render(data);

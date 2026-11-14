@@ -310,6 +310,10 @@ def build_classes(zp):
                     settings = self.backend.settings_values()
                     values.update({key: settings[key] for key in
                                    ('AudioInputName', 'Icon', 'LeftLineInLevel', 'RightLineInLevel') if key in settings})
+            if service == 'ContentDirectory' and self.household.smart_devices:
+                device_ids = self.household.smart_devices.event_ids(self.config.udn)
+                if device_ids:
+                    values['ContainerUpdateIDs'] = ','.join(filter(None, (values.get('ContainerUpdateIDs'), device_ids)))
             return {key: self.household.mask_component_uris(self.config.udn, address, value)
                     if isinstance(value, str) else value for key, value in values.items()}
 
@@ -361,6 +365,10 @@ def build_classes(zp):
             configured library speaker when there is one (a non-Sonos room has no Sonos
             library of its own); each room's queue always comes from its own speaker."""
             object_id = args['ObjectID']
+            devices = self.household.smart_devices
+            if devices and (object_id.startswith('SD:') or (
+                    args.get('BrowseFlag') == 'BrowseMetadata' and devices.handles_metadata(object_id))):
+                return devices.browse(self, args)
             if object_id.startswith('AI:'):
                 return self.household.browse_line_in(self, args)
             own = self.backend.ref if self.backend else None
@@ -382,7 +390,9 @@ def build_classes(zp):
             address = getattr(self.http_source, 'address', None)
             self.household.check_component_action(self.config.udn, address, service, action, args)
             if service == 'SystemProperties' and (args.get('VariableName', '').startswith('CR100_UI')
-                    or args.get('VariableName') in ('CR100_RoomCapabilities', 'CR100_SpotifyAutoplay')):
+                    or args.get('VariableName', '').startswith('CR100_DevicesFeedback:')
+                    or args.get('VariableName') in ('CR100_RoomCapabilities', 'CR100_SpotifyAutoplay',
+                                                    'CR100_DevicesAvailable', 'CR100_DevicesFeedback')):
                 from ui_events import UIEventError
                 values = self.validate_action(service, action, args)
                 try:
@@ -744,7 +754,8 @@ class Household:
     def __init__(self, zp, household, rooms, addresses, log=print, port=1400, ssdp_port=SSDP_PORT,
                  backends=None, refs=None, music_service=None, boot_sequence=1, slots=None, library=None,
                  icons=None, bridge_ip=None, build=None, controller_config=None, controller_resolver=None,
-                 controller_addresses=None, listen_ip=None, config_path=None):
+                 controller_addresses=None, listen_ip=None, config_path=None,
+                 devices_hub=None, devices_config=None):
         """rooms: names; backends: the connected backends.Backend objects; refs: each room's
         (backend name, room id), or None for a simulated room; music_service: a
         smapi_stub.SmapiStub to advertise, or None; slots: each room's fixed player number
@@ -789,6 +800,7 @@ class Household:
         self.stop = threading.Event()
         self.identity_thread = None
         self.coordinator = {}   # player UDN -> its group coordinator's UDN
+        self.smart_devices = None
         refs = refs or [None] * len(rooms)
         for ref in refs:
             if ref and ref[0] not in self.backends: raise ValueError('Rooms of backend %r need it connected' % ref[0])
@@ -837,6 +849,14 @@ class Household:
         register_spotify_autoplay(self.ui_events, config_path)
         for provider in getattr(music_service, 'services', [music_service]):
             if provider is not None: self.ui_events.register_provider(provider)
+        if devices_hub is None:
+            devices_hub = next((getattr(getattr(backend, 'ha', None), 'ha_hub', None)
+                                for backend in self.backends.values()
+                                if getattr(getattr(backend, 'ha', None), 'ha_hub', None)), None)
+        if devices_hub is not None:
+            from smart_device_service import SmartDeviceService
+            self.smart_devices = SmartDeviceService(self, devices_hub,
+                                                     devices_config if devices_config is not None else controller_config)
 
     # --- About identities (cached independently of playback/discovery versions) ---
 
@@ -1186,6 +1206,7 @@ class Household:
                     self.coordinator[player.config.udn] = coordinator; changed = True
         if changed: self.log({'event': 'groups', 'coordinators': {self.by_udn[u].config.room: self.by_udn[c].config.room
                                                                   for u, c in self.coordinator.items()}})
+        if changed and self.smart_devices: self.smart_devices.hub_changed()
         return changed
 
     def members(self, udn, source_ip=None):
@@ -1436,6 +1457,7 @@ class Household:
             self.closed = True
             if self.flush_timer: self.flush_timer.cancel()
         self.stop.set()
+        if self.smart_devices: self.smart_devices.close()
         if self.updates: self.updates.close()
         for source in (self.alarms, self.radio_playback, self.radio_service, self.radio_transcoder):
             if source is not None: source.close()
@@ -1526,8 +1548,16 @@ def publish_player_status(path, house, slots):
     components = [{'key': player.component_key, 'name': player.config.room,
                    'kind': 'bridge' if player.state.is_bridge else 'about' if player.state.informational else 'room',
                    'parent_keys': sorted(player.component_parents)} for player in house.devices()]
-    temporary.write_text(json.dumps({'pid': os.getpid(), 'rooms': rooms, 'components': components}) + '\n')
+    status = {'pid': os.getpid(), 'rooms': rooms, 'components': components}
+    if house.smart_devices is not None: status['smart_devices'] = house.smart_devices.status()
+    temporary.write_text(json.dumps(status) + '\n')
     temporary.replace(path)
+
+
+def player_status_revision(house):
+    """Changes that require a fresh status snapshot from this player process."""
+    return (house.discovery_generation,
+            house.smart_devices.revision if house.smart_devices is not None else None)
 
 
 def configured_icons(config_path):
@@ -1627,11 +1657,12 @@ def main():
     registry = ControllerRegistry(args.state, args.leases_file, args.iface)
     for service in scoped_services: service.controller_resolver = registry
     controller_config = json.loads(args.config.read_text()) if args.config else {}
+    from ha_hub import current as current_ha_hub
     house = Household(zp, household, rooms, addresses, log, backends=connected.values(), refs=refs,
                       music_service=stub, boot_sequence=args.boot_sequence, slots=slots,
                       library=library_ref(args.config), icons=configured_icons(args.config),
                       controller_config=controller_config, controller_resolver=registry, listen_ip=args.listen_ip,
-                      config_path=args.config)
+                      config_path=args.config, devices_hub=current_ha_hub(), devices_config=controller_config)
     from radio_runtime import configure_sources
     configure_sources(house, args.config or Path(args.state).parent / 'bridge-config.json', args.listen_ip)
     from update_service import configure_updates
@@ -1644,13 +1675,14 @@ def main():
              'backend': player.state.backend.ref if player.state.backend else None})
     try: publish_player_status(status_path, house, slots)
     except OSError as error: log({'event': 'player-status-unavailable', 'error': str(error)})
-    status_generation = house.discovery_generation
+    status_generation = player_status_revision(house)
     try:
         while not reload.wait(1):
-            if status_generation != house.discovery_generation:
+            current_status_generation = player_status_revision(house)
+            if status_generation != current_status_generation:
                 try:
                     publish_player_status(status_path, house, slots)
-                    status_generation = house.discovery_generation
+                    status_generation = current_status_generation
                 except OSError as error: log({'event': 'player-status-unavailable', 'error': str(error)})
             if args.config and 'sonos' in connected:
                 try:

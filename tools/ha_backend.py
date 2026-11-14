@@ -12,8 +12,6 @@ rooms {"entity": "media_player.kitchen"} (or {"backend": "ha", "id": ...}).
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
-
 from backends import ArtStore, Backend, BackendError, NativeSettingsRoom, track_revision
 from ha_content import Content
 from ha_linein import SonosLineIn, source_uuid
@@ -44,7 +42,8 @@ class HABackend(Backend):
         self.settings = settings if settings is not None else sonos_settings.SettingsProvider(
             self.settings_binding, self.settings_changed, coordinator_reader=self.settings_coordinator, log=log)
         self.settings.start()
-        ha.listeners.append(lambda entity_id, state: self.changed(entity_id))
+        self._ha_listener = lambda entity_id, state: self.changed(entity_id)
+        ha.listeners.append(self._ha_listener)
 
     def room(self, entity_id):
         self.settings.register(entity_id)
@@ -103,17 +102,17 @@ class HABackend(Backend):
     def close(self):
         self.settings.close()
         self.line_in.close()
-        self.ha.close()
+        if self._ha_listener in self.ha.listeners: self.ha.listeners.remove(self._ha_listener)
+        if getattr(self.ha, 'ha_hub', None) is None: self.ha.close()
 
 
 def load(settings, config_dir, log):
-    from ha_client import HomeAssistant
+    import ha_hub
     if not settings.get('url') or not settings.get('token_file'):
         raise ValueError('Home Assistant rooms need home_assistant.url and token_file in the config')
-    token_file = Path(settings['token_file']).expanduser()
-    if not token_file.is_absolute(): token_file = Path(config_dir) / token_file
-    ha = HomeAssistant(settings['url'], token_file.read_text().strip(), log)
-    ha.start()
+    hub = ha_hub.configure({'home_assistant': settings}, config_dir, log)
+    if hub is None: raise ValueError('Home Assistant token_file must contain a token')
+    ha = hub.client
     if not ha.connected.wait(STARTUP_WAIT):
         log({'event': 'ha-not-connected', 'detail': 'starting anyway; rooms update when it connects'})
     return HABackend(ha, log)

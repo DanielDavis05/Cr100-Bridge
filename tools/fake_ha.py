@@ -1,15 +1,16 @@
 """A small fake Home Assistant for offline tests: WebSocket API + entity_picture proxy.
 
-Implements what the bridge uses: auth, subscribe_events (state_changed), get_states,
-call_service for media_player and sonos services (with plausible Sonos effects and
-return_response), media_player/browse_media over a `media` tree,
-config/entity_registry/list (platform from `platforms`, default sonos), and
-GET /api/media_player_proxy/<entity> returning a picture. Runs on its own thread.
+Implements auth, state_changed, states, media/sonos services, light/switch/boolean/
+fan/scene/script services, browse_media, entity/device/area/floor registries, and
+the picture proxy. smart_device_fixture() supplies an invented multi-area home;
+default construction retains the media-only fixture behavior. All sockets bind
+loopback and run on a background thread.
 """
 from __future__ import annotations
 
 import asyncio
 import copy
+import datetime
 import io
 import json
 import threading
@@ -17,6 +18,7 @@ import threading
 from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
+from websockets.exceptions import ConnectionClosed
 
 TOKEN = 'test-token'
 
@@ -42,8 +44,70 @@ def sonos_state(entity_id, name, state='idle', **attributes):
     return {'entity_id': entity_id, 'state': state, 'attributes': base}
 
 
+def smart_device_fixture():
+    """Invented two-room home for device integration tests and emulator runs.
+
+    Usage: ``fake = FakeHA(**smart_device_fixture())``. No device has a network
+    address: native Sonos matching uses synthetic registry identifiers only.
+    """
+    states = [sonos_state('media_player.lantern', 'Lantern'),
+              sonos_state('media_player.workshop', 'Workshop')]
+    entities, devices = [], []
+    for area, uuid in (('lantern', 'RINCON_00000000001101400'),
+                       ('workshop', 'RINCON_00000000001201400')):
+        device = 'speaker-' + area
+        devices.append({'id': device, 'area_id': area, 'identifiers': [['sonos', uuid]],
+                        'model': 'Sonos One', 'manufacturer': 'Sonos', 'disabled_by': None})
+        entities.append({'entity_id': 'media_player.' + area, 'platform': 'sonos',
+                         'device_id': device, 'unique_id': uuid, 'area_id': None,
+                         'config_entry_id': 'synthetic-sonos', 'name': None,
+                         'disabled_by': None, 'hidden_by': None, 'entity_category': None})
+
+    def add(entity, name, state, area='lantern', platform='test', category=None,
+            disabled=None, hidden=None, registry_name=None, **attributes):
+        device = 'device-' + entity
+        devices.append({'id': device, 'area_id': area, 'identifiers': [[platform, entity]],
+                        'disabled_by': None})
+        entities.append({'entity_id': entity, 'platform': platform, 'device_id': device,
+                         'area_id': None, 'name': registry_name, 'original_name': name,
+                         'disabled_by': disabled, 'hidden_by': hidden, 'entity_category': category,
+                         'config_entry_id': 'synthetic-' + platform, 'unique_id': entity})
+        states.append({'entity_id': entity, 'state': state,
+                       'attributes': {'friendly_name': name, **attributes}})
+
+    dim = {'supported_color_modes': ['brightness'], 'color_mode': 'brightness', 'supported_features': 0}
+    add('light.lantern_ceiling', 'Lantern Ceiling', 'on', brightness=153, **dim)
+    add('light.lantern_counter_left', 'Lantern Counter Left', 'on', brightness=102, **dim)
+    add('light.lantern_counter_right', 'Lantern Counter Right', 'off', brightness=204, **dim)
+    add('light.lantern_counter', 'Lantern Counter', 'on', platform='hue', brightness=102,
+        entity_id=['light.lantern_counter_left', 'light.lantern_counter_right'], **dim)
+    add('light.lantern_all', 'Lantern All', 'on', platform='group', brightness=128,
+        entity_id=['light.lantern_ceiling', 'light.lantern_counter_left', 'light.lantern_counter_right'], **dim)
+    add('switch.lantern_plug', 'Lantern Coffee Plug', 'on')
+    add('input_boolean.lantern_guest_mode', 'Lantern Guest Mode', 'off')
+    add('fan.lantern_extractor', 'Lantern Extractor', 'on', percentage=40, supported_features=1)
+    add('scene.lantern_evening', 'Lantern Evening', '2026-01-01T00:00:00+00:00')
+    add('script.lantern_welcome', 'Lantern Welcome', 'off')
+    add('light.workshop_bench', 'Workshop Bench', 'on', area='workshop', brightness=255, **dim)
+    add('light.workshop_overhead', 'Workshop Overhead', 'off', area='workshop', brightness=128, **dim)
+    add('light.landing_lamp', 'Landing Lamp', 'on', area='landing', brightness=64, **dim)
+    add('switch.lantern_loudness', 'Lantern Loudness', 'on', platform='sonos', category='config')
+    add('switch.lantern_crossfade', 'Lantern Crossfade', 'off', platform='sonos', category='config')
+    add('light.lantern_hidden', 'Lantern Hidden', 'on', hidden='user', brightness=255, **dim)
+    add('light.lantern_disabled', 'Lantern Disabled', 'on', disabled='integration', brightness=255, **dim)
+    add('sensor.lantern_temperature', 'Lantern Temperature', '21')
+    entities.append({'entity_id': 'light.registry_only', 'area_id': 'lantern', 'platform': 'test',
+                     'disabled_by': None, 'hidden_by': None, 'entity_category': None})
+    return {'states': states, 'registries': {'entities': entities, 'devices': devices,
+        'areas': [{'area_id': 'lantern', 'name': 'Lantern', 'floor_id': 'ground'},
+                  {'area_id': 'workshop', 'name': 'Workshop', 'floor_id': 'ground'},
+                  {'area_id': 'landing', 'name': 'Landing', 'floor_id': 'upper'}],
+        'floors': [{'floor_id': 'ground', 'name': 'Ground Floor', 'level': 0},
+                   {'floor_id': 'upper', 'name': 'Upper Floor', 'level': 1}]}}
+
+
 class FakeHA:
-    def __init__(self, states):
+    def __init__(self, states, registries=None):
         self.states = {s['entity_id']: copy.deepcopy(s) for s in states}
         self.calls = []                # (service, entity_id, service_data)
         self.picture = picture_bytes()
@@ -57,7 +121,13 @@ class FakeHA:
         self.config_entries = {}       # entity -> HA integration instance / grouping scope
         self.registry_entries = {}     # optional realistic registry identity overrides
         self.service_requests = []     # includes read-only actions and their domains
-        self.devices = []              # Sonos device registry (empty unless a test supplies one)
+        registries = registries or {}
+        self.entities = copy.deepcopy(registries.get('entities'))  # None preserves legacy auto-registry
+        self.devices = copy.deepcopy(registries.get('devices') or [])
+        self.areas = copy.deepcopy(registries.get('areas') or [])
+        self.floors = copy.deepcopy(registries.get('floors') or [])
+        self.registry_requests = []
+        self.available = True
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.closing = False
@@ -106,6 +176,9 @@ class FakeHA:
         return Response(404, 'Not Found', Headers([('Content-Length', '0')]), b'')
 
     async def handler(self, ws):
+        if not self.available:
+            await ws.close(code=1013, reason='Home Assistant unavailable')
+            return
         await ws.send(json.dumps({'type': 'auth_required', 'ha_version': 'fake'}))
         auth = json.loads(await ws.recv())
         if auth.get('access_token') != TOKEN:
@@ -121,12 +194,12 @@ class FakeHA:
                 elif kind == 'get_states':
                     await self.result(ws, message_id, list(self.states.values()))
                 elif kind == 'config/entity_registry/list':
-                    await self.result(ws, message_id, [
-                        {'entity_id': e, 'platform': self.platforms.get(e, 'sonos'),
-                         'config_entry_id': self.config_entries.get(e, self.platforms.get(e, 'sonos') + '-test-entry'),
-                         'device_id': 'fake-' + e, **self.registry_entries.get(e, {})} for e in self.states])
-                elif kind == 'config/device_registry/list':
-                    await self.result(ws, message_id, self.devices)
+                    self.registry_requests.append(kind)
+                    await self.result(ws, message_id, self.entity_registry())
+                elif kind in ('config/device_registry/list', 'config/area_registry/list', 'config/floor_registry/list'):
+                    self.registry_requests.append(kind)
+                    name = {'device': 'devices', 'area': 'areas', 'floor': 'floors'}[kind.split('/')[1].split('_')[0]]
+                    await self.result(ws, message_id, getattr(self, name))
                 elif kind == 'media_player/browse_media':
                     key = (message.get('media_content_id', ''), message.get('media_content_type', ''))
                     self.browses.append(key)
@@ -139,28 +212,90 @@ class FakeHA:
                             {k: v for k, v in child.items() if k != 'children'} for child in node['children'] or []]})
                 elif kind == 'call_service':
                     entity_id = message['target']['entity_id']
+                    targets = entity_id if isinstance(entity_id, list) else [entity_id]
                     self.service_requests.append((message['domain'], message['service'], entity_id,
                                                   copy.deepcopy(message['service_data'])))
-                    if message['domain'] == 'sonos' and self.platforms.get(entity_id, 'sonos') != 'sonos':
+                    if message['domain'] == 'sonos' and any(self.platforms.get(entity, 'sonos') != 'sonos' for entity in targets):
                         await ws.send(json.dumps({'id': message_id, 'type': 'result', 'success': False,
                                                   'error': {'code': 'unsupported', 'message': 'Not a Sonos player'}}))
                         continue
                     if message['service'] == 'get_queue':   # read-only: not recorded as a call
                         await self.result(ws, message_id, {'context': {}, 'response': {
-                            entity_id: copy.deepcopy(self.queues.get(entity_id, []))}})
+                            entity: copy.deepcopy(self.queues.get(entity, [])) for entity in targets}})
                         continue
                     self.calls.append((message['service'], entity_id, message['service_data']))
                     if self.fail_services:
                         await ws.send(json.dumps({'id': message_id, 'type': 'result', 'success': False,
                                                   'error': {'code': 'failed', 'message': 'Speaker offline'}}))
                         continue
-                    await self.apply(message['service'], entity_id, message['service_data'])
+                    for entity in targets:
+                        if message['domain'] in ('light', 'switch', 'input_boolean', 'fan', 'scene', 'script'):
+                            await self.apply_device(message['domain'], message['service'], entity, message['service_data'])
+                        else:
+                            await self.apply(message['service'], entity, message['service_data'])
+                    if message['domain'] == 'light': await self.refresh_light_groups()
                     await self.result(ws, message_id, {'context': {}})
                 else:
                     await ws.send(json.dumps({'id': message_id, 'type': 'result', 'success': False,
                                               'error': {'code': 'unknown_command', 'message': kind}}))
+        except ConnectionClosed:
+            pass
         finally:
             self.sockets.pop(ws, None)
+
+    def entity_registry(self):
+        if self.entities is not None:
+            return [{**entry, **self.registry_entries.get(entry['entity_id'], {})} for entry in self.entities]
+        return [{'entity_id': entity, 'platform': self.platforms.get(entity, 'sonos'),
+                 'config_entry_id': self.config_entries.get(entity, self.platforms.get(entity, 'sonos') + '-test-entry'),
+                 'device_id': 'fake-' + entity, **self.registry_entries.get(entity, {})} for entity in self.states]
+
+    def registry_snapshot(self):
+        return copy.deepcopy({'entities': self.entity_registry(), 'devices': self.devices,
+                              'areas': self.areas, 'floors': self.floors})
+
+    def set_available(self, available):
+        """Drop real WebSockets and deny reconnects, retaining the server's port."""
+        async def change_availability():
+            self.available = bool(available)
+            if not self.available:
+                await asyncio.gather(*(ws.close(code=1013, reason='Home Assistant unavailable')
+                                       for ws in list(self.sockets)), return_exceptions=True)
+        asyncio.run_coroutine_threadsafe(change_availability(), self.loop).result(5)
+
+    async def apply_device(self, domain, service, entity, data, visited=None):
+        if entity not in self.states: return
+        visited = set() if visited is None else visited
+        if entity in visited: return
+        visited.add(entity)
+        attributes = self.states[entity]['attributes']
+        if domain == 'light' and isinstance(attributes.get('entity_id'), list):
+            for member in attributes['entity_id']:
+                await self.apply_device(domain, service, member, data, visited)
+        if domain in ('scene', 'script') and service == 'turn_on':
+            value = datetime.datetime.now(datetime.timezone.utc).isoformat() if domain == 'scene' else 'on'
+            await self.change(entity, value, activation_count=attributes.get('activation_count', 0) + 1)
+        elif service in ('turn_on', 'turn_off'):
+            changes = {}
+            if domain == 'light' and 'brightness_pct' in data:
+                changes['brightness'] = round(max(0, min(100, data['brightness_pct'])) * 255 / 100)
+            if domain == 'fan' and 'percentage' in attributes:
+                changes['percentage'] = (attributes.get('percentage') or 100) if service == 'turn_on' else 0
+            await self.change(entity, 'on' if service == 'turn_on' else 'off', **changes)
+        elif domain == 'fan' and service == 'set_percentage':
+            percentage = max(0, min(100, data['percentage']))
+            await self.change(entity, 'on' if percentage else 'off', percentage=percentage)
+
+    async def refresh_light_groups(self):
+        for entity, state in list(self.states.items()):
+            members = state['attributes'].get('entity_id')
+            if not entity.startswith('light.') or not isinstance(members, list) or not members: continue
+            on = [self.states[member] for member in members if member in self.states and self.states[member]['state'] == 'on']
+            brightness = [member['attributes']['brightness'] for member in on if 'brightness' in member['attributes']]
+            changes = {'brightness': round(sum(brightness) / len(brightness))} if brightness else {}
+            value = 'on' if on else 'off'
+            if state['state'] != value or any(state['attributes'].get(key) != val for key, val in changes.items()):
+                await self.change(entity, value, **changes)
 
     async def result(self, ws, message_id, result):
         await ws.send(json.dumps({'id': message_id, 'type': 'result', 'success': True, 'result': result}))

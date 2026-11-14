@@ -309,6 +309,23 @@ class UIEventGateway:
     def native_action(self, player, service, action, args, address):
         if service != 'SystemProperties': return None
         variable = args.get('VariableName', '')
+        if variable.startswith('CR100_DevicesFeedback:'):
+            if action != 'GetString':
+                raise UIEventError('invalid_request', 'Device feedback status is read-only')
+            identity = self._identity(address)
+            request_id = variable.split(':', 1)[1]
+            if not REQUEST_ID.fullmatch(request_id):
+                raise UIEventError('invalid_request', 'Invalid feedback request ID')
+            devices = getattr(self.household, 'smart_devices', None)
+            return {'StringValue': devices.feedback_for(identity, request_id) if devices else 'deferred'}
+        if variable in ('CR100_DevicesAvailable', 'CR100_DevicesFeedback'):
+            if action != 'GetString':
+                raise UIEventError('invalid_request', 'Device status is read-only')
+            self._identity(address)
+            devices = getattr(self.household, 'smart_devices', None)
+            value = ('1' if devices and devices.available() and not player.state.informational else '0') if variable == 'CR100_DevicesAvailable' \
+                else devices.feedback(player, address) if devices else 'deferred'
+            return {'StringValue': value}
         if variable in (ROOM_CAPABILITIES_VARIABLE, AUTOPLAY_VARIABLE):
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'Controller settings status is read-only')
@@ -345,8 +362,9 @@ class UIEventGateway:
         if variable == CAPABILITIES_VARIABLE:
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'UI capabilities are read-only')
-            return {'StringValue': response('', True, 'capabilities', 'UI events v1',
-                                            {'actions': ','.join(sorted(self.handlers))})}
+            data = {'actions': ','.join(sorted(self.handlers))}
+            if getattr(self.household, 'smart_devices', None): data['features'] = 'devices.v1'
+            return {'StringValue': response('', True, 'capabilities', 'UI events v1', data)}
         if variable == SESSION_VARIABLE:
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'UI session identifiers are read-only')
@@ -369,6 +387,25 @@ class UIEventGateway:
                                                            'No retained result for this request')
             return {'StringValue': result}
         return None
+
+    def complete(self, context, result=None, error=None):
+        """Replace an accepted asynchronous action's retained receipt.
+
+        Dispatch holds this lock through initial receipt creation, so even a
+        very fast worker cannot finish before that receipt exists. Expired
+        receipts stay expired; completion never creates a second execution.
+        """
+        with self.lock:
+            self._prune()
+            key = (context.controller_id, context.request_id)
+            receipt = self.receipts.get(key)
+            if receipt is None: return
+            if error is not None:
+                wire = response(context.request_id, False, error.code, str(error))
+            else:
+                result = result or UIResult()
+                wire = response(context.request_id, True, 'done', result.message, result.data)
+            self.receipts[key] = (receipt[0], receipt[1], wire)
 
 
 def register_spotify_autoplay(gateway, config_path):

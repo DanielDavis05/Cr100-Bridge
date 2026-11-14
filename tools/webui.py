@@ -507,8 +507,11 @@ class Bridge:
             running = os.fsencode(str(_HERE / 'zoneplayers.py')) in args
             status = json.loads((self.players_pid.parent / 'players-status.json').read_text())
             if running and status.get('pid') == pid:
-                return {'running': True, 'ready': True, 'rooms': status['rooms'],
-                        'components': status.get('components', [])}
+                runtime = {'running': True, 'ready': True, 'rooms': status['rooms'],
+                           'components': status.get('components', [])}
+                if isinstance(status.get('smart_devices'), dict):
+                    runtime['smart_devices'] = status['smart_devices']
+                return runtime
         except (OSError, ValueError, KeyError, TypeError):
             pass
         return {'running': running, 'ready': False, 'rooms': []}
@@ -713,10 +716,14 @@ class Bridge:
                                       (not event.get('mac') and (len(macs) == 1 or
                                        event['event'] in ('radio-lost', 'radio-reopened')))][-12:],
                            **details})
-        return {'controllers': result, 'household': state.get('household'),
+        payload = {'controllers': result, 'household': state.get('household'),
                 'speaker_health': self.speaker_health(config, wait=False),
                 'channel': FREQ_CHANNEL.get(state.get('freq')), 'radio_running': link['running'],
                 'multi_controller': True, 'pairing': self.pairing_status()}
+        runtime = self.player_runtime()
+        if runtime.get('ready') and isinstance(runtime.get('smart_devices'), dict):
+            payload['smart_devices'] = runtime['smart_devices']
+        return payload
 
     def rename_controller(self, mac, name):
         name = (name or '').strip()
