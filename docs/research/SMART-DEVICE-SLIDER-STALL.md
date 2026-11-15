@@ -275,6 +275,75 @@ The bridge change and R9 are independent, but they are meant to ship together:
 
 The bridge-only configuration was not measured.
 
+## Follow-up: R10 (2026-11-14/15)
+
+On the controller, R9 with the new bridge applied a brightness value only when Enter closed the slider. The Pi
+journal (read-only) showed one `GetString` and one `SetString` per gesture, both at close, and nothing during
+the turn.
+
+**Cause (reproduced in the emulator).** R9 spaced sends by comparing `getTimer` with `sentAt`, which starts at
+-100000 ms to mean "no send yet". If the clock reads below about -99.5 s, `800 - (now - sentAt)` is a large
+positive number, so the trailing timer is scheduled minutes away and only Back/Enter's flush sends. A lab movie
+that offsets R9's clock read by -1e6 ms and reports the requested delay asked for about 480,000 ms on every
+wheel step. Its pump ran only at Back, so the light changed only after Back (session `n-clockneg`). The
+emulator's own clock is an ordinary elapsed-ms value (~475,000 ms), so unmodified R9 works there. One unprobed
+run with the same offset still sent mid-turn, which is not explained. R10 removes the clock from the timing,
+so it does not depend on the answer.
+
+**R10 firmware** (`cr100-firmware` `2bfb6a8`, release `re100-cfw-20261114-r10`, package
+`b65177716424e63d9880fda9e38103ea531297beead27dc6651a525be185467e`, UI-only over R9):
+
+- Level timing uses timers only: 300 ms after the last wheel step, or the end of the previous send's 800 ms
+  spacing timer. The feedback mode is re-read at the first send after each 5 s timer. Back/Enter still flush at
+  once.
+- Optimistic power rows: a press records the requested state (by room and row id) and repaints the visible rows
+  before its SetString. A second press then asks for the opposite. The guess lasts 5 s, or until a newer press,
+  and is kept if the reply misses the native ~2 s deadline. A first version recorded it only after a successful
+  reply; in the emulator the reply often missed the deadline after the bridge had acted, and the second press
+  repeated "off" (`n-opt`).
+- A press made while the list refreshes is queued for up to 3 s and runs on the refreshed row if its id and view
+  token match. Otherwise it shows "List changed. Select again.", and it is dropped if the selection moved.
+- Devices sits directly above System Settings in the music menu.
+
+**Bridge** (`b609f3f`, `d1874a9`): from receipt until HA reports the requested state, the request fails, or its
+confirmation comes due, a power press's targets (and group members) are listed in the requested state. A stale
+HA event mid-transition no longer flips the row back. A failed or rejected request lists the actual state, a
+level action clears an earlier power display, and a due confirmation ends the display so the real state is
+published once. The requested state is published by the service loop. A first version refreshed inside the
+SetString request; in the emulator that missed the controller's reply deadline, and the "Device action
+unavailable." popup swallowed the next OK (`accept-r10-superseded-sync-publish`).
+
+**Emulator results** (emulator timings):
+
+| Check | R9 | R10 |
+|---|---|---|
+| Quick second OK on a light | 0.4 s: off sent twice, light stays off (`accept-r9d`) | 0.1 s and 0.4 s: off then on (`n-opt2`); acceptance 0.4 s and 3 s: off then on (`accept-r10c`) |
+| Press during a list refresh | "List changed. Select again." | Queued, then sent the opposite on the refreshed row (`n-opt` 2 s case) |
+| Sustained gestures (4 plans) | — | Final value sent 0.3–1.1 s after the last step, before Back; 0 Browses with the slider open (`n-r10`) |
+| Acceptance | — | power, slider, errors, stale, fan passed (`accept-r10b`) |
+
+Emulator effects that are not R10 logic: under load SetString replies miss the ~2 s deadline and emulated HA
+calls time out. A popup left on screen swallows the next OK, which made one double-press gap fail in each
+acceptance run, on R9 and R10 alike. One hesitant-turn run per firmware ended at the wrong light level because
+HA calls timed out after the controller had sent the right final value (`h-*`).
+
+Tests: bridge suite 1351 tests OK (2 skipped), including six new pending-power tests. Firmware suite 258 tests,
+0 skipped, including R10 scoping, no clock opcode in the level helpers, guess-before-send, queued press, menu
+position and receipt tests. R8 and R9 bytes and receipts are unchanged.
+
+### R10 checks on the physical controller
+
+After deploying the bridge commits and installing R10:
+
+1. Turn a light's Brightness, stop, and wait without pressing anything. The light should follow within about
+   a second of stopping, and the bridge log should show `devices.level` actions during the turn, not only at
+   Enter/Back.
+2. Turn a light off and press OK again straight away (well under a second). The row icon should flip on each
+   press, and the light should end on. The log should show `turn_off` then `turn_on`.
+3. Press OK on a row just as the list updates after another change. It should act once the list is redrawn,
+   with no "List changed" message, unless the row really changed.
+4. The music menu should list Devices directly above System Settings.
+
 ## Check on the physical controller
 
 The emulator cannot confirm hardware speed. After deploying the bridge change and installing R9:
