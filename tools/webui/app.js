@@ -11,9 +11,56 @@ const ICONS = {
   note: `<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M16 9l15-4v20" fill="none" stroke="#e9f7ff" stroke-width="3" stroke-linejoin="round"/><path d="M16 9v21" stroke="#e9f7ff" stroke-width="3"/><ellipse cx="11.5" cy="30" rx="5" ry="4" fill="#5fb2ea"/><ellipse cx="26.5" cy="25" rx="5" ry="4" fill="#5fb2ea"/></svg>`,
   house: `<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M5 19 20 6l15 13" fill="none" stroke="#e9f7ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 17v16h20V17" fill="#5fb2ea"/><rect x="17" y="24" width="6" height="9" fill="#e9f7ff"/></svg>`,
   key: `<svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="13" cy="20" r="7" fill="none" stroke="#e9f7ff" stroke-width="3.2"/><path d="M20 20h15M30 20v6M35 20v5" stroke="#5fb2ea" stroke-width="3.2" stroke-linecap="round"/></svg>`,
+  radio: `<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M12 13 29 6" stroke="#e9f7ff" stroke-width="2.6" stroke-linecap="round"/><rect x="5" y="13" width="30" height="21" rx="4" fill="#5fb2ea"/><circle cx="14.5" cy="23.5" r="5.5" fill="none" stroke="#e9f7ff" stroke-width="2.6"/><rect x="23" y="18" width="8" height="3" rx="1.2" fill="#e9f7ff"/><rect x="23" y="24" width="8" height="3" rx="1.2" fill="#e9f7ff"/></svg>`,
+  clock: `<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M7 10l5-4.5M33 10l-5-4.5" stroke="#e9f7ff" stroke-width="2.8" stroke-linecap="round"/><circle cx="20" cy="22" r="13" fill="#5fb2ea"/><circle cx="20" cy="22" r="10" fill="none" stroke="#e9f7ff" stroke-width="1.6" opacity=".7"/><path d="M20 15v7l5 3" fill="none" stroke="#e9f7ff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   tick: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  // Small line glyphs for the round mini buttons; they take the text colour.
   pencil: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13l1-3.5 7-7 2.5 2.5-7 7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
+  trash: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  up: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.5M4 7.5 8 3.5l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  down: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9.5M4 8.5l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  lock: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" fill="currentColor"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  unlock: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.8-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  plus: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  pin: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 14s4.5-4.3 4.5-7.5a4.5 4.5 0 0 0-9 0C3.5 9.7 8 14 8 14z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></svg>`,
+  copy: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 3.5V3H3v7.5h.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
+  folder: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5V12a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8L6.5 3.5H3a1 1 0 0 0-1 1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
 };
+
+// The orange level bar from the CR100's volume popup: every quantity on the page uses it.
+const levelBar = (lit, total, label) => `<span class="level" role="img" aria-label="${escapeHtml(label)}">${
+  Array.from({ length: total }, (_, i) => `<i class="${i < lit ? 'on' : ''}"></i>`).join('')}</span>`;
+const ARROW = '<svg class="arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CHEVRON = '<svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// A round icon button; the label is for screen readers and the tooltip.
+const mini = (icon, label, extra = '', attrs = '') =>
+  `<button type="button" class="mini ${extra}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${attrs}>${ICONS[icon]}</button>`;
+
+// Edit a name in place: the text node becomes a field; Enter or leaving saves, Escape cancels.
+// onDone receives the trimmed new value ('' when cleared), or null when cancelled or unchanged.
+function editInPlace(target, { value, label, maxlength = 80, className = '' }, onDone) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = `rename-input ${className}`.trim();
+  input.maxLength = maxlength;
+  input.value = value;
+  input.setAttribute('aria-label', label);
+  target.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  const finish = (keep) => {
+    if (done) return;
+    done = true;
+    const next = input.value.trim();
+    onDone(keep && next !== value ? next : null);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+    if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+  return input;
+}
 
 // Status badges: the CR100's signal-bar glyph for controllers, a house for Home Assistant.
 function bars(lit, colour = '#a6d84a') {
@@ -258,8 +305,8 @@ views.speakers = {
       const shown = rows.filter((r) => r.shown).sort(byName), hidden = rows.filter((r) => !r.shown).sort(byName);
       main.innerHTML = '';
       main.append(el(`<p class="lede">${data.source === 'sonos'
-        ? 'Available Sonos speakers on this network appear automatically. When you switch networks, the controller follows the speakers found there. Hidden speakers stay hidden when they return; names and icons are remembered.'
-        : 'These are the rooms the controller lists, sorted by name as it always sorts them. Switch a speaker off to hide it from the controller; nothing changes on the speaker itself.'}</p>`));
+        ? 'Sonos speakers on this network appear here by themselves, sorted by name as the controller sorts them. Hidden speakers stay hidden when they return.'
+        : 'The rooms the controller lists, sorted by name as it sorts them. Hiding one changes nothing on the speaker.'}</p>`));
       if (data.speaker_health && !data.speaker_health.healthy) {
         main.append(el(`<div class="popup" role="status"><h3>Controller speakers need attention</h3><p>${escapeHtml(data.speaker_health.message)}</p><p>Saved selection: ${escapeHtml(data.speaker_health.selected.join(', ') || 'None')}. Save your changes below to update it.</p></div>`));
       }
@@ -275,9 +322,8 @@ views.speakers = {
       hidden.forEach((row) => main.append(line(row)));
 
       const sonos = shown.filter((r) => r.sonos);
-      const panel = el(`<div class="popup"><h3>Music library</h3>
-        <p>Favourites, Sonos playlists and your music library are the same on every Sonos speaker. Pick which one the controller reads them from${data.source === 'sonos' ? '.' : '; it matters for speakers that are not Sonos.'}</p>
-        <label class="field"><span>Read the Music menu from</span><select id="library"></select></label></div>`);
+      const panel = el(`<div class="popup"><label class="field flush"><span>Read Favourites, playlists and the library from</span><select id="library"></select>
+        <span class="hint">They are the same on every Sonos speaker${data.source === 'sonos' ? '' : '; pick one so speakers that are not Sonos get them too'}.</span></label></div>`);
       const select = $('#library', panel);
       select.append(new Option('Each speaker itself', ''));
       sonos.forEach((r) => select.append(new Option(r.name, r.key)));
@@ -312,7 +358,7 @@ views.speakers = {
       const tools = $('.tools', node);
       $('button.room-icon', node)?.addEventListener('click', (event) => pickIcon(row, event.currentTarget));
       if (row.shown) {
-        const rename = el(`<button type="button" class="mini" title="Rename" aria-label="Rename ${escapeHtml(row.name)}">${ICONS.pencil}</button>`);
+        const rename = el(mini('pencil', `Rename ${row.name}`));
         rename.addEventListener('click', () => startRename(node, row));
         tools.append(rename);
       }
@@ -356,26 +402,15 @@ views.speakers = {
     };
 
     const startRename = (node, row) => {
-      const tile = $('.tile', node);
-      const input = el(`<input type="text" maxlength="30" aria-label="Room name for ${escapeHtml(row.source_name || row.name)}">`);
-      input.value = row.name;
-      $('.name', tile).replaceWith(input);
-      input.focus(); input.select();
-      const finish = (keep) => {
-        if (keep) {
-          const name = input.value.trim();
+      editInPlace($('.tile .name', node), { value: row.name, label: `Room name for ${row.source_name || row.name}`, maxlength: 30 }, (name) => {
+        if (name !== null) {
           row.custom_name = !name || name === row.source_name ? '' : name;
           row.name = row.custom_name || row.source_name || row.name;
           if (!row.custom_icon) row.icon = guessIcon(row.name);
         }
         render();
         focusRow(row, '[aria-label^="Rename"]');
-      };
-      input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') { event.preventDefault(); finish(true); }
-        if (event.key === 'Escape') finish(false);
       });
-      input.addEventListener('blur', () => finish(true), { once: true });
     };
 
     const changed = () => {
@@ -428,36 +463,61 @@ const EVENT_TEXT = {
   disassoc: 'Disconnected',
   deauth: 'Disconnected',
 };
+// The colour each link event takes on the timeline: the same dots as the status line.
+const EVENT_TONE = {
+  associated: 'good', resumed: 'good', 'link-heard': 'good', 'radio-reopened': 'good',
+  'link-silent': 'idle', 'cr100-searching': 'wait', 'radio-lost': 'alert', disassoc: 'bad', deauth: 'bad',
+};
+
+const shortDuration = (seconds) => {
+  if (seconds == null) return 'Not known yet';
+  const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60);
+  if (days) return `${days} d ${hours} h`;
+  if (hours) return `${hours} h ${minutes} min`;
+  return `${minutes} min`;
+};
+const shortClock = (epoch) => new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 views.controllers = {
   title: 'Controllers',
   async open(main) {
     const firmwarePanels = new Map();
+    const openLogs = new Set();
+    let renaming = false;
+
     const updateDevicesStatus = (data) => {
       const node = $('.smart-device-status', main);
       if (!node) return;
       const status = data.smart_devices;
       node.hidden = !status;
-      if (!status) { node.textContent = ''; return; }
-      const rooms = (status.rooms || []).map((room) => `${room.room}: ${room.area || 'No area'}`).join('; ');
-      node.textContent = `Home Assistant devices ${status.connected ? 'connected' : 'not connected'}${status.enabled === false ? ' (disabled)' : ''} · ${status.areas || 0} areas · ${status.devices || 0} devices${rooms ? ' · ' + rooms : ''}.`;
+      if (!status) { node.replaceChildren(); return; }
+      const live = status.connected && status.enabled !== false;
+      const meta = [`${status.areas || 0} areas`, `${status.devices || 0} devices`];
+      if (status.enabled === false) meta.push('Turned off');
+      else if (!status.connected) meta.push('Not connected');
+      node.innerHTML = `<div class="strip-head"><span class="dot ${live ? 'good' : 'bad'}"></span>
+          <span class="strip-title">Home Assistant devices</span><span class="meta">${escapeHtml(meta.join(' · '))}</span></div>
+        ${(status.rooms || []).length ? `<ul class="area-map" aria-label="Room to area">${status.rooms.map((room) =>
+          `<li><span>${escapeHtml(room.room)}</span>${ARROW}<span class="${room.area ? '' : 'muted'}">${escapeHtml(room.area || 'No area')}</span></li>`).join('')}</ul>` : ''}`;
     };
+
     const updateBridgeStatus = (data) => {
       const node = $('.bridge-update-status', main);
       if (!node) return;
       const state = data.updates?.bridge || {};
-      $('.bridge-update-message', node).textContent = state.message || 'Bridge updates currently run a demonstration through Online Updates on the controller. Automatic bridge installation is not available yet.';
-      $('.hint', node).textContent = state.status
-        ? `Status: ${state.status}${state.phase ? ` · ${state.phase}` : ''}${Number.isFinite(state.percent) ? ` · ${state.percent}%` : ''}`
-        : 'A staged controller install takes priority over the bridge update demonstration.';
+      $('.bridge-update-message', node).textContent = state.message || 'Automatic bridge updates are not available yet. Online Updates on the controller runs a demonstration.';
+      const meta = state.status
+        ? [state.status, state.phase, Number.isFinite(state.percent) ? `${state.percent}%` : ''].filter(Boolean).join(' · ')
+        : 'A staged controller update comes first';
+      $('.meta', node).textContent = meta.charAt(0).toUpperCase() + meta.slice(1);
       const error = $('.updates-refresh-error', node);
       error.textContent = data.updates_error || state.last_error || '';
-      error.hidden = !error.textContent;
     };
+
     const render = (data) => {
       main.innerHTML = '';
-      main.append(el(`<p class="lede">CR100 controllers paired with this bridge. A controller can sleep while idle. Resume reconnect attempts before using a controller whose attempts are paused.</p>`));
-      main.append(el('<p class="hint smart-device-status" hidden></p>'));
+      main.append(el(`<p class="lede">CR100s paired with this bridge. A controller sleeps while idle; that is normal.</p>`));
+      main.append(el('<section class="panel smart-device-status" hidden></section>'));
       updateDevicesStatus(data);
       if (!data.radio_running) {
         main.append(el(`<div class="popup"><h3>The bridge radio is not running</h3><p>Controllers cannot connect until the bridge is started on the Pi.</p></div>`));
@@ -466,71 +526,104 @@ views.controllers = {
         main.append(el(`<div class="popup" role="status"><h3>Controller speakers need attention</h3><p>${escapeHtml(data.speaker_health.message)}</p><p>A working radio connection does not mean the controller’s speakers are ready.</p></div>`));
       }
       data.controllers.forEach((c) => main.append(card(c)));
-      if (!data.controllers.length) main.append(el(`<p class="empty">No controller is paired yet.</p>`));
-      main.append(el(`<h2 class="group-title">Bridge updates</h2>`), el(`<div class="popup bridge-update-status" role="status">
-        <p class="bridge-update-message"></p><p class="hint"></p><p class="updates-refresh-error error" hidden></p>
-      </div>`));
+      if (!data.controllers.length) main.append(el(`<p class="empty">No controller is paired yet. Pair one below.</p>`));
+
+      main.append(el(`<h2 class="group-title">Bridge updates</h2>`), el(`<section class="panel bridge-update-status" role="status">
+        <div class="strip-head"><span class="dot idle"></span><span class="bridge-update-message"></span><span class="meta"></span></div>
+        <p class="updates-refresh-error error"></p></section>`));
       updateBridgeStatus(data);
-      main.append(el(`<h2 class="group-title">Pairing</h2>`), el(`<div class="popup">
-        <dl class="facts inset">
-          <dt>Household</dt><dd>${escapeHtml(data.household || 'Not paired')}</dd>
-          <dt>Radio channel</dt><dd>${escapeHtml(data.channel ?? '?')}</dd>
-        </dl>
-        <p class="gap-above">${data.pairing?.running ? 'Waiting for a CR100. Put the controller in its add-to-household setup mode within three minutes.' :
-          data.pairing?.failed ? 'The pairing attempt failed. Check the Pi’s service logs, then try again.' :
-          'Add a CR100 to this household. Existing controllers and their settings are kept. The bridge pauses during pairing and reconnects afterward.'}</p>
-        <button type="button" class="inline-button" id="pair-controller" ${!data.pairing?.available || data.pairing?.running ? 'disabled' : ''}>${data.pairing?.running ? 'Pairing…' : data.controllers.length ? 'Add controller' : 'Pair controller'}</button>
-      </div>`));
+
+      const pairing = data.pairing || {};
+      const pairState = pairing.running ? ['wait', 'Waiting for a CR100. Put it in add-to-household setup mode within 3 minutes.']
+        : pairing.failed ? ['alert', 'Pairing failed. Check the Pi’s service logs, then try again.']
+        : ['idle', 'Adds a CR100 to this household. Paired controllers keep their settings; the bridge pauses while pairing.'];
+      main.append(el(`<h2 class="group-title">Pairing</h2>`), el(`<section class="popup pairing">
+        <dl class="meta-grid"><div><dt>Household</dt><dd>${escapeHtml(data.household || 'Not paired')}</dd></div>
+          <div><dt>Radio channel</dt><dd>${escapeHtml(data.channel ?? 'Unknown')}</dd></div></dl>
+        <div class="pair-row"><span class="dot ${pairState[0]}"></span><p>${pairState[1]}</p>
+          <button type="button" class="inline-button" id="pair-controller" ${!pairing.available || pairing.running ? 'disabled' : ''}>${pairing.running ? 'Pairing…' : data.controllers.length ? 'Add controller' : 'Pair controller'}</button></div>
+      </section>`));
       $('#pair-controller', main).addEventListener('click', async (event) => {
         event.currentTarget.disabled = true;
         try {
           await api('POST', '/api/controllers/pair', {});
           toast('Pairing started', 'Put the CR100 in its add-to-household setup mode.');
-          await refresh();
         } catch (error) {
           toast('Pairing could not start', error.message, true);
-          await refresh();
         }
+        await refresh();
       });
+    };
+
+    // A strip of the controller's recent link events, oldest on the left and now on the right.
+    const linkStrip = (c) => {
+      const events = (c.events || []).filter((e) => Number.isFinite(e.time));
+      if (!events.length) return null;
+      const now = Date.now() / 1000;
+      const start = Math.min(...events.map((e) => e.time));
+      const span = Math.max(60, now - start);
+      const latest = events[events.length - 1];
+      const text = (e) => EVENT_TEXT[e.event] || e.event;
+      const node = el(`<figure class="link-strip">
+        <figcaption><span class="strip-title">Link</span><span class="meta">Latest ${escapeHtml(shortClock(latest.time))}: ${escapeHtml(text(latest))}</span></figcaption>
+        <div class="track" role="img" aria-label="${events.length} link events since ${escapeHtml(shortClock(start))}. Latest: ${escapeHtml(text(latest))}"></div>
+        <div class="ticks" aria-hidden="true"><span>${escapeHtml(shortClock(start))}</span><span>Now</span></div>
+        <details class="event-log"${openLogs.has(c.mac) ? ' open' : ''}><summary>${CHEVRON}All ${events.length} events</summary>
+          <ul class="timeline">${events.slice().reverse().map((e) =>
+            `<li><span class="dot ${EVENT_TONE[e.event] || 'bad'}"></span><time>${clock(e.time)}</time><span>${escapeHtml(text(e))}</span></li>`).join('')}</ul></details>
+      </figure>`);
+      const track = el('<span class="rail"></span>');
+      $('.track', node).append(track);
+      for (const e of events) {
+        const mark = el(`<span class="mark ${EVENT_TONE[e.event] || 'bad'}" title="${escapeHtml(`${clock(e.time)} · ${text(e)}`)}"></span>`);
+        mark.style.left = `${Math.min(100, Math.max(0, (e.time - start) / span * 100))}%`;
+        track.append(mark);
+      }
+      $('.event-log', node).addEventListener('toggle', (event) => {
+        if (event.currentTarget.open) openLogs.add(c.mac); else openLogs.delete(c.mac);
+      });
+      return node;
     };
 
     const card = (c) => {
       const dot = { connected: 'good', dozing: 'idle', searching: 'wait' }[c.status] || 'bad';
-      const signal = c.signal != null && ['connected', 'dozing'].includes(c.status)
-        ? `<span class="level" role="img" aria-label="Signal ${c.signal} of 4">${[0, 1, 2, 3].map((i) => `<i class="${i < c.signal ? 'on' : ''}"></i>`).join('')}</span>`
-        : 'Not available while it is asleep';
-      const facts = [
-        ['Last heard', ago(c.last_heard_s)],
-        ['Signal', signal],
-        ['Link drops in the last hour', c.drops_last_hour ?? 'Not known yet'],
-        ['Address', escapeHtml(c.ip || 'Not known yet')],
-        ['Firmware', escapeHtml(c.firmware || 'Not known yet')],
-        ['Running for', c.uptime_s != null ? duration(c.uptime_s) : 'Not known yet'],
-        ['Wi-Fi address', escapeHtml(c.mac)],
-      ];
+      const awake = ['connected', 'dozing'].includes(c.status);
+      const paused = c.auto_reconnect === false;
+      const signal = c.signal != null && awake
+        ? levelBar(c.signal, 4, `Signal ${c.signal} of 4`)
+        : '<span class="value muted">Asleep</span>';
       const node = el(`<section class="controller">
         <div class="line">
           <div class="tile">${ICONS.controller}<span class="name">${escapeHtml(c.name)}</span></div>
-          <div class="row"><div class="what"><div class="main"><span class="dot ${dot}"></span>${escapeHtml(c.status_label)}</div>
-            <div class="sub">${c.details_at ? `Details from ${clock(c.details_at)}` : 'Details appear once it is connected'}</div></div>
-            <div class="tools"><button type="button" class="mini rename-controller" aria-label="Rename ${escapeHtml(c.name)}">${ICONS.pencil}</button></div></div>
+          <div class="row"><div class="what"><div class="main"><span class="dot ${dot}"></span>${escapeHtml(c.status_label)}${paused ? '<span class="chip warn">Reconnect off</span>' : ''}</div>
+            <div class="sub">Heard ${escapeHtml(ago(c.last_heard_s))}</div></div>
+            <div class="tools"><button type="button" class="mini rename-controller" title="Rename" aria-label="Rename ${escapeHtml(c.name)}">${ICONS.pencil}</button></div></div>
         </div>
-        <div class="popup">
-          <dl class="facts inset">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
-          <div class="controller-component-actions"><button type="button" class="inline-button quiet choose-components">Choose components</button>
-            <span>${c.visible_components == null ? 'Uses household selection' : `${c.visible_components.length} component${c.visible_components.length === 1 ? '' : 's'} selected`}</span></div>
-          <div class="controller-component-actions"><button type="button" class="inline-button quiet controller-reconnect">${c.auto_reconnect === false ? 'Resume reconnect attempts' : 'Pause reconnect attempts'}</button>
-            <span>${c.auto_reconnect === false ? 'Reconnect attempts paused' : 'Reconnect attempts enabled'}</span></div>
-          <p class="hint">Reconnect attempts can stay enabled while this controller is switched off. Pause only for troubleshooting; pairing and chosen components are kept.</p>
-          ${c.events && c.events.length ? `<h3 class="gap-above">Recent link events</h3><ul class="timeline inset">${c.events.slice().reverse().map((e) =>
-            `<li><time>${clock(e.time)}</time><span>${escapeHtml(EVENT_TEXT[e.event] || e.event)}</span></li>`).join('')}</ul>` : ''}
+        <div class="popup controller-body">
+          <div class="vitals">
+            <div class="vital"><span class="label">Signal</span>${signal}</div>
+            <div class="vital"><span class="label">Drops, last hour</span><span class="value">${escapeHtml(c.drops_last_hour ?? '–')}</span></div>
+            <div class="vital"><span class="label">Running for</span><span class="value">${escapeHtml(c.uptime_s != null ? shortDuration(c.uptime_s) : '–')}</span></div>
+          </div>
+          <dl class="meta-grid">
+            <div><dt>Address</dt><dd>${escapeHtml(c.ip || 'Not known yet')}</dd></div>
+            <div><dt>Wi‑Fi address</dt><dd>${escapeHtml(c.mac)}</dd></div>
+            <div><dt>Details from</dt><dd>${c.details_at ? escapeHtml(clock(c.details_at)) : 'Once connected'}</dd></div>
+          </dl>
+          <div class="settings-list">
+            <div class="setting"><span class="what"><span class="main">Components</span>
+              <span class="sub">${c.visible_components == null ? 'Uses the household selection' : `${c.visible_components.length} chosen for this controller`}</span></span>
+              <button type="button" class="inline-button quiet choose-components">Choose</button></div>
+            <label class="setting check"><span class="what"><span class="main">Reconnect automatically</span>
+              <span class="sub">Leave on, even while it is switched off. Turn off only to troubleshoot.</span></span>
+              <input type="checkbox" class="controller-reconnect" ${paused ? '' : 'checked'}><span class="box">${ICONS.tick}</span></label>
+          </div>
         </div></section>`);
-      $('.rename-controller', node).addEventListener('click', async () => {
-        const name = prompt('Name for this controller', c.name);
-        if (name == null || !name.trim() || name.trim() === c.name) return;
-        try { await api('PUT', `/api/controllers/${c.mac}`, { name: name.trim() }); toast('Renamed', `This controller is now ${name.trim()}.`); refresh(); }
-        catch (error) { toast('Not renamed', error.message, true); }
-      });
+      node.dataset.mac = c.mac;
+      const strip = linkStrip(c);
+      if (strip) $('.vitals', node).after(strip);
+
+      $('.rename-controller', node).addEventListener('click', () => startRename(node, c));
       $('.choose-components', node).addEventListener('click', async (event) => {
         const trigger = event.currentTarget;
         trigger.disabled = true;
@@ -538,46 +631,75 @@ views.controllers = {
         catch (error) { toast('Components unavailable', error.message, true); }
         finally { trigger.disabled = false; }
       });
-      $('.controller-reconnect', node).addEventListener('click', async (event) => {
-        const trigger = event.currentTarget;
-        trigger.disabled = true;
+      $('.controller-reconnect', node).addEventListener('change', async (event) => {
+        const input = event.currentTarget;
+        input.disabled = true;
         try {
-          const result = await api('PUT', `/api/controllers/${c.mac}/reconnect`, { enabled: c.auto_reconnect === false });
-          toast(result.auto_reconnect ? 'Reconnect attempts resumed' : 'Reconnect attempts paused', result.message);
+          const result = await api('PUT', `/api/controllers/${c.mac}/reconnect`, { enabled: input.checked });
+          toast(result.auto_reconnect ? 'Reconnecting automatically' : 'Reconnect turned off', result.message);
           await refresh();
-        } catch (error) { toast('Reconnect setting not saved', error.message, true); }
-        finally { trigger.disabled = false; }
+        } catch (error) {
+          input.checked = !input.checked;
+          toast('Reconnect setting not saved', error.message, true);
+        } finally { input.disabled = false; }
       });
       if (!firmwarePanels.has(c.mac)) firmwarePanels.set(c.mac, firmwarePanel(c));
       const firmware = firmwarePanels.get(c.mac);
-      $('.popup', node).append(firmware.node);
+      $('.controller-body', node).append(firmware.node);
       firmware.update(c.update, c.firmware);
       return node;
     };
 
+    // Rename in place, as the Speakers page does, instead of a browser prompt.
+    const startRename = (node, c) => {
+      renaming = true;
+      editInPlace($('.tile .name', node), { value: c.name, label: `Name for ${c.name}`, maxlength: 40 }, async (value) => {
+        if (value) {
+          try { await api('PUT', `/api/controllers/${c.mac}`, { name: value }); toast('Renamed', `This controller is now ${value}.`); }
+          catch (error) { toast('Not renamed', error.message, true); }
+        }
+        renaming = false;
+        await refresh();
+        main.querySelector(`.controller[data-mac="${c.mac}"] .rename-controller`)?.focus();
+      });
+    };
+
+    // Upload → Install → Update on the controller → Done, with the current step lit.
+    const FIRMWARE_STEPS = ['Upload a file', 'Install', 'Update on the controller', 'Done'];
+    const firmwareStep = (state) => ({ staged: 1, ready: 1, armed: 2, downloading: 2, installing: 2, started: 2,
+      completed: 4, complete: 4 }[state] ?? 0);
+
     const firmwarePanel = (controller) => {
-      const node = el(`<form class="controller-firmware"><h3>Controller firmware</h3>
-        <dl class="facts inset firmware-facts"></dl>
-        <label class="field"><span>Firmware file (.upd)</span><input type="file" class="firmware-file" accept=".upd,application/octet-stream"></label>
-        <p class="hint">Upload a CR100 firmware file, then choose Install. The target version is read from the firmware package.</p>
-        <p class="hint firmware-version-warning" role="status" hidden></p>
-        <div class="firmware-signature" hidden><p class="hint firmware-signature-warning" role="alert"></p>
-          <label class="check"><input type="checkbox" class="firmware-continue"><span class="box">${ICONS.tick}</span><span>Continue anyway — I trust this firmware</span></label></div>
-        <label class="check"><input type="checkbox" class="firmware-force"><span class="box">${ICONS.tick}</span><span>Force update prompt</span></label>
-        <p class="hint firmware-guidance">Install from Online Updates on the controller.</p>
-        <div class="firmware-actions"><button type="submit" class="inline-button quiet firmware-upload" disabled>Upload</button>
-          <button type="button" class="inline-button firmware-install" disabled>Install</button>
-          <button type="button" class="inline-button quiet firmware-cancel" disabled>Cancel staged update</button></div>
-        <progress class="firmware-progress" max="100" value="0" hidden aria-label="Firmware upload progress"></progress>
-        <p class="firmware-status" role="status" aria-live="polite"></p>
-        <p class="firmware-error error" role="alert"></p>
-      </form>`);
+      const node = el(`<details class="controller-firmware"><summary>${CHEVRON}<span class="strip-title">Firmware</span><span class="meta firmware-summary"></span></summary>
+        <form class="firmware-form">
+          <div class="versions"><span class="ver firmware-current"></span><span class="firmware-target-wrap">${ARROW}<span class="ver target firmware-target"></span></span></div>
+          <ol class="stepper">${FIRMWARE_STEPS.map((label, i) => `<li><span class="num">${i + 1}</span><span>${label}</span></li>`).join('')}</ol>
+          <div class="file-pick"><label><input type="file" class="firmware-file" accept=".upd,application/octet-stream"><span class="inline-button quiet">Choose .upd file</span></label>
+            <span class="file-name">No file chosen</span></div>
+          <p class="hint firmware-version-warning" role="status" hidden></p>
+          <div class="firmware-signature" hidden><p class="hint firmware-signature-warning" role="alert"></p>
+            <label class="check"><input type="checkbox" class="firmware-continue"><span class="box">${ICONS.tick}</span><span>Continue anyway — I trust this firmware</span></label></div>
+          <label class="check"><input type="checkbox" class="firmware-force"><span class="box">${ICONS.tick}</span><span>Prompt the controller to update</span></label>
+          <p class="hint firmware-guidance"></p>
+          <div class="firmware-actions"><button type="submit" class="inline-button quiet firmware-upload" disabled>Upload</button>
+            <button type="button" class="inline-button firmware-install" disabled>Install</button>
+            <button type="button" class="inline-button quiet firmware-cancel" disabled>Cancel staged update</button></div>
+          <div class="firmware-progress" hidden><span class="level" role="progressbar" aria-label="Firmware upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">${'<i></i>'.repeat(10)}</span></div>
+          <p class="firmware-status" role="status" aria-live="polite"></p>
+          <p class="firmware-error error" role="alert"></p>
+        </form></details>`);
+      const form = $('form', node);
       const input = $('.firmware-file', node), force = $('.firmware-force', node);
       const proceed = $('.firmware-continue', node);
       let reviewedSha256;
       const upload = $('.firmware-upload', node), install = $('.firmware-install', node), cancel = $('.firmware-cancel', node);
       const progress = $('.firmware-progress', node), status = $('.firmware-status', node), error = $('.firmware-error', node);
-      let firmware = {}, currentVersion = controller.firmware, busy = false, notice = '';
+      const setProgress = (percent) => {
+        const bar = $('.level', progress);
+        bar.setAttribute('aria-valuenow', String(percent));
+        bar.querySelectorAll('i').forEach((segment, i) => segment.classList.toggle('on', i < Math.round(percent / 10)));
+      };
+      let firmware = {}, currentVersion = controller.firmware, busy = false, notice = '', opened = false;
       const endpoint = `/api/controllers/${controller.mac}/firmware`;
       const update = function (fresh, current) {
         if (fresh) firmware = fresh;
@@ -588,10 +710,10 @@ views.controllers = {
         $('.firmware-signature-warning', node).textContent = firmware.signature_warning || '';
         proceed.disabled = busy || Boolean(firmware.armed);
         const state = firmware.status || 'none';
-        const labels = { none: 'No firmware staged', staged: 'Uploaded and ready', ready: 'Uploaded and ready',
-          armed: 'Ready to install from the controller', downloading: 'Downloading to the controller',
-          installing: 'Controller installation started', started: 'Controller installation started',
-          completed: 'Controller reported the target version', complete: 'Controller reported the target version',
+        const labels = { none: 'No update staged', staged: 'Uploaded, ready to install', ready: 'Uploaded, ready to install',
+          armed: 'Ready on the controller', downloading: 'Downloading to the controller',
+          installing: 'Installing on the controller', started: 'Installing on the controller',
+          completed: 'Updated', complete: 'Updated',
           failed: 'Update failed', expired: 'Staged update expired', cancelled: 'Staged update cancelled' };
         const inProgress = ['downloading', 'installing', 'started'].includes(state);
         const terminal = ['none', 'completed', 'complete', 'cancelled', 'expired', 'failed'].includes(state);
@@ -601,15 +723,26 @@ views.controllers = {
         const versionWarning = $('.firmware-version-warning', node);
         versionWarning.hidden = !sameVersion;
         versionWarning.textContent = sameVersion
-          ? 'This controller already runs the selected version. The stock update flow may skip reinstalling it. You can still choose Install.' : '';
+          ? 'This controller already runs this version. The stock updater may skip it; you can still install.' : '';
         const forceAllowed = reportedVersion === '4.3' || /^24\.1-\d+$/.test(reportedVersion);
         const internalVersion = /^(\d+)\.(\d+)-\d+$/.exec(reportedVersion);
         const retirementUI = reportedVersion === '4.3.2' || (internalVersion &&
           (Number(internalVersion[1]) > 25 || (Number(internalVersion[1]) === 25 && Number(internalVersion[2]) >= 2)));
         if (!forceAllowed) force.checked = false;
-        $('.firmware-facts', node).innerHTML = `<dt>Current version</dt><dd>${escapeHtml(reportedVersion || 'Not known yet')}</dd>
-          <dt>Target version</dt><dd>${escapeHtml(firmware.version || 'None')}</dd>
-          <dt>Update status</dt><dd>${escapeHtml(labels[state] || state)}</dd>`;
+
+        // Summary line, versions and the step the update is on.
+        $('.firmware-summary', node).textContent = `${reportedVersion || 'Version not known yet'} · ${labels[state] || state}`;
+        $('.firmware-current', node).textContent = reportedVersion || 'Not known yet';
+        $('.firmware-target-wrap', node).hidden = !firmware.version;
+        $('.firmware-target', node).textContent = firmware.version || '';
+        const step = firmwareStep(state), failed = ['failed', 'expired', 'cancelled'].includes(state);
+        node.querySelectorAll('.stepper li').forEach((item, i) => {
+          item.className = i < step ? 'done' : i === step ? (failed && i === 0 ? 'now bad' : 'now') : '';
+          if (i === step) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
+        });
+        // Open the panel by itself once while an update is under way; after that the person decides.
+        if (!opened && step > 0 && step < 4) { node.open = true; opened = true; }
+
         if (!busy) {
           const forceActive = firmware.force_active ?? firmware.force_prompt;
           status.textContent = firmware.armed ? (forceActive && forceAllowed
@@ -619,17 +752,19 @@ views.controllers = {
               : 'Ready. Open System Settings → Online Updates on the controller to install.')
             : firmware.last_error || notice;
         }
+        $('.file-name', node).textContent = input.files.length ? input.files[0].name : 'No file chosen';
         input.disabled = busy || inProgress;
         force.disabled = busy || inProgress || firmware.armed || !forceAllowed;
         upload.disabled = busy || inProgress || !input.files.length;
         install.disabled = busy || inProgress || terminal || Boolean(firmware.armed) || !firmware.version || (unverified && !proceed.checked);
         cancel.disabled = busy || inProgress || terminal;
+        cancel.hidden = terminal;
         $('.firmware-guidance', node).textContent = retirementUI
-          ? 'Firmware 4.3.2 must use System Settings → Online Updates; its compatibility notice hides the updater.'
+          ? 'Firmware 4.3.2 must use System Settings → Online Updates; its compatibility notice hides the update prompt.'
           : !forceAllowed
-            ? 'Force prompts require known firmware 4.3. Install from Online Updates on the controller.'
+            ? 'Update prompts need firmware 4.3. Install from Online Updates on the controller.'
             : force.checked
-              ? 'Ask this controller to update when it reconnects. The controller’s own firmware checks still apply.'
+              ? 'The controller asks to update when it reconnects. Its own firmware checks still apply.'
               : 'Install from Online Updates on the controller.';
       };
       const perform = async (message, operation) => {
@@ -649,17 +784,17 @@ views.controllers = {
       input.addEventListener('change', () => { error.textContent = ''; update(); });
       force.addEventListener('change', () => update());
       proceed.addEventListener('change', () => update());
-      node.addEventListener('submit', async (event) => {
+      form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const file = input.files[0];
         if (!file || busy) return;
         if (file.size > 16 * 1024 * 1024) { error.textContent = 'Firmware files must be at most 16 MiB.'; return; }
-        progress.hidden = false; progress.value = 0;
+        progress.hidden = false; setProgress(0);
         const ok = await perform('Uploading and verifying firmware…', () => uploadControllerFirmware(controller.mac, file, (percent) => {
-          progress.value = percent;
+          setProgress(percent);
           status.textContent = percent === 100 ? 'Verifying the firmware signature and version…' : `Uploading firmware… ${percent}%`;
         }));
-        if (ok) { input.value = ''; force.checked = false; notice = `Firmware ${firmware.version} is ready. Choose Install to stage it for this controller.`; update(); }
+        if (ok) { input.value = ''; force.checked = false; notice = `Firmware ${firmware.version} is uploaded. Choose Install to stage it for this controller.`; update(); }
       });
       install.addEventListener('click', () => perform('Preparing the controller update…', () => api('POST', endpoint + '/install', { force: force.checked, sha256: firmware.sha256, allow_unverified: proceed.checked })));
       cancel.addEventListener('click', async () => {
@@ -726,7 +861,7 @@ views.controllers = {
       if (current !== 'controllers') return;
       for (const controller of data.controllers) controller.update = data.updates
         ? data.updates.controllers?.[controller.mac] || { status: 'none' } : undefined;
-      if (passive && (document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
+      if (passive && (renaming || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
         for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware);
         updateBridgeStatus(data);
         updateDevicesStatus(data);
@@ -741,46 +876,97 @@ views.controllers = {
 };
 
 // Spotify ----------------------------------------------------------------------------------
-async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}) {
-  const box = el(`<section class="popup spotify-menu-editor"><h3>Menu and feature locks</h3>
-    <p>Each controller has its own Spotify menu. Locked entries stay visible and show an administrator message when opened. A lock includes everything inside that entry; the same music can still be reached through another unlocked entry.</p>
-    <p class="hint">Search stays first. Its name and position are fixed by the controller; its lock can be changed here.</p>
+// A drawing of the CR100's 320x240 browse screen, as the controller shows a service's root:
+// grey status bar with the room, the service title over a rule, bold rows with a pale bar on
+// the highlighted one, and the soft keys (blank / Add to Queue for playable items / View Queue).
+function cr100Screen() {
+  const node = el(`<figure class="cr100-preview">
+    <div class="cr100-device">
+      <div class="cr100-screen" aria-hidden="true">
+        <div class="cr100-status"><span class="cr100-room"></span>${bars(4)}</div>
+        <div class="cr100-title"><span class="cr100-play"></span><span class="cr100-service"></span></div>
+        <ul class="cr100-list"></ul>
+        <div class="cr100-keys"><span></span><span class="cr100-middle"></span><span>View Queue</span></div>
+      </div>
+      <div class="cr100-wheel" aria-hidden="true"><span></span></div>
+    </div>
+    <figcaption class="hint">Preview of the controller. Locks show only when an entry is opened.</figcaption>
+  </figure>`);
+  const list = $('.cr100-list', node);
+  const update = ({ room, service, items, selected }) => {
+    $('.cr100-room', node).textContent = room || 'Controller';
+    $('.cr100-service', node).textContent = service || 'Spotify';
+    list.replaceChildren();
+    items.forEach((item, index) => {
+      const playable = item.kind === 'spotify';
+      const track = playable && /(:|\/)track(:|\/)/.test(item.target || '');
+      const row = el(`<li class="${index === selected ? 'is-selected' : ''}">${track ? '<span class="cr100-note">♪</span>' : ''}<span></span>${item.locked ? ICONS.lock : ''}</li>`);
+      row.children[track ? 1 : 0].textContent = item.label || 'Untitled';
+      list.append(row);
+    });
+    const current = items[selected];
+    $('.cr100-middle', node).textContent = current?.kind === 'spotify' ? 'Add to Queue' : '';
+    // Scroll the little screen only; scrollIntoView would move the whole page.
+    const row = list.querySelector('.is-selected');
+    if (row && row.offsetTop < list.scrollTop) list.scrollTop = row.offsetTop;
+    else if (row && row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = row.offsetTop + row.offsetHeight - list.clientHeight;
+  };
+  const describe = (items) => `Preview: ${items.map((item) => `${item.label}${item.locked ? ' (locked)' : ''}`).join(', ')}`;
+  return { node, update, describe };
+}
+
+async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}, serviceName = () => 'Spotify') {
+  const box = el(`<section class="popup spotify-menu-editor">
     <label class="field"><span>Controller</span><select class="sp-controller" aria-label="Controller to edit"></select></label>
-    <div class="sp-menu-list" aria-label="Spotify menu entries"></div>
-    <p class="hint">Changes block new requests after saving. Lists already cached on a controller may remain until its next refresh.</p>
-    <div class="spotify-menu-actions"><button type="button" class="inline-button sp-menu-save" disabled>Save this menu</button><span class="sp-menu-status" role="status"></span></div>
-    <div class="sp-add-controls"><h3>Add a shortcut</h3>
-      <label class="field"><span>Spotify playlist</span><select class="sp-playlist" aria-label="Playlist to pin"><option value="">Loading playlists…</option></select></label>
-      <button type="button" class="inline-button quiet sp-add-playlist">Add playlist</button>
-      <label class="field gap-above"><span>Or paste a Spotify link or URI</span><input class="sp-link" type="text" placeholder="https://open.spotify.com/album/…" autocomplete="off" spellcheck="false"><span class="hint">Playlists, albums, singles, and tracks can be pinned. Singles use Spotify’s album links.</span></label>
-      <button type="button" class="inline-button quiet sp-add-link">Look up and add</button>
-      <p class="error sp-add-error" role="alert"></p>
-    </div></section>`);
-  const folders = el(`<section class="popup spotify-folder-panel"><h3>Spotify folders</h3>
-    <p>Pin a real Spotify folder to mirror its playlists and nested folders on this controller. Names and ordering inside the folder follow Spotify; edits here only change your CR100 menu.</p>
-    <p class="sp-folder-status" role="status">Loading folder status…</p>
+    <p class="hint">Each controller has its own menu. A locked entry stays visible and shows an administrator message when opened; the lock covers everything inside it.</p>
+    <div class="menu-workbench">
+      <div class="menu-column">
+        <ol class="sp-menu-list" aria-label="Spotify menu entries"></ol>
+        <div class="spotify-menu-actions"><button type="button" class="inline-button sp-menu-save" disabled>Save this menu</button><span class="sp-menu-status" role="status"></span></div>
+        <div class="sp-add-controls"><h3>Add a shortcut</h3>
+          <div class="inline-field"><label class="field"><span>Playlist</span><select class="sp-playlist" aria-label="Playlist to pin"><option value="">Loading playlists…</option></select></label>
+            <button type="button" class="inline-button quiet sp-add-playlist">${ICONS.plus}Add</button></div>
+          <div class="inline-field"><label class="field"><span>Or a Spotify link</span><input class="sp-link" type="text" placeholder="https://open.spotify.com/album/…" autocomplete="off" spellcheck="false"></label>
+            <button type="button" class="inline-button quiet sp-add-link">Look up</button></div>
+          <p class="hint">Playlists, albums, singles and tracks. Singles use Spotify’s album links.</p>
+          <p class="error sp-add-error" role="alert"></p>
+        </div>
+      </div>
+    </div>
+    <p class="hint">Saved changes block new requests at once. A controller may show lists it already cached until it refreshes.</p>
+  </section>`);
+  const preview = cr100Screen();
+  $('.menu-workbench', box).append(preview.node);
+  const folders = el(`<section class="popup spotify-folder-panel">
+    <div class="strip-head"><span class="dot sp-folder-dot"></span><span class="sp-folder-status" role="status">Loading folder status…</span></div>
+    <p class="hint">Pin a Spotify folder to mirror its playlists and subfolders on this controller. What is inside follows Spotify and refreshes by itself; if Spotify is unavailable, the last complete tree is kept.</p>
     <div class="spotify-menu-actions"><button type="button" class="inline-button sp-connect-folders">Connect Spotify folders</button><button type="button" class="inline-button quiet sp-refresh-folders">Refresh folders</button></div>
-    <p class="hint">Folders refresh automatically. If Spotify is unavailable, the last complete folder tree is kept.</p>
     <div class="sp-folder-tree" aria-label="Spotify folder tree"></div>
-    <div class="sp-folder-signin gap-above" hidden><h3>Connect Spotify folders and playback</h3>
-      <p>Sign in to the same Spotify account used above. This separate connection uses Spotify’s “streaming” permission for folders and for bridge-controlled playback when Autoplay is enabled. It does not change Spotify’s account-wide Autoplay setting.</p>
-      <ol class="steps"><li>Approve access on the Spotify page.</li><li>Spotify opens a local address beginning with <strong>127.0.0.1:8898/login</strong>. An error page is expected.</li><li>Copy the whole address and paste it below.</li></ol>
-      <label class="field"><span>Address after approving</span><input class="sp-folder-address" type="url" autocomplete="off" placeholder="http://127.0.0.1:8898/login?code=…"></label>
-      <button type="button" class="inline-button sp-folder-finish">Finish folder sign-in</button>
+    <div class="sp-folder-signin" hidden><h3>Finish connecting folders and playback</h3>
+      <p class="hint">Use the same Spotify account as above. This connection uses Spotify’s “streaming” permission for folders and for Autoplay; it does not change Spotify’s own Autoplay setting.</p>
+      <ol class="howto"><li>Approve access on the Spotify page that opened.</li><li>Spotify then opens an address starting with <strong>127.0.0.1:8898/login</strong> that shows an error. That is expected.</li><li>Copy that whole address and paste it here.</li></ol>
+      <div class="inline-field"><label class="field"><span>Address after approving</span><input class="sp-folder-address" type="url" autocomplete="off" placeholder="http://127.0.0.1:8898/login?code=…"></label>
+        <button type="button" class="inline-button sp-folder-finish">Finish</button></div>
     </div><p class="error sp-folder-error" role="alert"></p></section>`);
-  main.append(el('<h2 class="group-title">Controller menus</h2>'), box, folders);
+  main.append(el('<h2 class="group-title">Controller menus</h2>'), box, el('<h2 class="group-title">Spotify folders</h2>'), folders);
   const select = $('.sp-controller', box), list = $('.sp-menu-list', box), saveButton = $('.sp-menu-save', box);
   const addControls = $('.sp-add-controls', box), menuStatus = $('.sp-menu-status', box);
   let items = [], baseline = '[]', activeMac = '', generation = 0, library = { folders: [], playlists: [] };
-  let folderTreeSignature = null, folderRequest = 0, folderAction = false;
+  let folderTreeSignature = null, folderRequest = 0, folderAction = false, selected = 0;
   const editorItems = rows => {
     const search = rows.find(item => item.id === 'search');
     return [{ ...search, label: 'Search' }, ...rows.filter(item => item.id !== 'search')];
+  };
+  const showPreview = () => {
+    selected = Math.min(selected, Math.max(0, items.length - 1));
+    preview.update({ room: select.selectedOptions[0]?.textContent, service: serviceName(), items, selected });
+    preview.node.setAttribute('aria-label', preview.describe(items));
   };
   const changed = () => {
     const value = JSON.stringify(items) !== baseline;
     saveButton.disabled = !activeMac || !value;
     menuStatus.textContent = value ? 'Unsaved changes' : '';
+    showPreview();
     if (box.isConnected) onDirty(value);
   };
   const add = (kind, target, name) => {
@@ -788,40 +974,55 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}) {
     if (items.length >= 64) { $('.sp-add-error', box).textContent = 'Keep this menu to 64 entries.'; return; }
     items.push({ id: `entry_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
       kind, target, label: String(name || 'Spotify item').slice(0, 80), locked: false });
+    selected = items.length - 1;
     renderItems(); changed();
     menuStatus.textContent = 'Shortcut added. Save this menu to apply it.';
   };
-  const renderItems = () => {
+  const kindLabel = (item) => item.id === 'search' ? 'Search · Name and position fixed by the controller'
+    : item.kind === 'builtin' ? `Built-in · ${item.target}`
+    : item.kind === 'folder' ? `Mirrored folder · ${item.target}` : `Shortcut · ${item.target}`;
+  const renderItems = (focus) => {
     list.replaceChildren();
     items.forEach((item, index) => {
       const nativeSearch = item.id === 'search';
-      const type = item.kind === 'builtin' ? 'Built-in section' : item.kind === 'folder' ? 'Mirrored Spotify folder' : 'Spotify shortcut';
-      const entry = el(`<div class="spotify-menu-entry ${item.locked ? 'is-locked' : ''}">
-        <span class="spotify-menu-position" aria-hidden="true">${index + 1}</span>
-        <label class="field spotify-menu-label"><span>${escapeHtml(type)}</span><input type="text" maxlength="80" value="${escapeHtml(item.label)}" aria-label="Label for menu entry ${index + 1}" ${nativeSearch ? 'disabled' : ''}></label>
-        <label class="check spotify-menu-lock"><input type="checkbox" ${item.locked ? 'checked' : ''}><span class="box">${ICONS.tick}</span><span>Locked</span></label>
-        <div class="spotify-menu-move"><button type="button" class="inline-button quiet sp-up" aria-label="Move entry ${index + 1} up" ${index <= 1 ? 'disabled' : ''}>↑</button><button type="button" class="inline-button quiet sp-down" aria-label="Move entry ${index + 1} down" ${nativeSearch || index === items.length - 1 ? 'disabled' : ''}>↓</button>${item.kind === 'builtin' ? '' : '<button type="button" class="inline-button quiet sp-remove">Remove</button>'}</div>
-        <div class="spotify-menu-target">${escapeHtml(nativeSearch ? 'Native Search: name and position fixed by the controller' : item.kind === 'builtin' ? item.target : item.kind === 'folder' ? 'Folder: ' + item.target : item.target)}</div></div>`);
-      $('input[type=text]', entry).addEventListener('input', event => { item.label = event.target.value; changed(); });
-      $('input[type=checkbox]', entry).addEventListener('change', event => {
-        item.locked = event.target.checked; entry.classList.toggle('is-locked', item.locked); changed();
-      });
+      const entry = el(`<li class="menu-entry ${item.locked ? 'is-locked' : ''}">
+        <span class="menu-pos" aria-hidden="true">${index + 1}</span>
+        <span class="what"><input type="text" class="entry-label" maxlength="80" aria-label="Label for menu entry ${index + 1}" ${nativeSearch ? 'disabled' : ''}>
+          <span class="sub"></span></span>
+        <span class="entry-tools">
+          ${mini(item.locked ? 'lock' : 'unlock', `${item.locked ? 'Unlock' : 'Lock'} ${item.label}`, 'lock-toggle', `aria-pressed="${item.locked}"`)}
+          ${mini('up', `Move ${item.label} up`, 'sp-up', index <= 1 || nativeSearch ? 'disabled' : '')}
+          ${mini('down', `Move ${item.label} down`, 'sp-down', nativeSearch || index === items.length - 1 ? 'disabled' : '')}
+          ${item.kind === 'builtin' ? '<span class="mini-spacer"></span>' : mini('trash', `Remove ${item.label}`, 'sp-remove')}
+        </span></li>`);
+      const label = $('.entry-label', entry);
+      label.value = item.label;
+      $('.sub', entry).textContent = kindLabel(item);
+      label.addEventListener('input', () => { item.label = label.value; changed(); });
+      entry.addEventListener('focusin', () => { if (selected !== index) { selected = index; showPreview(); } });
+      $('.lock-toggle', entry).addEventListener('click', () => { item.locked = !item.locked; renderItems(['.lock-toggle', index]); changed(); });
       const move = delta => {
-        if (nativeSearch || index + delta <= 0) return;
-        [items[index], items[index + delta]] = [items[index + delta], items[index]]; renderItems(); changed();
+        if (nativeSearch || index + delta <= 0 || index + delta >= items.length) return;
+        [items[index], items[index + delta]] = [items[index + delta], items[index]];
+        selected = index + delta;
+        const target = delta < 0 ? (index + delta <= 1 ? '.sp-down' : '.sp-up') : (index + delta === items.length - 1 ? '.sp-up' : '.sp-down');
+        renderItems([target, index + delta]); changed();
       };
       $('.sp-up', entry).addEventListener('click', () => move(-1));
       $('.sp-down', entry).addEventListener('click', () => move(1));
-      $('.sp-remove', entry)?.addEventListener('click', () => { items.splice(index, 1); renderItems(); changed(); });
+      $('.sp-remove', entry)?.addEventListener('click', () => {
+        items.splice(index, 1); selected = Math.max(0, index - 1); renderItems(['.entry-label', selected]); changed();
+      });
       list.append(entry);
     });
+    if (focus) list.children[focus[1]]?.querySelector(focus[0])?.focus();
   };
   const loadController = async mac => {
     const version = ++generation;
     saveButton.disabled = true;
     const result = await api('GET', '/api/spotify/menu/' + encodeURIComponent(mac));
     if (version !== generation) return;
-    activeMac = mac; items = editorItems(result.items); baseline = JSON.stringify(items);
+    activeMac = mac; items = editorItems(result.items); baseline = JSON.stringify(items); selected = 0;
     renderItems(); changed(); addControls.hidden = false;
   };
   select.addEventListener('change', async () => {
@@ -854,29 +1055,37 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}) {
     } catch (error) { $('.sp-add-error', box).textContent = error.message; }
     finally { button.disabled = false; }
   });
+  $('.sp-link', box).addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('.sp-add-link', box).click(); } });
   const renderFolders = () => {
     const status = library.folder_status || {}, tree = $('.sp-folder-tree', folders);
     onConnectionStatus(status);
     const age = status.updated_at ? ago(Math.max(0, Date.now() / 1000 - status.updated_at)) : 'not yet';
+    $('.sp-folder-dot', folders).className = `dot sp-folder-dot ${status.connected ? (status.error || status.stale ? 'wait' : 'good') : 'bad'}`;
     $('.sp-folder-status', folders).textContent = status.connected
-      ? `Connected · last complete refresh: ${age}${status.refreshing ? ' · refreshing…' : ''}${status.stale ? ' · showing the saved tree' : ''}${status.error ? ' · ' + status.error : ''}`
-      : 'Connect folder access to browse your Spotify folders.';
+      ? [`Connected · refreshed ${age}`, status.refreshing ? 'refreshing…' : '', status.stale ? 'showing the saved tree' : '', status.error || ''].filter(Boolean).join(' · ')
+      : 'Not connected. Connect folder access to browse your Spotify folders.';
     $('.sp-connect-folders', folders).textContent = status.connected ? 'Reconnect folder access' : 'Connect Spotify folders';
+    $('.sp-connect-folders', folders).classList.toggle('quiet', !!status.connected);
     $('.sp-refresh-folders', folders).disabled = !status.connected;
     const signature = JSON.stringify(library.folders || []);
     if (signature === folderTreeSignature) return;
     folderTreeSignature = signature;
     tree.replaceChildren();
+    const addButton = (label) => `<button type="button" class="inline-button quiet small" aria-label="${escapeHtml(label)}">${ICONS.plus}Add</button>`;
     const draw = (nodes, destination, depth = 0) => {
       for (const node of nodes || []) {
         if (node.kind !== 'folder' || depth > 32) continue;
-        const branch = el(`<details ${depth === 0 ? 'open' : ''}><summary><span>${escapeHtml(node.name || 'Spotify folder')}</span><button type="button" class="inline-button quiet">Add folder</button></summary><div class="spotify-folder-children"></div></details>`);
+        const name = node.name || 'Spotify folder';
+        const branch = el(`<details ${depth === 0 ? 'open' : ''}><summary>${CHEVRON}${ICONS.folder}<span class="folder-name"></span>${addButton(`Add folder ${name}`)}</summary><div class="spotify-folder-children"></div></details>`);
+        $('.folder-name', branch).textContent = name;
         $('summary button', branch).addEventListener('click', event => { event.preventDefault(); add('folder', node.id, node.name); });
         const children = $('.spotify-folder-children', branch);
         for (const child of node.children || []) {
           if (child.kind === 'folder') draw([child], children, depth + 1);
           else if (child.uri) {
-            const row = el(`<div class="spotify-folder-leaf"><span>${escapeHtml(child.name || child.uri)}</span><button type="button" class="inline-button quiet">Add shortcut</button></div>`);
+            const label = child.name || child.uri;
+            const row = el(`<div class="spotify-folder-leaf"><span></span>${addButton(`Add shortcut ${label}`)}</div>`);
+            row.firstElementChild.textContent = label;
             $('button', row).addEventListener('click', () => add('spotify', child.uri, child.name)); children.append(row);
           }
         }
@@ -922,7 +1131,7 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}) {
     const data = await api('GET', '/api/controllers');
     for (const controller of data.controllers || []) { const option = document.createElement('option'); option.value = controller.mac; option.textContent = controller.name; select.append(option); }
     if (select.options.length) await loadController(select.value);
-    else { select.disabled = true; menuStatus.textContent = 'Pair a controller before editing its menu.'; }
+    else { select.disabled = true; menuStatus.textContent = 'Pair a controller before editing its menu.'; showPreview(); }
   } catch (error) { menuStatus.textContent = error.message; }
   try { library = await api('GET', '/api/spotify/library'); renderLibrary(); }
   catch (error) { $('.sp-folder-status', folders).textContent = error.message; $('.sp-playlist', box).replaceChildren(el('<option value="">Playlists unavailable</option>')); }
@@ -941,7 +1150,7 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}) {
       finally { polling = false; }
     }, 30000);
   }
-  return { save, connectPlayback: () => $('.sp-connect-folders', folders).click() };
+  return { save, connectPlayback: () => $('.sp-connect-folders', folders).click(), refreshPreview: showPreview };
 }
 
 views.spotify = {
@@ -950,24 +1159,24 @@ views.spotify = {
     const data = await api('GET', '/api/spotify');
     let menuDirty = false, menuEditor = null, playbackConnected = !!data.autoplay_connected;
     main.innerHTML = '';
-    main.append(el(`<p class="lede">Spotify appears in the controller's Music menu as a music service. The bridge searches and browses Spotify for you; it needs a Spotify Premium account and a Client ID from the Spotify developer dashboard.</p>`));
+    main.append(el(`<p class="lede">Spotify appears in the controller’s Music menu. It needs Spotify Premium and a Client ID from the Spotify developer dashboard.</p>`));
 
     const account = data.authorized
       ? el(`<div class="line"><div class="tile">${ICONS.note}<span class="name">${escapeHtml(data.account?.name || 'Signed in')}</span></div>
-          <div class="row"><div class="what"><div class="main">Signed in to Spotify</div><div class="sub">${escapeHtml(data.account?.plan ? `Plan: ${data.account.plan}` : 'Account details appear after the next sign-in')}</div></div></div></div>`)
+          <div class="row"><div class="what"><div class="main"><span class="dot good"></span>Signed in to Spotify</div><div class="sub">${escapeHtml(data.account?.plan ? `${data.account.plan.charAt(0).toUpperCase()}${data.account.plan.slice(1)} plan` : 'Account details appear after the next sign-in')}</div></div></div></div>`)
       : el(`<div class="line"><div class="tile off">${ICONS.note}<span class="name">Not signed in</span></div>
-          <div class="row"><div class="what"><div class="main">Spotify needs you to sign in</div><div class="sub">${data.client_id ? 'Use Sign in to Spotify below.' : 'Add your Client ID first.'}</div></div></div></div>`);
+          <div class="row"><div class="what"><div class="main"><span class="dot bad"></span>Not signed in</div><div class="sub">${data.client_id ? 'Choose Sign in to Spotify below.' : 'Add your Client ID first.'}</div></div></div></div>`);
     main.append(el('<h2 class="group-title">Account</h2>'), account);
 
-    const signIn = el(`<div class="popup" hidden><h3>Sign in to Spotify</h3>
-      <ol class="steps">
+    const signIn = el(`<div class="popup" hidden><h3>Finish signing in</h3>
+      <ol class="howto">
         <li>Approve access on the Spotify page that just opened.</li>
-        <li>Spotify then sends your browser to an address starting with <strong>127.0.0.1</strong>, which shows an error. That is expected.</li>
+        <li>Spotify then opens an address starting with <strong>127.0.0.1</strong> that shows an error. That is expected.</li>
         <li>Copy that whole address from the address bar and paste it here.</li>
       </ol>
-      <label class="field"><span>Address after approving</span><input type="url" id="sp-address" placeholder="http://127.0.0.1:8888/callback?code=…" autocomplete="off"></label>
-      <p class="error" id="sp-error" role="alert"></p>
-      <button type="button" class="inline-button" id="sp-finish">Finish sign-in</button></div>`);
+      <div class="inline-field"><label class="field"><span>Address after approving</span><input type="url" id="sp-address" placeholder="http://127.0.0.1:8888/callback?code=…" autocomplete="off"></label>
+        <button type="button" class="inline-button" id="sp-finish">Finish</button></div>
+      <p class="error" id="sp-error" role="alert"></p></div>`);
     main.append(signIn);
     $('#sp-finish', signIn).addEventListener('click', async () => {
       try {
@@ -977,32 +1186,49 @@ views.spotify = {
       } catch (error) { $('#sp-error', signIn).textContent = error.message; }
     });
 
-    const form = el(`<div class="popup"><h3>Music service</h3>
-      <label class="check gap-below"><input type="checkbox" id="sp-enabled" ${data.enabled ? 'checked' : ''}><span class="box">${ICONS.tick}</span><span>Show Spotify on the controller</span></label>
-      <label class="field"><span>Name on the controller</span><input type="text" id="sp-name" maxlength="24" value="${escapeHtml(data.name)}"></label>
+    const form = el(`<div class="popup">
+      <div class="settings-list flush">
+        <label class="setting check"><span class="what"><span class="main">Show Spotify on the controller</span><span class="sub">As a music service in the Music menu</span></span>
+          <input type="checkbox" id="sp-enabled" ${data.enabled ? 'checked' : ''}><span class="box">${ICONS.tick}</span></label>
+      </div>
+      <label class="field gap-above"><span>Name on the controller</span><input type="text" id="sp-name" maxlength="24" value="${escapeHtml(data.name)}"></label>
       <label class="field"><span>Client ID</span><input type="text" id="sp-client" maxlength="32" spellcheck="false" autocomplete="off" value="${escapeHtml(data.client_id)}">
-        <div class="hint">From developer.spotify.com, under your app's settings. Add ${escapeHtml(data.redirect_uri)} to the app's redirect URIs.</div></label>
+        <span class="hint">From your app’s settings at developer.spotify.com. Add this redirect URI to the app:</span></label>
+      <div class="copy-field"><input type="text" readonly value="${escapeHtml(data.redirect_uri)}" aria-label="Redirect URI">${mini('copy', 'Copy redirect URI', 'copy-uri')}</div>
     </div>`);
     main.append(el('<h2 class="group-title">On the controller</h2>'), form);
+    const uri = $('.copy-field input', form);
+    uri.addEventListener('focus', () => uri.select());
+    $('.copy-uri', form).addEventListener('click', async () => {
+      uri.select();
+      // The bridge is served over plain HTTP, where the async Clipboard API is unavailable.
+      let copied = false;
+      try { await navigator.clipboard.writeText(uri.value); copied = true; }
+      catch { try { copied = document.execCommand('copy'); } catch { copied = false; } }
+      toast(copied ? 'Copied' : 'Select and copy', copied ? 'The redirect URI is on the clipboard.' : 'The address is selected; copy it with your keyboard.', !copied);
+    });
 
-    const playback = el(`<section class="popup"><h3>Autoplay</h3>
-      <label class="check gap-below"><input type="checkbox" id="sp-autoplay" ${data.autoplay ? 'checked' : ''}><span class="box">${ICONS.tick}</span><span>Autoplay similar music</span></label>
-      <p class="hint">For music started from this bridge, continue with related Spotify tracks after your selection finishes. Recommendations stay outside the Sonos queue. Music you explicitly queue takes priority; after queued music from another source, playback stops.</p>
-      <p class="hint">Turning this off lets the current bridge-controlled track finish. Spotify’s global Autoplay setting is unchanged.</p>
-      <p class="sp-playback-status" role="status"></p>
-      <button type="button" class="inline-button quiet sp-connect-playback" disabled>Connect Spotify playback</button>
+    const playback = el(`<section class="popup">
+      <div class="settings-list flush">
+        <label class="setting check"><span class="what"><span class="main">Autoplay similar music</span>
+          <span class="sub">When music started from this bridge ends, keep playing related tracks outside the Sonos queue. Music you queue comes first. Turning it off lets the current track finish; Spotify’s own Autoplay setting is unchanged.</span></span>
+          <input type="checkbox" id="sp-autoplay" ${data.autoplay ? 'checked' : ''}><span class="box">${ICONS.tick}</span></label>
+      </div>
+      <div class="strip-head gap-above"><span class="dot sp-playback-dot"></span><span class="sp-playback-status" role="status"></span>
+        <button type="button" class="inline-button quiet sp-connect-playback" disabled>Connect playback</button></div>
     </section>`);
     const renderPlaybackConnection = (status) => {
       if (status) playbackConnected = !!status.connected;
+      $('.sp-playback-dot', playback).className = `dot sp-playback-dot ${playbackConnected ? 'good' : 'wait'}`;
       $('.sp-playback-status', playback).textContent = playbackConnected
-        ? 'Spotify playback sign-in is saved. It is shared with Spotify folders.'
-        : 'Autoplay needs an additional Spotify connection. Connect playback below using the same account.';
+        ? 'Playback connection saved, shared with Spotify folders'
+        : 'Autoplay needs a playback connection with the same account';
       const button = $('.sp-connect-playback', playback);
-      button.textContent = playbackConnected ? 'Reconnect Spotify playback' : 'Connect Spotify playback';
+      button.textContent = playbackConnected ? 'Reconnect' : 'Connect playback';
       button.disabled = !menuEditor;
     };
     $('.sp-connect-playback', playback).addEventListener('click', () => menuEditor?.connectPlayback());
-    main.append(el('<h2 class="group-title">Playback</h2>'), playback);
+    main.append(el('<h2 class="group-title">Autoplay</h2>'), playback);
     renderPlaybackConnection();
 
     const values = () => ({ enabled: $('#sp-enabled', form).checked, name: $('#sp-name', form).value.trim(),
@@ -1028,11 +1254,12 @@ views.spotify = {
             setDirty(false); toast('Saved', result?.message); show('spotify'); } },
       ]);
     };
-    form.addEventListener('input', update);
+    form.addEventListener('input', () => { update(); menuEditor?.refreshPreview(); });
     form.addEventListener('change', update);
     playback.addEventListener('change', update);
     update();
-    menuEditor = await spotifyMenuEditor(main, value => { if (current === 'spotify' && form.isConnected) { menuDirty = value; update(); } }, renderPlaybackConnection);
+    menuEditor = await spotifyMenuEditor(main, value => { if (current === 'spotify' && form.isConnected) { menuDirty = value; update(); } },
+      renderPlaybackConnection, () => $('#sp-name', form).value.trim() || 'Spotify');
     if (form.isConnected) { renderPlaybackConnection(); update(); }
   },
 };
@@ -1062,10 +1289,10 @@ views.source = {
     const haForm = el(`<div class="popup"><h3>Home Assistant</h3>
       <label class="field"><span>Address</span><input type="url" id="ha-url" value="${escapeHtml(ha.url)}" placeholder="http://homeassistant.local:8123" spellcheck="false"></label>
       <label class="field"><span>Long-lived access token</span><input type="password" id="ha-token" autocomplete="off" placeholder="${ha.token_saved ? 'Saved. Paste a new token to replace it.' : 'Paste a token'}">
-        <div class="hint">Create one in Home Assistant under your profile, Security, Long-lived access tokens. The bridge never shows a saved token.</div></label></div>`);
+        <div class="hint">In Home Assistant: your profile › Security › Long-lived access tokens. A saved token is never shown.</div></label></div>`);
     const sonosForm = el(`<div class="popup"><h3>Sonos</h3>
       <label class="field"><span>Speaker addresses</span><input type="text" id="sonos-hosts" value="${escapeHtml(sonos.hosts.join(', '))}" placeholder="Found automatically" spellcheck="false" autocomplete="off">
-        <div class="hint">Leave this empty to find the speakers automatically. If they are on another part of your network, enter the address of one or more of them, like 192.168.1.30.</div></label></div>`);
+        <div class="hint">Leave empty to find speakers automatically. For speakers on another part of the network, enter one or more addresses, like 192.168.1.30.</div></label></div>`);
     const haValues = () => ({ url: $('#ha-url', haForm).value.trim(), token: $('#ha-token', haForm).value.trim() });
     const sonosValues = () => ({ hosts: $('#sonos-hosts', sonosForm).value.trim() });
     const baseline = JSON.stringify([haValues(), sonosValues()]);
@@ -1074,9 +1301,9 @@ views.source = {
       if (name === 'sonos') {
         if (!sonos.connected) return { dot: 'bad', text: escapeHtml(sonos.error || 'The Sonos speakers are not answering.') };
         const count = sonos.speakers.length;
-        return { dot: 'good', text: `Found on this network: ${escapeHtml(sonos.speakers.join(', '))} (${count} speaker${count === 1 ? '' : 's'}).` };
+        return { dot: 'good', text: `${count} Sonos speaker${count === 1 ? '' : 's'} found on this network`, rooms: sonos.speakers };
       }
-      if (ha.connected) return { dot: 'good', text: `Connected${ha.version ? ` to Home Assistant ${escapeHtml(ha.version)}` : ''}. ${ha.media_players} media players.` };
+      if (ha.connected) return { dot: 'good', text: `Connected${ha.version ? ` to Home Assistant ${escapeHtml(ha.version)}` : ''} · ${ha.media_players} media players` };
       if (data.source !== 'ha') return { dot: 'bad', text: 'Not in use. The bridge connects once you choose Home Assistant.' };
       return { dot: 'bad', text: escapeHtml(ha.error || 'Not connected.') };
     };
@@ -1084,10 +1311,12 @@ views.source = {
     const render = () => {
       settings.innerHTML = '';
       const state = status(chosen);
-      settings.append(el(`<div class="popup"><div class="state-line"><span class="dot ${state.dot}"></span><span>${state.text}</span></div></div>`));
-      if (chosen === data.source && data.speaker_health) {
-        settings.append(el(`<div class="popup" role="status"><h3>Selected for the controller</h3><p>${escapeHtml(data.speaker_health.selected.join(', ') || 'None')}.</p><p>${escapeHtml(data.speaker_health.message)}</p><p>Change the selection on the Speakers page.</p></div>`));
-      }
+      const health = chosen === data.source ? data.speaker_health : null;
+      const chips = (names) => `<ul class="area-map">${names.length ? names.map((name) => `<li>${escapeHtml(name)}</li>`).join('') : '<li class="muted">None</li>'}</ul>`;
+      settings.append(el(`<div class="popup source-status" role="status"><div class="state-line"><span class="dot ${state.dot}"></span><span>${state.text}</span></div>
+        ${state.rooms ? chips(state.rooms) : ''}
+        ${health ? `<div class="selected-rooms"><span class="meta">On the controller</span>${chips(health.selected)}
+          <p class="hint">${escapeHtml(health.message)} <a href="#speakers">Change on Speakers</a></p></div>` : ''}</div>`));
       settings.append(chosen === 'sonos' ? sonosForm : haForm);
       update();
     };
@@ -1126,141 +1355,198 @@ views.source = {
 };
 
 // Radio ------------------------------------------------------------------------------------
+// One settings row: a CR100 check box, or a select on the right.
+const settingCheck = (name, label, checked, sub = '') => `<label class="setting check"><span class="what"><span class="main">${label}</span>${
+  sub ? `<span class="sub">${sub}</span>` : ''}</span><input type="checkbox" name="${name}" ${checked ? 'checked' : ''}><span class="box">${ICONS.tick}</span></label>`;
+const settingSelect = (name, label, options, sub = '') => `<label class="setting"><span class="what"><span class="main">${label}</span>${
+  sub ? `<span class="sub">${sub}</span>` : ''}</span><select name="${name}">${options.map(([value, text]) => `<option value="${escapeHtml(value)}">${escapeHtml(text)}</option>`).join('')}</select></label>`;
+
 views.radio = {
   title: 'Radio',
   async open(main) {
     const data = await api('GET', '/api/radio');
     const s = data.settings;
-    main.innerHTML = `<p class="lede">Browse TuneIn from the controller's original Radio menu. Podcasts, favorites and album artwork are included.</p>
-      <form class="popup" id="radio-settings"><h3>Listening preferences</h3>
-        <label class="field"><span>Station order</span><select name="station_order"><option value="popular">Most popular</option><option value="name">By name</option><option value="provider">Directory order</option></select></label>
-        <label class="field"><span>Stream quality</span><select name="quality"><option value="auto">Automatic</option><option value="best">Best available</option><option value="low">Low bandwidth</option></select></label>
-        <label class="field"><span>Preferred language</span><select name="preferred_language"><option value="">All languages</option></select><small id="radio-language-status" role="status">Loading languages…</small></label>
-        ${[['language_filter', 'Filter to preferred language'], ['automatic_reconnect', 'Reconnect automatically'],
-          ['history', 'Keep recently played and recent searches'], ['episode_resume', 'Resume podcast episodes'],
-          ['show_podcasts', 'Show Podcasts in Radio'], ['show_language', 'Show By Language in Radio'],
-          ['cover_lookup', 'Find missing album covers']].map(([key, label]) =>
-          `<label class="radio-check"><input type="checkbox" name="${key}" ${s[key] ? 'checked' : ''}> ${label}</label>`).join('')}
-        <p>Album artwork is always enabled. When a song cannot be identified, the station or show image is displayed.</p>
-        <p class="error" role="alert"></p><button type="submit" hidden>Save</button></form>
-      <section class="popup"><h3>Local Radio</h3><p>${escapeHtml(s.location?.label || s.location?.name || 'Location detected automatically')}</p>
-        <form id="radio-location"><label class="field"><span>U.S. ZIP code</span><input name="zip" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" required></label>
-        <button class="inline-button" type="submit">Set location</button></form>
-        <button class="inline-button" type="button" id="radio-city">Pick a city</button></section>
-      <section class="popup"><h3>Favorites</h3><div id="radio-favorites"></div></section>
-      <section class="popup"><h3>Custom stations</h3><div id="radio-custom"></div><button type="button" class="inline-button" id="radio-add">Add station</button></section>
-      <section class="popup"><h3>Radio data</h3><div class="radio-actions">
-        <button class="inline-button" data-radio-action="history-clear">Clear history</button>
-        <button class="inline-button" id="radio-export">Export favorites and settings</button>
-        <label class="inline-button">Import data<input type="file" id="radio-import" accept="application/json,.json" hidden></label>
-        <button class="inline-button" data-radio-action="reset">Reset preferences</button>
-        <a href="#alarms">Manage global alarms</a></div></section>`;
+    const place = s.location?.label || s.location?.name || '';
+    main.innerHTML = `<p class="lede">TuneIn in the controller’s original Radio menu, with podcasts, favorites and album artwork.</p>
+      <form id="radio-settings">
+        <h2 class="group-title">Browsing</h2>
+        <div class="popup"><div class="settings-list flush">
+          ${settingSelect('station_order', 'Station order', [['popular', 'Most popular'], ['name', 'By name'], ['provider', 'Directory order']])}
+          ${settingSelect('preferred_language', 'Preferred language', [['', 'All languages']], '<span id="radio-language-status" role="status">Loading languages…</span>')}
+          ${settingCheck('language_filter', 'Only show the preferred language', s.language_filter)}
+          ${settingCheck('show_podcasts', 'Show Podcasts in Radio', s.show_podcasts)}
+          ${settingCheck('show_language', 'Show By Language in Radio', s.show_language)}
+        </div></div>
+        <h2 class="group-title">Listening</h2>
+        <div class="popup"><div class="settings-list flush">
+          ${settingSelect('quality', 'Stream quality', [['auto', 'Automatic'], ['best', 'Best available'], ['low', 'Low bandwidth']])}
+          ${settingCheck('automatic_reconnect', 'Reconnect automatically', s.automatic_reconnect)}
+          ${settingCheck('episode_resume', 'Resume podcast episodes', s.episode_resume)}
+          ${settingCheck('cover_lookup', 'Find missing album covers', s.cover_lookup, 'Album art is always on. When a song cannot be identified, the station or show image is shown.')}
+          ${settingCheck('history', 'Keep recently played and recent searches', s.history)}
+        </div><p class="error" role="alert"></p></div>
+        <button type="submit" hidden>Save</button>
+      </form>
+      <h2 class="group-title">Local Radio</h2>
+      <section class="popup">
+        <div class="strip-head location-head">${ICONS.pin}<span class="strip-title">${escapeHtml(place || 'Location detected automatically')}</span></div>
+        <form id="radio-location" class="inline-field location-form">
+          <label class="field"><span>U.S. ZIP code</span><input name="zip" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" required></label>
+          <button class="inline-button quiet" type="submit">Set</button>
+          <span class="or">or</span>
+          <button class="inline-button quiet" type="button" id="radio-city">Browse places</button>
+        </form>
+      </section>
+      <h2 class="group-title">Favorites</h2>
+      <section class="popup"><ul class="item-list" id="radio-favorites"></ul></section>
+      <h2 class="group-title">Custom stations</h2>
+      <section class="popup"><ul class="item-list" id="radio-custom"></ul>
+        <button type="button" class="inline-button quiet gap-above" id="radio-add">${ICONS.plus}Add station</button></section>
+      <h2 class="group-title">Radio data</h2>
+      <section class="popup"><div class="radio-actions">
+        <button type="button" class="inline-button quiet" id="radio-export">Export favorites and settings</button>
+        <span class="file-pick"><label><input type="file" id="radio-import" accept="application/json,.json"><span class="inline-button quiet">Import…</span></label></span>
+        <span class="spacer"></span>
+        <button type="button" class="inline-button quiet danger" data-radio-action="history-clear">Clear history</button>
+        <button type="button" class="inline-button quiet danger" data-radio-action="reset">Reset preferences</button>
+      </div></section>`;
     const form = $('#radio-settings', main);
     const language = form.elements.preferred_language;
     if (s.preferred_language) language.append(new Option('Saved language', s.preferred_language));
     for (const key of ['station_order', 'quality', 'preferred_language']) form.elements[key].value = s[key] || '';
+    let baseline = '';
+    const snapshot = () => JSON.stringify([...form.elements].filter((f) => f.name).map((f) => f.type === 'checkbox' ? f.checked : f.value));
     api('POST', '/api/radio/language-options', {}).then((result) => {
       if (!language.isConnected) return;
       const selected = language.value;
       language.replaceChildren(new Option('All languages', ''));
       for (const choice of result.languages) language.append(new Option(choice.label, choice.id));
-      if (selected && !result.languages.some((choice) => choice.id === selected)) language.append(new Option('Saved language (currently unavailable)', selected));
+      if (selected && !result.languages.some((choice) => choice.id === selected)) language.append(new Option('Saved language (unavailable now)', selected));
       language.value = selected;
-      $('#radio-language-status', main).textContent = 'Choose a language, then enable the language filter to narrow browsing.';
+      $('#radio-language-status', main).textContent = 'Turn on the filter below to browse only this language';
+      if (!dirty) baseline = snapshot();
     }).catch(() => {
-      if (language.isConnected) $('#radio-language-status', main).textContent = 'The language list is unavailable. Your saved selection is kept; Refresh Radio retries.';
+      if (language.isConnected) $('#radio-language-status', main).textContent = 'The language list is unavailable. Your choice is kept; Refresh Radio tries again.';
     });
     const save = async () => {
       const settings = {};
       for (const field of form.elements) if (field.name) settings[field.name] = field.type === 'checkbox' ? field.checked : field.value;
       await api('PUT', '/api/radio', { settings });
-      setDirty(false); toast('Saved', 'Radio preferences updated.');
+      baseline = snapshot(); setDirty(false); keys(); toast('Saved', 'Radio preferences updated.');
     };
-    form.addEventListener('input', () => setDirty(true));
+    const act = async (command, body) => { await api('POST', '/api/radio/' + command, body); setDirty(false); await show('radio'); };
+    const keys = () => softkeys([{ label: 'Refresh Radio', run: () => act('refresh', {}) }, null,
+      { label: 'Save changes', disabled: !dirty, run: save }]);
+    baseline = snapshot();
+    const changed = () => { setDirty(snapshot() !== baseline); keys(); };
+    form.addEventListener('input', changed);
+    form.addEventListener('change', changed);
     form.addEventListener('submit', (event) => { event.preventDefault(); save().catch((e) => toast('Not saved', e.message, true)); });
+    keys();
+
     $('#radio-location', main).addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (dirty && !confirm('Discard your unsaved Radio preferences?')) return;
       try { await api('POST', '/api/radio/location', { zip: event.target.elements.zip.value }); toast('Location updated'); setDirty(false); await show('radio'); }
       catch (e) { toast('Location not changed', e.message, true); }
     });
-    const act = async (command, body) => { await api('POST', '/api/radio/' + command, body); setDirty(false); await show('radio'); };
+
+    // Browse places: a breadcrumb trail and a list where choosing a place opens it.
     $('#radio-city', main).addEventListener('click', (event) => {
       const overlay = el(`<div class="picker" role="dialog" aria-modal="true" aria-labelledby="radio-city-title"><div class="popup">
-        <h2 id="radio-city-title">Pick a city</h2><p data-path></p>
-        <label class="field"><span>Places</span><select data-places size="9" aria-label="Places"></select></label>
-        <p role="status" data-status></p><p class="error" role="alert"></p>
-        <div class="radio-actions"><button class="inline-button" data-back>Back</button><button class="inline-button" data-browse>Browse</button>
-        <button class="inline-button" data-use>Use this location</button><button class="inline-button" data-close>Cancel</button></div></div></div>`);
-      const places = $('[data-places]', overlay), back = $('[data-back]', overlay), browse = $('[data-browse]', overlay), use = $('[data-use]', overlay);
-      const modal = openModal(overlay, event.target, places);
+        <h2 id="radio-city-title">Choose a place</h2>
+        <nav class="crumbs" aria-label="Path"></nav>
+        <ul class="place-list"></ul>
+        <p class="hint" role="status" data-status></p><p class="error" role="alert"></p>
+        <div class="picker-actions"><button type="button" class="inline-button quiet" data-close>Cancel</button>
+          <button type="button" class="inline-button" data-use disabled>Use this place</button></div></div></div>`);
+      const crumbs = $('.crumbs', overlay), places = $('.place-list', overlay), use = $('[data-use]', overlay);
+      const modal = openModal(overlay, event.currentTarget, $('[data-close]', overlay));
       const trail = [{ id: 'r0', label: 'World' }];
       let page = null, generation = 0;
       const load = async () => {
-        const token = ++generation, current = trail[trail.length - 1];
-        back.disabled = trail.length < 2; browse.disabled = true; use.disabled = true; places.disabled = true;
-        $('[data-path]', overlay).textContent = trail.map((place) => place.label).join(' › ');
+        const token = ++generation, here = trail[trail.length - 1];
+        use.disabled = true; use.textContent = 'Use this place';
+        crumbs.replaceChildren(...trail.map((step, index) => {
+          if (index === trail.length - 1) { const last = el('<span aria-current="location"></span>'); last.textContent = step.label; return last; }
+          const crumb = el('<button type="button" class="crumb"></button>');
+          crumb.textContent = step.label;
+          crumb.addEventListener('click', () => { trail.length = index + 1; load(); });
+          return crumb;
+        }));
+        places.replaceChildren();
         $('[data-status]', overlay).textContent = 'Loading places…'; $('.error', overlay).textContent = '';
         try {
-          const result = await api('POST', '/api/radio/location-browse', { id: current.id, ancestors: trail.slice(0, -1).map((place) => place.id) });
+          const result = await api('POST', '/api/radio/location-browse', { id: here.id, ancestors: trail.slice(0, -1).map((step) => step.id) });
           if (token !== generation || !overlay.isConnected) return;
-          page = result; places.replaceChildren();
-          for (const place of page.locations) places.append(new Option(place.label, place.id));
-          if (page.locations.length) places.selectedIndex = 0;
-          places.disabled = !page.locations.length; browse.disabled = !page.locations.length; use.disabled = !page.selectable;
-          $('[data-status]', overlay).textContent = page.selectable ? 'This location has internet radio stations.' : page.locations.length ? 'Choose a place to continue.' : 'No local stations are listed here.';
+          page = result;
+          for (const option of page.locations) {
+            const row = el(`<li><button type="button" class="place"><span></span>${CHEVRON}</button></li>`);
+            $('span', row).textContent = option.label;
+            $('button', row).addEventListener('click', () => { trail.push(option); load(); });
+            places.append(row);
+          }
+          use.disabled = !page.selectable;
+          if (page.selectable) use.textContent = `Use ${here.label}`;
+          $('[data-status]', overlay).textContent = page.selectable ? 'This place has local stations.' : page.locations.length ? 'Choose a place to open it.' : 'No local stations are listed here.';
+          (places.querySelector('button') || (page.selectable ? use : $('[data-close]', overlay))).focus();
         } catch (e) {
           if (token === generation && overlay.isConnected) { $('[data-status]', overlay).textContent = ''; $('.error', overlay).textContent = e.message; }
         }
       };
-      const descend = () => {
-        const selected = page?.locations.find((place) => place.id === places.value);
-        if (selected) { trail.push(selected); load(); }
-      };
-      browse.addEventListener('click', descend); places.addEventListener('dblclick', descend);
-      back.addEventListener('click', () => { if (trail.length > 1) { trail.pop(); load(); } });
       use.addEventListener('click', async () => {
         if (!page?.selectable) return;
         use.disabled = true;
         try {
-          const current = trail[trail.length - 1];
-          await api('POST', '/api/radio/location-select', { id: current.id, label: current.label, ancestors: trail.slice(0, -1).map((place) => place.id) });
+          const here = trail[trail.length - 1];
+          await api('POST', '/api/radio/location-select', { id: here.id, label: here.label, ancestors: trail.slice(0, -1).map((step) => step.id) });
           modal.close(); setDirty(false); toast('Location updated'); await show('radio');
         } catch (e) { if (overlay.isConnected) { $('.error', overlay).textContent = e.message; use.disabled = false; } }
       });
       load();
     });
+
     const favorites = $('#radio-favorites', main);
-    if (!data.favorites.length) favorites.innerHTML = '<p>Add stations and shows with Add to Favorites on the controller.</p>';
+    if (!data.favorites.length) favorites.append(el('<li class="hint">Add stations and shows with Add to Favorites on the controller.</li>'));
     for (const [index, item] of data.favorites.entries()) {
-      const row = el(`<div class="radio-managed-row"><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.kind)}</small></div>
-        <div class="radio-actions"><button class="inline-button" data-action="up" ${index ? '' : 'disabled'} aria-label="Move ${escapeHtml(item.title)} up">↑</button>
-        <button class="inline-button" data-action="rename">Rename</button><button class="inline-button" data-action="remove">Remove</button></div></div>`);
+      const row = el(`<li class="item"><span class="what"><span class="main"></span><span class="sub"></span></span>
+        <span class="tools">${mini('up', `Move ${item.title} up`, '', index ? 'data-action="up"' : 'data-action="up" disabled')}${mini('pencil', `Rename ${item.title}`, '', 'data-action="rename"')}${mini('trash', `Remove ${item.title}`, '', 'data-action="remove"')}</span></li>`);
+      $('.main', row).textContent = item.title;
+      $('.sub', row).textContent = item.kind;
       row.addEventListener('click', async (event) => {
         const action = event.target.closest('[data-action]')?.dataset.action;
         if (!action) return;
         try {
-          if (action === 'remove') await act('favorite-remove', { id: item.id });
+          if (action === 'remove' && confirm(`Remove ${item.title} from favorites?`)) await act('favorite-remove', { id: item.id });
           if (action === 'up') await act('favorite-edit', { id: item.id, index: index - 1 });
           if (action === 'rename') {
-            const title = prompt('Favorite name', item.title);
-            if (title?.trim()) await act('favorite-edit', { id: item.id, title: title.trim() });
+            editInPlace($('.main', row), { value: item.title, label: `Name for ${item.title}`, maxlength: 250 }, async (title) => {
+              if (!title) { await show('radio'); return; }
+              try { await act('favorite-edit', { id: item.id, title }); } catch (e) { toast('Not renamed', e.message, true); await show('radio'); }
+            });
           }
         } catch (e) { toast('Not changed', e.message, true); }
       });
       favorites.append(row);
     }
+
     const editStation = (item = null, trigger = $('#radio-add', main)) => {
       const overlay = el(`<div class="picker" role="dialog" aria-modal="true" aria-labelledby="radio-editor-title"><form class="popup">
         <h2 id="radio-editor-title">${item ? 'Edit' : 'Add'} station</h2>
         <label class="field"><span>Name</span><input name="name" required maxlength="250" value="${escapeHtml(item?.title || '')}"></label>
-        <label class="field"><span>Stream or playlist URL</span><input name="url" type="url" required value="${escapeHtml(item?.url || '')}"></label>
-        <label class="field"><span>Station logo URL</span><input name="logo" type="url" value="${escapeHtml(item?.logo || item?.image || '')}"></label>
-        <p class="error" role="alert"></p><div class="radio-actions"><button type="button" class="inline-button" data-test>Test URL</button>
-        <button type="button" class="inline-button" data-close>Cancel</button><button class="inline-button" type="submit">Save station</button></div></form></div>`);
+        <div class="inline-field"><label class="field"><span>Stream or playlist URL</span><input name="url" type="url" required value="${escapeHtml(item?.url || '')}"></label>
+          <button type="button" class="inline-button quiet" data-test>Test</button></div>
+        <p class="hint" data-test-result role="status"></p>
+        <label class="field"><span>Station logo URL</span><input name="logo" type="url" value="${escapeHtml(item?.logo || item?.image || '')}"><span class="hint">Optional</span></label>
+        <p class="error" role="alert"></p><div class="picker-actions">
+        <button type="button" class="inline-button quiet" data-close>Cancel</button><button class="inline-button" type="submit">Save station</button></div></form></div>`);
       const editor = $('form', overlay), modal = openModal(overlay, trigger, editor.elements.name);
+      const result = $('[data-test-result]', editor);
+      result.hidden = true;
       $('[data-test]', editor).addEventListener('click', async () => {
-        try { const test = await api('POST', '/api/radio/test-url', { url: editor.elements.url.value }); $('.error', editor).textContent = `${test.streams.length} stream option(s) found. Playback was not started.`; }
-        catch (e) { $('.error', editor).textContent = e.message; }
+        $('.error', editor).textContent = ''; result.hidden = false; result.textContent = 'Testing…';
+        try { const test = await api('POST', '/api/radio/test-url', { url: editor.elements.url.value }); result.textContent = `Works: ${test.streams.length} stream option${test.streams.length === 1 ? '' : 's'} found. Nothing was played.`; }
+        catch (e) { result.hidden = true; $('.error', editor).textContent = e.message; }
       });
       editor.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -1271,19 +1557,23 @@ views.radio = {
         } catch (e) { $('.error', editor).textContent = e.message; }
       });
     };
-    $('#radio-add', main).addEventListener('click', () => editStation());
+    $('#radio-add', main).addEventListener('click', (event) => editStation(null, event.currentTarget));
+    const custom = $('#radio-custom', main);
+    if (!data.custom_stations.length) custom.append(el('<li class="hint">Add a stream address to play it from the controller’s Radio menu.</li>'));
     for (const item of data.custom_stations) {
-      const row = el(`<div class="radio-managed-row"><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.url)}</small></div>
-        <div class="radio-actions"><button class="inline-button" data-edit>Edit</button><button class="inline-button" data-delete>Delete</button></div></div>`);
-      $('[data-edit]', row).addEventListener('click', (event) => editStation(item, event.target));
-      $('[data-delete]', row).addEventListener('click', async () => {
+      const row = el(`<li class="item"><span class="what"><span class="main"></span><span class="sub"></span></span>
+        <span class="tools">${mini('pencil', `Edit ${item.title}`, 'edit')}${mini('trash', `Delete ${item.title}`, 'delete')}</span></li>`);
+      $('.main', row).textContent = item.title;
+      $('.sub', row).textContent = item.url;
+      $('.edit', row).addEventListener('click', (event) => editStation(item, event.currentTarget));
+      $('.delete', row).addEventListener('click', async () => {
         if (!confirm(`Delete ${item.title}?`)) return;
         try { await act('custom', { operation: 'delete', id: item.id }); } catch (e) { toast('Not deleted', e.message, true); }
       });
-      $('#radio-custom', main).append(row);
+      custom.append(row);
     }
     main.querySelectorAll('[data-radio-action]').forEach((button) => button.addEventListener('click', async () => {
-      if (!confirm(button.dataset.radioAction === 'reset' ? 'Reset Radio preferences? Favorites and custom stations will be kept.' : 'Clear Radio listening and search history?')) return;
+      if (!confirm(button.dataset.radioAction === 'reset' ? 'Reset Radio preferences? Favorites and custom stations are kept.' : 'Clear Radio listening and search history?')) return;
       try { await act(button.dataset.radioAction, {}); } catch (e) { toast('Not changed', e.message, true); }
     }));
     $('#radio-export', main).addEventListener('click', async () => {
@@ -1294,22 +1584,40 @@ views.radio = {
       } catch (e) { toast('Export failed', e.message, true); }
     });
     $('#radio-import', main).addEventListener('change', async (event) => {
-      const file = event.target.files[0]; if (!file || !confirm('Merge this file into your Radio favorites and settings?')) return;
+      const file = event.target.files[0]; if (!file || !confirm('Merge this file into your Radio favorites and settings?')) { event.target.value = ''; return; }
       try { await act('import', { data: JSON.parse(await file.text()), merge: true }); } catch (e) { toast('Import failed', e.message, true); }
     });
-    softkeys([{ label: 'Refresh Radio', run: () => act('refresh', {}) }, { label: 'Alarms', run: () => { location.hash = 'alarms'; } },
-      { label: 'Save changes', run: save }]);
   },
 };
+
+// Alarms -----------------------------------------------------------------------------------
+// Days in the CR100's order, Monday first; Sonos numbers them from Sunday = 0.
+const ALARM_DAYS = [[1, 'M', 'Monday'], [2, 'T', 'Tuesday'], [3, 'W', 'Wednesday'], [4, 'T', 'Thursday'], [5, 'F', 'Friday'], [6, 'S', 'Saturday'], [0, 'S', 'Sunday']];
+const RECURRENCE = { DAILY: 'Every day', WEEKDAYS: 'Weekdays', WEEKENDS: 'Weekends', ONCE: 'Once' };
+function alarmDays(recurrence) {
+  if (recurrence === 'DAILY') return [0, 1, 2, 3, 4, 5, 6];
+  if (recurrence === 'WEEKDAYS') return [1, 2, 3, 4, 5];
+  if (recurrence === 'WEEKENDS') return [0, 6];
+  const custom = /^ON_(\d+)$/.exec(recurrence || '');
+  return custom ? [...custom[1]].map(Number) : [];
+}
+const minutesText = (seconds) => { const m = Math.round(seconds / 60); return m % 60 ? (m > 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`) : `${m / 60} h`; };
 
 views.alarms = {
   title: 'Alarms',
   async open(main) {
     const data = await api('GET', '/api/alarms');
-    main.innerHTML = '<p class="lede">Household alarms share one schedule across Radio and future music providers.</p><p class="hint">For Snooze and Stop Alarm on a CR100, edit the alarm on that controller, choose <strong>Advanced → Show Clock on this controller → Yes</strong>, then save. Set this separately on each controller.</p><section class="popup"><div id="alarm-list"></div><button class="inline-button" id="alarm-add">Add alarm</button></section>';
+    const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const roomName = (key) => data.rooms.find((room) => room.key === key || room.udn === key)?.name || 'Unavailable room';
+    main.innerHTML = `<p class="lede">Household alarms share one schedule across Radio and future music providers.</p>
+      <div class="alarm-list" id="alarm-list"></div>
+      <p class="hint clock-tip">For Snooze and Stop on a CR100, edit the alarm on that controller and set
+        <span class="menu-path"><kbd>Advanced</kbd>${CHEVRON}<kbd>Show Clock on this controller</kbd>${CHEVRON}<kbd>Yes</kbd></span>, then save. Do this on each controller.</p>`;
     const list = $('#alarm-list', main);
     const refresh = () => show('alarms');
-    const editor = (alarm = null, trigger = $('#alarm-add', main)) => {
+    const addKey = () => document.querySelector('#softkeys button[data-slot="2"]');
+
+    const editor = (alarm = null, trigger = addKey()) => {
       const sources = data.sources.filter((source) => source.media_ref);
       const selected = alarm?.media_ref || { provider: 'chime', content_id: 'default', account_ref: null };
       const roomOptions = [...data.rooms];
@@ -1317,48 +1625,91 @@ views.alarms = {
       if (alarm && !selectedRoom) roomOptions.push({ key: alarm.room, name: `Unavailable room (${alarm.room})`, shown: true });
       const sourceOptions = [{ title: 'Chime', media_ref: { provider: 'chime', content_id: 'default', account_ref: null } }, ...sources];
       if (!sourceOptions.some((source) => JSON.stringify(source.media_ref) === JSON.stringify(selected))) sourceOptions.push({ title: alarm.title, media_ref: selected });
-      const overlay = el(`<div class="picker" role="dialog" aria-modal="true" aria-labelledby="alarm-editor-title"><form class="popup">
+      const recurrence = alarm?.recurrence || 'DAILY';
+      const repeats = Object.entries(RECURRENCE);
+      if (!RECURRENCE[recurrence]) repeats.push([recurrence, `Custom: ${ALARM_DAYS.filter(([d]) => alarmDays(recurrence).includes(d)).map(([, , name]) => name.slice(0, 3)).join(' ') || recurrence}`]);
+      const minutes = Math.round((alarm?.duration || 3600) / 60);
+      const lengths = [15, 30, 45, 60, 90, 120, 180, 240];
+      if (!lengths.includes(minutes)) lengths.push(minutes), lengths.sort((a, b) => a - b);
+      const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
+      const volume = alarm?.volume ?? 20;
+      const overlay = el(`<div class="picker" role="dialog" aria-modal="true" aria-labelledby="alarm-editor-title"><form class="popup alarm-editor">
         <h2 id="alarm-editor-title">${alarm ? 'Edit' : 'Add'} alarm</h2>
-        <label class="field"><span>Time</span><input name="time" type="time" required value="${escapeHtml((alarm?.time || '07:00').slice(0, 5))}"></label>
-        <label class="field"><span>Timezone</span><input name="timezone" required value="${escapeHtml(alarm?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}"></label>
-        <label class="field"><span>Repeat</span><select name="recurrence"><option value="DAILY">Every day</option><option value="WEEKDAYS">Weekdays</option><option value="WEEKENDS">Weekends</option><option value="ONCE">Once</option></select></label>
-        <label class="field"><span>Room</span><select name="room" required>${roomOptions.map((r) => `<option value="${escapeHtml(r.key)}">${escapeHtml(r.name)}</option>`).join('')}</select></label>
-        <label class="field"><span>Source</span><select name="source">${sourceOptions.map((source, i) => `<option value="${i}">${escapeHtml(source.title)}</option>`).join('')}</select></label>
-        <label class="field"><span>Volume</span><input name="volume" type="number" min="0" max="100" value="${alarm?.volume ?? 20}" required></label>
-        <label class="field"><span>Duration in minutes</span><input name="duration" type="number" min="1" max="1440" value="${Math.round((alarm?.duration || 3600) / 60)}" required></label>
-        <label class="radio-check"><input name="enabled" type="checkbox" ${alarm?.enabled === false ? '' : 'checked'}> Enabled</label>
-        <label class="radio-check"><input name="include_linked" type="checkbox" ${alarm?.include_linked ? 'checked' : ''}> Include linked rooms at alarm time</label>
-        <p class="error" role="alert"></p><div class="radio-actions"><button type="button" class="inline-button" data-close>Cancel</button><button class="inline-button" type="submit">Save alarm</button></div></form></div>`);
+        <label class="field"><span>Time</span><input name="time" type="time" class="time-input" required value="${escapeHtml((alarm?.time || '07:00').slice(0, 5))}"></label>
+        <fieldset class="field segmented"><legend>Repeat</legend><div class="segments">${repeats.map(([value, label]) =>
+          `<label><input type="radio" name="recurrence" value="${escapeHtml(value)}" ${value === recurrence ? 'checked' : ''}><span>${escapeHtml(label)}</span></label>`).join('')}</div></fieldset>
+        <div class="field-pair">
+          <label class="field"><span>Room</span><select name="room" required>${roomOptions.map((r) => `<option value="${escapeHtml(r.key)}">${escapeHtml(r.name)}</option>`).join('')}</select></label>
+          <label class="field"><span>Play</span><select name="source">${sourceOptions.map((source, i) => `<option value="${i}">${escapeHtml(source.title)}</option>`).join('')}</select></label>
+        </div>
+        <label class="field"><span>Volume <output class="volume-value">${volume}</output></span><input name="volume" type="range" min="0" max="100" step="1" value="${volume}" class="level-range"></label>
+        <div class="field-pair">
+          <label class="field"><span>Plays for</span><select name="duration">${lengths.map((m) => `<option value="${m}" ${m === minutes ? 'selected' : ''}>${minutesText(m * 60)}</option>`).join('')}</select></label>
+          <label class="field"><span>Timezone</span><input name="timezone" required list="alarm-zones" autocomplete="off" spellcheck="false" value="${escapeHtml(alarm?.timezone || localZone)}">
+            <datalist id="alarm-zones">${zones.map((zone) => `<option value="${escapeHtml(zone)}"></option>`).join('')}</datalist></label>
+        </div>
+        <div class="settings-list">
+          ${settingCheck('enabled', 'Alarm on', alarm?.enabled !== false)}
+          ${settingCheck('include_linked', 'Include linked rooms', alarm?.include_linked, 'Rooms grouped with this one when the alarm goes off')}
+        </div>
+        <p class="error" role="alert"></p><div class="picker-actions"><button type="button" class="inline-button quiet" data-close>Cancel</button><button class="inline-button" type="submit">Save alarm</button></div></form></div>`);
       const form = $('form', overlay), modal = openModal(overlay, trigger, form.elements.time);
-      form.elements.recurrence.value = alarm?.recurrence || 'DAILY';
       if (alarm) form.elements.room.value = selectedRoom?.key || alarm.room;
       form.elements.source.value = String(sourceOptions.findIndex((source) => JSON.stringify(source.media_ref) === JSON.stringify(selected)));
+      const range = form.elements.volume;
+      const paint = () => { $('.volume-value', form).textContent = range.value; range.style.setProperty('--fill', `${range.value}%`); };
+      range.addEventListener('input', paint); paint();
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         try {
-          await api('PUT', '/api/alarms', { ...(alarm || {}), time: form.elements.time.value, timezone: form.elements.timezone.value,
-            recurrence: form.elements.recurrence.value, room: form.elements.room.value, volume: Number(form.elements.volume.value),
+          await api('PUT', '/api/alarms', { ...(alarm || {}), time: form.elements.time.value, timezone: form.elements.timezone.value.trim(),
+            recurrence: form.elements.recurrence.value, room: form.elements.room.value, volume: Number(range.value),
             duration: Number(form.elements.duration.value) * 60, enabled: form.elements.enabled.checked,
             include_linked: form.elements.include_linked.checked, media_ref: sourceOptions[Number(form.elements.source.value)].media_ref });
           modal.close(); await refresh();
         } catch (e) { $('.error', form).textContent = e.message; }
       });
     };
-    if (!data.alarms.length) list.innerHTML = '<p>No alarms yet. Save a Radio station to Favorites to choose it here.</p>';
+
+    if (!data.alarms.length) list.append(el('<p class="empty">No alarms yet. Add one with Add alarm; save a Radio station to Favorites to wake up to it.</p>'));
     for (const alarm of data.alarms) {
-      const row = el(`<div class="radio-managed-row"><div><strong>${escapeHtml(alarm.time.slice(0, 5))} · ${escapeHtml(alarm.title)}</strong>
-        <small>${escapeHtml(alarm.recurrence)} · ${escapeHtml(alarm.timezone)} · ${alarm.enabled ? 'Enabled' : 'Off'}${alarm.last_run ? ' · ' + escapeHtml(alarm.last_run.status) : ''}</small></div>
-        <div class="radio-actions"><button class="inline-button" data-edit>Edit</button><button class="inline-button" data-snooze>Snooze</button><button class="inline-button" data-stop>Stop</button><button class="inline-button" data-delete>Delete</button></div></div>`);
-      $('[data-edit]', row).addEventListener('click', (event) => editor(alarm, event.target));
-      for (const action of ['snooze', 'stop', 'delete']) $('[data-' + action + ']', row).addEventListener('click', async () => {
-        if (action === 'delete' && !confirm('Delete this alarm?')) return;
+      const days = alarmDays(alarm.recurrence);
+      const repeat = RECURRENCE[alarm.recurrence] || 'Custom days';
+      const meta = [roomName(alarm.room), `${minutesText(alarm.duration || 3600)}`];
+      if (alarm.timezone && alarm.timezone !== localZone) meta.push(alarm.timezone.replace(/_/g, ' '));
+      if (alarm.last_run) meta.push(`Last: ${alarm.last_run.status}`);
+      const card = el(`<article class="popup alarm ${alarm.enabled ? '' : 'off'}">
+        <div class="alarm-clock">
+          <span class="alarm-time">${escapeHtml(alarm.time.slice(0, 5))}</span>
+          ${alarm.recurrence === 'ONCE' ? '<span class="alarm-once">Once</span>'
+            : `<span class="alarm-days" role="img" aria-label="${escapeHtml(repeat)}">${ALARM_DAYS.map(([day, letter]) => `<i class="${days.includes(day) ? 'on' : ''}">${letter}</i>`).join('')}</span>`}
+        </div>
+        <div class="alarm-what"><div class="main"></div>
+          <div class="sub">${escapeHtml(meta.join(' · '))}</div>
+          <div class="alarm-volume">${levelBar(Math.round((alarm.volume ?? 0) / 10), 10, `Volume ${alarm.volume}`)}<span class="meta">${escapeHtml(alarm.volume ?? '')}</span></div></div>
+        <div class="alarm-tools">
+          <label class="check" title="${alarm.enabled ? 'Turn off' : 'Turn on'}"><input type="checkbox" class="alarm-enabled" ${alarm.enabled ? 'checked' : ''} aria-label="Alarm at ${escapeHtml(alarm.time.slice(0, 5))} on"><span class="box">${ICONS.tick}</span></label>
+          ${mini('pencil', 'Edit alarm', 'edit')}${mini('trash', 'Delete alarm', 'delete')}
+        </div>
+        <div class="alarm-now"><span class="meta">If it is sounding now</span>
+          <button type="button" class="inline-button quiet small" data-snooze>Snooze</button><button type="button" class="inline-button quiet small" data-stop>Stop</button></div>
+      </article>`);
+      $('.alarm-what .main', card).textContent = alarm.title;
+      $('.edit', card).addEventListener('click', (event) => editor(alarm, event.currentTarget));
+      $('.alarm-enabled', card).addEventListener('change', async (event) => {
+        const input = event.currentTarget;
+        input.disabled = true;
+        try { await api('PUT', '/api/alarms', { ...alarm, enabled: input.checked }); await refresh(); }
+        catch (e) { input.checked = !input.checked; input.disabled = false; toast('Alarm not changed', e.message, true); }
+      });
+      for (const [selector, action] of [['[data-snooze]', 'snooze'], ['[data-stop]', 'stop'], ['.delete', 'delete']]) $(selector, card).addEventListener('click', async () => {
+        if (action === 'delete' && !confirm(`Delete the ${alarm.time.slice(0, 5)} alarm?`)) return;
         try { await api('POST', '/api/alarms/' + action, { id: alarm.id, room: alarm.room }); await refresh(); }
         catch (e) { toast('Alarm not changed', e.message, true); }
       });
-      list.append(row);
+      list.append(card);
     }
-    $('#alarm-add', main).addEventListener('click', () => editor());
-    softkeys([{ label: 'Refresh', run: refresh }, { label: 'Radio', run: () => { location.hash = 'radio'; } }, { label: 'Add alarm', run: () => editor() }]);
+    softkeys([{ label: 'Refresh', run: refresh }, null, { label: 'Add alarm', run: () => editor() }]);
   },
 };
 
@@ -1370,7 +1721,7 @@ views.password = {
     const form = el(`<form class="popup"><h3>Change the bridge password</h3>
       <p>Everyone who opens this page needs it. Other browsers stay signed in until they sign out.</p>
       <label class="field"><span>Current password</span><input type="password" id="pw-current" autocomplete="current-password" required></label>
-      <label class="field"><span>New password</span><input type="password" id="pw-new" autocomplete="new-password" minlength="8" required></label>
+      <label class="field"><span>New password</span><input type="password" id="pw-new" autocomplete="new-password" minlength="8" required><span class="hint">At least 8 characters</span></label>
       <label class="field"><span>Type it again</span><input type="password" id="pw-confirm" autocomplete="new-password" required></label>
       <p class="error" id="pw-error" role="alert"></p><button type="submit" hidden></button></form>`);
     main.append(form);
