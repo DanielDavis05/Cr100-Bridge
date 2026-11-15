@@ -4,14 +4,15 @@ Time-boxed research spike, 2026-11-15, about two hours. Question: can the CR100'
 in the browser under [Ruffle](https://ruffle.rs) well enough to show a live preview of a controller's
 Spotify menu inside the bridge web UI?
 
-**Short answer: yes.** On top of the existing POC's ActionScript host, a small Music layer makes the
-stock UI browse a Spotify service: Music → Spotify → Playlists and Back again, with the controller's
-own panels, fonts, highlight and transitions. The data is a hard-coded tree served through the same
-`BrowseCacheMgr` calls `hh.anacapad` answers. What remains is engineering, not open questions:
-feeding the tree from the bridge, a room model for the Music key, 4.3.2 support and web-UI
-packaging. **Recommendation: a staged go.** First run a short spike on the data channel, getting the
-bridge's own menu into `BrowseCacheMgr`. If that works, build the Ruffle preview. Keep a hand-drawn
-HTML preview only as the fallback for users who haven't uploaded firmware (see the end).
+**Short answer: yes, and it works live.** On top of the existing POC's ActionScript host, a ~155-line
+Music layer makes the stock UI browse the bridge's real `SpotifyService` (`tools/spotify_service.py`)
+over SMAPI. The preview shows the edited per-controller menu (a custom shortcut, renamed and
+reordered sections) and browses into playlists and tracks, with the controller's own panels, fonts,
+highlight and transitions. A menu edit shows up the next time Spotify is opened, and a locked entry
+shows the bridge's lock message in the stock popup. The Spotify Web API was a fake fixture; the bridge
+code path was real. What remains is engineering: 4.3.2 support, a room model if the Music key itself
+should work, extraction from the uploaded `.upd`, and a web UI route. **Recommendation: go.** Keep a
+plain HTML list only as the fallback for users who haven't uploaded firmware (see the end).
 
 ## Prior work: the offline setup POC
 
@@ -69,6 +70,8 @@ test page, the throwaway tools and the screenshots live in a session scratch dir
 | 8. Selection *(POC)* | With only the step-1–7 shim, the wheel moved the selection index but no highlight was drawn and OK did nothing. Rebuilt on the 4.3 SWF with the POC's `bootstrap.as` unchanged plus a small Music layer: a fake Spotify media server, a `BrowseCacheMgr` serving a hard-coded tree, and `__resolve` traps that report missing members. Now the **selection highlight draws and Down moves it onto Spotify.** |
 | 9. Entering Spotify *(POC)* | OK first did nothing. Wrapping the browse functions in AS tracers showed why: `getSelectedChildNode` calls `getChildOfNode(this.browseStack.top(), line)`, and `browseStack` is created with `new BrowseStack()`, **a host class** the SWF never defines. Without it `top()` returned undefined, and the child lookup fell through to the native cache with an empty UDN. A 12-line AS `BrowseStack` (`push`/`pop`/`top`/`clear`/`length`) fixed it. OK then runs `primeThenPopulate` → `primeCache` → `onPrimed`, which my layer fires after 300 ms. |
 | 10. Spotify list *(POC)* | The service panel opened with the "Spotify" header but empty rows. Service lists use **Sonos's virtual-list TextField.** The panel sets `List_txt.OnFetchData = TextField_doFetchData` and `List_txt.node = node`, then calls `List_txt.setVL(childCnt, scrollPos)`. The field is expected to call `OnFetchData(first, n)`, which asks `node.doFetchData` (= `Node_FetchCDNodeChildrenEx`) for a `{labels, labelCnt}` chunk and returns it through `this.setVLText(labels, first, count)`. `labels` is one string of `\n`-separated titles. Emulating `setVL` (fetch every row) and `setVLText` (place lines into `text`) in AS made **Playlists, Albums, Artists, Liked Songs** render. OK on Playlists shows its three playlists, and Back returns. |
+| 11. Bridge data *(POC)* | The hard-coded tree was replaced by the bridge's own service. A scratch server runs the real `SpotifyService` offline: a fake Spotify Web API client, plus a per-controller menu with a custom "Road Trip Mix" playlist shortcut first and renamed sections. It serves the test site with a **same-origin `POST /smapi` proxy**, standing in for a future web UI route. `BrowseCacheMgr.primeCache` POSTs SMAPI `getMetadata` with AVM1 `XML.sendAndLoad`, maps `itemType` to a UPnP class and caches the rows in AS, then fires `onPrimed`; the synchronous `getContainerTotalMatches`/`getChildProperty`/`getPropertyOfChildren` read that cache. Container `"0"` maps to SMAPI `root`, and the layer puts **Search** first, as the host does for `Capabilities=1`. Result: Search, Road Trip Mix, Playlists, Albums, Liked Songs; the shortcut's three tracks; Playlists → Discover Weekly → its tracks. Containers show the ">" chevron and tracks don't. Back reuses the panel's stack without refetching. |
+| 12. Live edit and faults *(POC)* | The server reads the menu from a JSON file. After an edit (Liked Songs moved up, Albums renamed "Saved Albums", the shortcut locked), Back and re-entering Spotify showed the new menu, with no rebuild or reload. Opening the locked shortcut returns the bridge's `Client.FeatureLocked` fault. The stock UI registers its ZoneMenu panel through `RinconSystem.setServiceErrorHandler`, and passing the fault string to its `OnServiceError` shows **"This feature has been locked by your administrator"** in the controller's own popup. That needed one route rule: **AVM1 `XML.sendAndLoad` drops the body of a non-2xx reply**, so the proxy returns SOAP faults with HTTP 200. Whether the real host also leaves the list empty behind the popup is unverified. |
 
 Rendering itself is not the problem. Ruffle draws the vector art, bitmaps, pixel fonts and panel
 transitions of this SWF faithfully as far as the spike went. Every gap was a missing host service.
@@ -156,15 +159,15 @@ own SMAPI service, and starts from the POC.
 | Already done in the POC: AS host scaffolding, listener buses, async ops, TextField and String extensions, key input, string injection, font SWF, smoke test | — | Its `build.py` imports the patch helpers from `cr100-firmware`'s pre-move path. It also hard-codes the 4.3 rootfs. |
 | Extraction pipeline from the user's uploaded `.upd`: `MainUI.swf`, the six fonts and both `en-US.xml` files; font SWF; serving Ruffle | 2–3 days | `online_updates._mainui_from_cramfs` already reads `opt/swf/MainUI.swf` from the update's cramfs and needs generalising to other paths. The font SWF needs a JDK plus JPEXS at build time, or a Python replacement. Compiling `bootstrap.as` can happen once at release time, since the injected tags don't depend on the user's SWF. |
 | 4.3.2 and CFW builds | 1–2 days per family, then upkeep | The POC targets 4.3. 4.3.2 is the controller firmware the bridge supports. |
-| Done in this spike's Music layer: media server, `BrowseCacheMgr` contract with priming, `BrowseStack`, virtual-list TextField | — | `poc/music.as`, about 100 lines of AS. |
-| A minimal room model, so the Music key works without jumping straight to the Browse panel | 2–4 days | The Music key needs a current zone group: ZoneGroup/ZonePlayer objects with methods, built in AS. A preview could also keep opening the Browse panel directly and skip this. |
-| `BrowseCacheMgr` over the bridge's own Spotify menu | 2–4 days | The data shapes and call order are now proven. The open part is the data channel: AS `XML`/`LoadVars` requests to the bridge, which can't be made synchronous, are untested. So is JS through the SWF 8 helper. `primeCache` → `onPrimed` is asynchronous, which suits a fetch on prime with synchronous reads from an AS cache afterwards. |
+| Done in this spike's Music layer: media server, `BrowseCacheMgr` fed by SMAPI `getMetadata` over `XML.sendAndLoad` with priming, Search insertion, `BrowseStack`, virtual-list TextField, service faults to the stock popup | — | `poc/music.as`, about 155 lines of AS. |
+| Preview route in `tools/webui.py` | 1–2 days | Forward `POST` SMAPI calls to the running `SpotifyService` and return faults as HTTP 200. **Select the profile being edited:** the service picks a menu by the caller's address (`controller_resolver`), and through a proxy every caller is the Pi. The route needs to name the controller (MAC) explicitly, and should allow only browse methods (`getMetadata`, `getMediaMetadata`, `getExtendedMetadata`, `search`). Showing unsaved edits would mean passing a draft menu instead of the saved one. |
+| Paging | ½ day | The layer asks for 100 rows at once and fetches every row in `setVL`. Larger lists should page through `OnFetchData` and `index`/`count`. |
+| A minimal room model, so the Music key works without jumping straight to the Browse panel | 2–4 days, optional | The Music key needs a current zone group: ZoneGroup/ZonePlayer objects with methods, built in AS. The preview can keep opening the Browse panel directly and skip this. |
 | Integration in `tools/webui`: CSP, MIME types, size | 1–2 days | See below. |
 
-**Total: roughly 1.5–2.5 weeks, and no remaining step is a research question.** The data channel is
-the main risk, and the next spike should take it first. Maintenance comes on top: every CFW build
-changes the SWF (the repo already ships patched variants), and the preview would have to track each
-build the user uploads.
+**Total: roughly 1–2 weeks without the room model, and no remaining step is a research question.**
+Maintenance comes on top: each firmware family needs its host layer checked, and the preview tracks
+the build the user uploads.
 
 Web UI costs that apply whatever the route:
 
@@ -198,34 +201,34 @@ Ruffle itself is MIT/Apache-2.0 and could be vendored with its license files. Th
 
 ## Recommendation
 
-**A staged go for the Ruffle preview, starting from the POC.**
+**Go: build the Spotify page's preview on Ruffle, starting from the POC.**
 
 | | Ruffle + real `MainUI.swf` | Hand-drawn HTML preview |
 | --- | --- | --- |
-| Fidelity | The controller's own panels, fonts, highlight, icons and transitions | Close: same 320×240 layout and pixel-font metrics |
-| Shows real bridge output | Once the data channel feeds `BrowseCacheMgr` | Directly: render `spotify_menu.menu_for_controller` / SMAPI `getMetadata` results |
+| Fidelity | The controller's own panels, fonts, highlight, icons, popups and transitions | Close: same 320×240 layout and pixel-font metrics |
+| Shows real bridge output | Yes: the bridge's own SMAPI responses, demonstrated | Directly: render `spotify_menu.menu_for_controller` / SMAPI `getMetadata` results |
 | Behaves like the controller | Yes: real navigation, Back, softkeys | Only as far as it is re-created |
 | Works without the user's firmware | No: needs an uploaded `.upd` | Yes |
 | Firmware-version coupling | Medium: the host layer targets host APIs, and only the strings/hooks injection touches the SWF | None |
 | Web UI impact | 5 MB gzipped wasm, CSP loosened for WebAssembly and Ruffle's styles | None beyond existing CSS/JS |
-| Effort | ~1.5–2.5 weeks from the POC, plus upkeep | ~1–3 days |
+| Effort | ~1–2 weeks from the POC, plus upkeep | ~1–3 days |
 
-Before this follow-up, the case against Ruffle was that getting real menu content into it meant
-reimplementing an unknown slice of `hh.anacapad`. That slice is now known and small for browsing: a
-media server, five `BrowseCacheMgr` calls, a stack class and a virtual-list text field. Real
-behaviour is what makes a live preview worth more than a picture.
+The first report argued against Ruffle because getting real menu content into it meant reimplementing
+an unknown slice of `hh.anacapad`. That slice is now known and small for browsing: a media server, five
+`BrowseCacheMgr` calls, a stack class, a virtual-list text field and the service-error handler. The data
+channel works without JavaScript, through plain AVM1 `XML.sendAndLoad` to a same-origin route. The
+preview shows exactly what the bridge serves the controller, including locks and faults, which a
+re-drawing can only imitate.
 
-The steps:
+Next steps, in order:
 
-1. **Data channel spike (1–2 days):** serve the bridge's Spotify menu to `music.as`'s
-   `primeCache`, using AS `XML`/`LoadVars` from the bridge's own origin. If that can't work, use JS
-   through the helper movie.
-2. If it works, port the POC host and Music layer to 4.3.2 and wire the extraction from the uploaded
-   `.upd` and the web UI integration.
-3. Keep a minimal HTML list as the fallback when no firmware has been uploaded.
+1. Port the POC host and Music layer to **4.3.2**, the firmware the bridge supports, and fix the POC's
+   `build.py` paths.
+2. Add the `tools/webui.py` preview route (above) and the Ruffle assets, CSP and MIME changes.
+3. Wire extraction of the SWF, fonts and strings from the uploaded `.upd`.
+4. Show a minimal HTML list when no firmware has been uploaded.
 
-Stop at step 1 if neither channel works without contortions. In that case, build the HTML preview
-instead.
+The SWF 8 helper and the JS shim from the first half of this spike are not needed on this route.
 
 ## Reproducing
 
@@ -249,11 +252,20 @@ All artefacts are in this session's scratch directory, which a reboot can clear:
   `site/MainUI-poc-music.swf`. Open `site/poc.html`, click the player, then use the arrow keys and
   Enter.
   `hooks-music.as` also wraps the browse functions in `fscommand` tracers, which is how the
-  `BrowseStack` and `setVL` gaps were found.
+  `BrowseStack` and `setVL` gaps were found. `music-fixture.as` is the earlier hard-coded-tree version.
+- `tools/bridge_preview_server.py`: runs the real `SpotifyService` offline on 8941 with a fake Web API
+  client, and serves `site/` on 8931 with the `POST /smapi` proxy. It reads the controller menu from
+  `spike-menu.json`, so editing that file and re-entering Spotify shows the change. `tools/soap.sh ID`
+  calls `getMetadata` through the proxy. Start the server with
+  `python3.13 -I tools/bridge_preview_server.py site`.
 - `shots/`: `01-stock.jpg` (chrome only), `02-strings.jpg` (title and softkey text),
   `03-device-mode-rooms.png` (on-device boot path), `04-music-menu-spotify.png` (Music root with the
   shim's Spotify entry), `05-poc-selection-spotify.png` (highlight on Spotify),
-  `06-poc-spotify-list.png` (the service list) and `07-poc-playlists.png` (second level).
+  `06-poc-spotify-list.png` (the service list) and `07-poc-playlists.png` (second level), all with the
+  fixture tree. From the bridge's real service: `08-bridge-spotify-root.png`,
+  `09-bridge-road-trip-shortcut.png`, `10-bridge-playlists.png`, `11-bridge-discover-weekly.png`,
+  `12-bridge-after-menu-edit.png` and `13-bridge-locked-shortcut.png`. `bridge-run-*.log` are the
+  server's SMAPI and proxy logs.
 
 Run `serve.sh`, then open
 `http://127.0.0.1:8931/index.html?swf=helper8-l1.swf`. In the page console, `spikePlayer.nav('Browse')`
