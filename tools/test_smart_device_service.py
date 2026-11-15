@@ -341,7 +341,7 @@ class SmartDevicesHTTP(unittest.TestCase):
             before = self.service.updates.get(key, 1)
             first = self.send('devices.power', {**self.token(root, row), 'desired': 'off'})
             # Published on receipt, before HA has answered, and listed as off.
-            self.assertGreater(self.service.updates.get(key, 1), before)
+            self.assertTrue(wait_for(lambda: self.service.updates.get(key, 1) > before, 2))
             rows, _ = self.browse()
             self.assertTrue(rows[row]['class'].startswith('object.item.sdOff.'), rows[row])
             self.assertEqual(rows[row]['view'], root[row]['view'])
@@ -357,6 +357,28 @@ class SmartDevicesHTTP(unittest.TestCase):
         self.assertTrue(wait_for(lambda: row not in self.service.power_targets, 5))
         rows, _ = self.browse()
         self.assertTrue(rows[row]['class'].startswith('object.item.sdOn.'))
+
+    def test_power_receipt_adds_no_refresh_to_the_request(self):
+        # Extra work inside SetString can miss the controller's ~2 s reply deadline.
+        root, _ = self.browse()
+        inside, calls = threading.local(), []
+        original_action, original_refresh = self.service.action, self.service._refresh
+        def action(context, params):
+            inside.active = True
+            try: return original_action(context, params)
+            finally: inside.active = False
+        def refresh():
+            calls.append(getattr(inside, 'active', False))
+            return original_refresh()
+        key = self.player.config.udn, 'SD:'
+        before = self.service.updates.get(key, 1)
+        with patch.object(self.service, '_refresh', refresh):
+            handlers = self.house.ui_events.handlers
+            handlers['devices.power'] = (action,) + handlers['devices.power'][1:]
+            request = self.send('devices.power', {**self.token(root, 'switch.lantern_plug'), 'desired': 'off'})
+            self.assertTrue(wait_for(lambda: self.service.updates.get(key, 1) > before, 2))
+            self.assertTrue(self.finished(request))
+        self.assertEqual(calls.count(True), 1)  # only the existing validation refresh
 
     def test_a_stale_on_event_during_a_pending_off_does_not_flip_the_row_back(self):
         root, _ = self.browse()

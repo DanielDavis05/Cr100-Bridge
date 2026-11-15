@@ -503,7 +503,11 @@ class SmartDeviceService:
                         target = self.power_targets.setdefault(entity, {'jobs': 0})
                         target.update(on=params['desired'] == 'on', until=until, jobs=target['jobs'] + 1)
                         self.own_until[entity] = until
-                    with self._batched(): self._refresh()
+                    # The service loop publishes the requested state as its next
+                    # step. Not here: work inside SetString (or a thread holding
+                    # this lock) can push the reply past the controller's ~2 s
+                    # deadline ("Device action unavailable.").
+                    self.changed_entities.update(job.power)
                 elif context.action == 'devices.level':
                     # A level action sets its own state; drop an earlier power request's display.
                     for entity in affected:
