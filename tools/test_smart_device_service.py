@@ -326,6 +326,98 @@ class SmartDevicesHTTP(unittest.TestCase):
             self.assertTrue(self.finished(request))
             self.assertTrue(wait_for(lambda: self.service.updates[key] > before, 3))
 
+    def test_power_press_lists_the_requested_state_at_once_and_a_quick_second_press_reverses_it(self):
+        root, _ = self.browse()
+        row = 'light.lantern_ceiling'
+        self.assertTrue(root[row]['class'].startswith('object.item.sdOn.'))
+        release, entered = threading.Event(), threading.Event()
+        original = self.service.client.call_service
+        def slow(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return original(*args, **kwargs)
+        with patch.object(self.service.client, 'call_service', slow):
+            key = self.player.config.udn, 'SD:'
+            before = self.service.updates.get(key, 1)
+            first = self.send('devices.power', {**self.token(root, row), 'desired': 'off'})
+            # Published on receipt, before HA has answered, and listed as off.
+            self.assertGreater(self.service.updates.get(key, 1), before)
+            rows, _ = self.browse()
+            self.assertTrue(rows[row]['class'].startswith('object.item.sdOff.'), rows[row])
+            self.assertEqual(rows[row]['view'], root[row]['view'])
+            self.assertTrue(entered.wait(3))
+            # A second press made from the refreshed row asks for on, and wins.
+            second = self.send('devices.power', {**self.token(rows, row), 'desired': 'on'})
+            rows, _ = self.browse()
+            self.assertTrue(rows[row]['class'].startswith('object.item.sdOn.'), rows[row])
+            release.set()
+            self.assertTrue(self.finished(first) and self.finished(second))
+        self.assertEqual([c[:2] for c in self.fake.service_requests[-2:]], [('light', 'turn_off'), ('light', 'turn_on')])
+        self.assertTrue(wait_for(lambda: self.fake.states[row]['state'] == 'on'))
+        self.assertTrue(wait_for(lambda: row not in self.service.power_targets, 5))
+        rows, _ = self.browse()
+        self.assertTrue(rows[row]['class'].startswith('object.item.sdOn.'))
+
+    def test_a_stale_on_event_during_a_pending_off_does_not_flip_the_row_back(self):
+        root, _ = self.browse()
+        row = 'light.lantern_ceiling'
+        seen = []
+        original_call, original_replace = self.service.client.call_service, self.service._replace_view
+        def late(*args, **kwargs):
+            # HA reports an older "on" transition while the off is still in flight.
+            self.fake.set(row, 'on', brightness=120)
+            self.assertTrue(wait_for(lambda: self.service.client.states[row]['attributes'].get('brightness') == 120, 3))
+            time.sleep(.2)
+            return original_call(*args, **kwargs)
+        def watch(view, rows, signature):
+            seen.extend(r.on for r in rows if r.row_id == row)
+            return original_replace(view, rows, signature)
+        with patch.object(self.service.client, 'call_service', late), \
+                patch.object(self.service, '_replace_view', watch):
+            request = self.send('devices.power', {**self.token(root, row), 'desired': 'off'})
+            self.assertTrue(self.finished(request))
+            self.assertTrue(wait_for(lambda: row not in self.service.power_targets, 5))
+            self.browse()
+        # The validation refresh before the press is registered still lists it on;
+        # from the first "off" on, it is never listed as on again.
+        self.assertIn(False, seen)
+        self.assertNotIn(True, seen[seen.index(False):])
+        self.assertGreater(len(seen) - seen.index(False), 2)
+
+    def test_failed_power_press_lists_the_actual_state_again(self):
+        root, _ = self.browse()
+        row = 'switch.lantern_plug'
+        state = root[row]['class'].split('.')[2]
+        desired = 'off' if state == 'sdOn' else 'on'
+        self.fake.fail_services = True
+        request = self.send('devices.power', {**self.token(root, row), 'desired': desired})
+        self.assertTrue(self.finished(request))
+        self.assertEqual(self.result(request)['code'], 'device_failed')
+        self.assertNotIn(row, self.service.power_targets)
+        rows, _ = self.browse()
+        self.assertEqual(rows[row]['class'].split('.')[2], state)
+
+    def test_rejected_power_press_never_lists_a_requested_state(self):
+        root, _ = self.browse()
+        row = 'switch.lantern_plug'
+        self.send('devices.power', {'view': 'stale-token', 'id': row, 'desired': 'off'})
+        self.assertEqual(self.service.power_targets, {})
+
+    def test_pending_power_display_expires_if_ha_never_reports_the_state(self):
+        root, _ = self.browse()
+        row = 'switch.lantern_plug'
+        state = root[row]['class'].split('.')[2]
+        desired = 'off' if state == 'sdOn' else 'on'
+        original = self.service.client.call_service
+        def ignored(*args, **kwargs): return None  # HA accepts but the state never changes
+        with patch.object(smart_device_service, 'CONFIRM_TIMEOUT', .3), \
+                patch.object(self.service.client, 'call_service', ignored):
+            request = self.send('devices.power', {**self.token(root, row), 'desired': desired})
+            self.assertTrue(self.finished(request))
+            self.assertTrue(wait_for(lambda: row not in self.service.power_targets, 3))
+        rows, _ = self.browse()
+        self.assertEqual(rows[row]['class'].split('.')[2], state)
+
     def test_state_refresh_retains_token_but_rename_foreign_row_and_foreign_room_reject(self):
         root, _ = self.browse()
         before = root['SD:all:lantern']['view']

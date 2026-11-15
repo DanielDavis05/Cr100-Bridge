@@ -33,6 +33,10 @@ LEVEL_HOLD = 1.5        # seconds after the latest level action (received, start
                         # a level call still in flight holds its targets throughout
 LEVEL_CHANGE_QUIET = 1.0  # seconds after the target's latest state change
 LEVEL_HOLD_MAX = 8.0    # never hold a list update longer than this after a gesture's first action
+# A power press is shown at once: from receipt until HA reports the requested
+# state (or the request fails), the bridge lists its targets in that state, so a
+# second press made before the light settles reads the new state and a stale
+# event mid-transition never flips the row back.
 DOMAINS = {'light', 'switch', 'input_boolean', 'fan', 'scene', 'script'}
 
 
@@ -59,6 +63,7 @@ class Job:
     feedback: str
     started: float
     held: tuple = ()
+    power: tuple = ()
 
 
 class SmartDeviceService:
@@ -79,6 +84,8 @@ class SmartDeviceService:
         self.changed_entities, self.refresh_all = set(), True
         self.own_until, self.entity_index = {}, {}
         self.level_holds, self.deferred = {}, {}
+        # entity -> {'on': requested state, 'jobs': unfinished power jobs, 'until': expiry}
+        self.power_targets = {}
         self.notify_batch = None
         self.closed, self.revision = False, 0
         self.catalogue = SmartCatalogue(self.snapshot, dict(self.client.states))
@@ -186,6 +193,19 @@ class SmartDeviceService:
             self.refresh_all = True
             self.condition.notify()
 
+    def _requested_states(self, states, now):
+        """HA states with each pending power request shown as its requested state."""
+        for entity, target in list(self.power_targets.items()):
+            state = states.get(entity)
+            actual = state.get('state') if isinstance(state, dict) else None
+            if actual in (None, 'unavailable', 'unknown') or not target['jobs'] and (
+                    actual == ('on' if target['on'] else 'off') or now >= target['until']):
+                del self.power_targets[entity]
+                continue
+            if actual != ('on' if target['on'] else 'off'):
+                states[entity] = dict(state, state='on' if target['on'] else 'off')
+        return states
+
     def _held(self, entity, now):
         hold = self.level_holds.get(entity)
         if not hold or now - hold['first'] >= LEVEL_HOLD_MAX: return False
@@ -203,8 +223,8 @@ class SmartDeviceService:
 
     def _refresh(self):
         previous = self.catalogue
-        states = dict(self.client.states)
         now = self.clock()
+        states = self._requested_states(dict(self.client.states), now)
         # A mixed callback batch can include our action and an unrelated
         # external update. Only a changed entity still owned by our action can
         # bypass the cap, and only in a view that actually depends on it.
@@ -475,6 +495,20 @@ class SmartDeviceService:
                         if not old.targets: superseded.append(old)
                     for old in superseded: self.pending.remove(old)
                 self.pending.append(job)
+                affected = self._expanded_targets(row, row.targets)
+                if context.action == 'devices.power':
+                    job.power = tuple(sorted(affected))
+                    until = self.clock() + ACTION_TIMEOUT + CONFIRM_TIMEOUT
+                    for entity in job.power:
+                        target = self.power_targets.setdefault(entity, {'jobs': 0})
+                        target.update(on=params['desired'] == 'on', until=until, jobs=target['jobs'] + 1)
+                        self.own_until[entity] = until
+                    with self._batched(): self._refresh()
+                elif context.action == 'devices.level':
+                    # A level action sets its own state; drop an earlier power request's display.
+                    for entity in affected:
+                        if entity in self.power_targets and not self.power_targets[entity]['jobs']:
+                            del self.power_targets[entity]
                 self.condition.notify()
             for old in superseded: self._finish(old, outcome='superseded')
             return UIResult('', {'pending': True})
@@ -494,6 +528,16 @@ class SmartDeviceService:
             with self.condition:
                 for entity in job.held:
                     if entity in self.level_holds: self.level_holds[entity]['busy'] = False
+        if job.power:
+            with self.condition:
+                for entity in job.power:
+                    target = self.power_targets.get(entity)
+                    if target is None: continue
+                    target['jobs'] = max(0, target['jobs'] - 1)
+                    if error: del self.power_targets[entity]
+                    elif not target['jobs']: target['until'] = min(target['until'], self.clock() + CONFIRM_TIMEOUT + 1)
+                self.changed_entities.update(job.power)
+                self.condition.notify()
         self.household.ui_events.complete(job.context, UIResult('Started' if job.context.action == 'devices.activate' else '',
                                                                {'pending': False}), error)
         self.household.log({'event': 'smart-device-action', 'action': job.context.action,
@@ -567,8 +611,19 @@ class SmartDeviceService:
                 if self.closed: return
                 changed, all_changed = self.changed_entities, self.refresh_all
                 self.changed_entities, self.refresh_all = set(), False
+                now = self.clock()
+                expired = any(not t['jobs'] and now >= t['until'] for t in self.power_targets.values())
+                # A confirmation that comes due ends its targets' requested-state
+                # display; the refresh below then publishes the actual state once.
+                released = set()
+                for due, targets, versions in self.confirmations:
+                    if due <= now and all(self.state_versions.get(t, 0) == v for t, v in zip(targets, versions)):
+                        for target in targets:
+                            if target in self.power_targets and not self.power_targets[target]['jobs']:
+                                del self.power_targets[target]
+                                released.add(target)
                 with self._batched():
-                    if changed or all_changed:
+                    if changed or all_changed or expired or released:
                         self._refresh()
                     now = self.clock()
                     for key, due in list(self.trailing.items()):
@@ -579,7 +634,7 @@ class SmartDeviceService:
                             continue
                         if due <= now:
                             self.confirmations.remove((due, targets, versions))
-                            self._affected(targets, defer=True)
+                            if not set(targets) <= released: self._affected(targets, defer=True)
                     for key, entities in list(self.deferred.items()):
                         if not any(self._held(e, now) for e in entities):
                             del self.deferred[key]
