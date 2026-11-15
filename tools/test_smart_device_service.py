@@ -219,6 +219,113 @@ class SmartDevicesHTTP(unittest.TestCase):
         self.assertEqual(self.result(request)['message'], 'Started')
         self.assertTrue(all(service != 'toggle' for _, service, _, _ in self.fake.service_requests))
 
+    def test_level_gesture_holds_list_updates_and_publishes_once_when_the_light_is_quiet(self):
+        root, _ = self.browse()
+        key = self.player.config.udn, 'SD:'
+        with patch.object(smart_device_service, 'LEVEL_HOLD', .7), \
+                patch.object(smart_device_service, 'LEVEL_CHANGE_QUIET', .5):
+            self.fake.settle = {'steps': 5, 'span': .5}
+            before = self.service.updates.get(key, 1)
+            tokens = {view.udn: view.token for view in self.service.views.values() if view.container == 'SD:'}
+            for value in ('50', '40', '30'):
+                request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': value})
+                self.assertTrue(self.finished(request))
+                time.sleep(.15)
+            # Several state changes have arrived, yet nothing was published mid-gesture.
+            self.assertGreater(self.service.state_versions['light.lantern_ceiling'], 2)
+            self.assertEqual(self.service.updates.get(key, 1), before)
+            self.assertTrue(wait_for(lambda: self.service.updates.get(key, 1) > before, 6))
+            published = self.service.updates[key]
+            self.assertTrue(wait_for(lambda: self.fake.settling == {}, 4))
+            time.sleep(1.2)
+            self.assertEqual(self.service.updates[key], published)
+            self.assertEqual(self.service.deferred, {})
+            # The token survives: holding never replaces a view.
+            self.assertTrue(all(view.token == tokens[view.udn] for view in self.service.views.values()
+                                if view.container == 'SD:'))
+        self.assertEqual([c[2] for c in self.fake.calls if c[0] == 'turn_on'],
+                         [{'brightness_pct': 50}, {'brightness_pct': 40}, {'brightness_pct': 30}])
+
+    def test_level_hold_starts_at_receipt_and_lasts_while_the_call_is_in_flight(self):
+        root, _ = self.browse()
+        observed = []
+        original = self.service.client.call_service
+        def slow(*args, **kwargs):
+            time.sleep(.6)  # longer than the patched LEVEL_HOLD below
+            with self.service.condition:
+                observed.append(self.service._held('light.lantern_ceiling', self.service.clock()))
+            return original(*args, **kwargs)
+        with patch.object(smart_device_service, 'LEVEL_HOLD', .2), \
+                patch.object(smart_device_service, 'LEVEL_CHANGE_QUIET', .1), \
+                patch.object(self.service.client, 'call_service', slow):
+            request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': '45'})
+            self.assertIn('light.lantern_ceiling', self.service.level_holds)  # held from receipt
+            self.assertTrue(self.finished(request))
+            self.assertEqual(observed, [True])
+            self.assertFalse(self.service.level_holds.get('light.lantern_ceiling', {}).get('busy'))
+            # A failing call also releases its in-flight hold.
+            self.fake.fail_services = True
+            request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': '35'})
+            self.assertTrue(self.finished(request))
+            self.assertFalse(self.service.level_holds.get('light.lantern_ceiling', {}).get('busy'))
+            self.assertTrue(wait_for(lambda: 'light.lantern_ceiling' not in self.service.level_holds, 3))
+
+    def test_failed_level_action_is_published_and_reported_despite_a_hold(self):
+        root, _ = self.browse()
+        key = self.player.config.udn, 'SD:'
+        with patch.object(smart_device_service, 'LEVEL_HOLD', 30), \
+                patch.object(smart_device_service, 'LEVEL_HOLD_MAX', 60):
+            request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': '40'})
+            self.assertTrue(self.finished(request))
+            self.assertIn('light.lantern_ceiling', self.service.level_holds)
+            before = self.service.updates.get(key, 1)
+            self.fake.fail_services = True
+            request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': '30'})
+            self.assertTrue(self.finished(request))
+            self.assertEqual(self.result(request)['code'], 'device_failed')
+            # The failure's list refresh is not held back by the gesture.
+            self.assertTrue(wait_for(lambda: self.service.updates.get(key, 1) > before, 2))
+
+    def test_one_pass_sends_one_content_directory_notify_per_room(self):
+        self.browse(); self.browse('SD:other')
+        calls = []
+        original = self.player.publish_changed
+        def counted(service):
+            calls.append((service, self.service.event_ids(self.player.config.udn)))
+            return original(service)
+        with patch.object(self.player, 'publish_changed', counted):
+            udn = self.player.config.udn
+            with self.service.condition:
+                before = {c: self.service.updates.get((udn, c), 1) for c in ('SD:', 'SD:other')}
+                with self.service._batched():
+                    self.service._publish(udn, 'SD:', bypass=True)
+                    self.service._publish(udn, 'SD:other', bypass=True)
+                    # Nothing leaves while the pass is still running.
+                    self.assertEqual(calls, [])
+            self.assertEqual(len(calls), 1)
+            self.assertIn('SD:,%d' % (before['SD:'] + 1), calls[0][1])
+            self.assertIn('SD:other,%d' % (before['SD:other'] + 1), calls[0][1])
+            # Outside a pass, a publish still notifies at once.
+            with self.service.condition: self.service._publish(udn, 'SD:', bypass=True)
+            self.assertEqual(len(calls), 2)
+            self.assertIsNone(self.service.notify_batch)
+
+    def test_hold_expires_at_its_maximum_and_power_actions_are_not_held(self):
+        root, _ = self.browse()
+        key = self.player.config.udn, 'SD:'
+        before = self.service.updates.get(key, 1)
+        request = self.send('devices.power', {**self.token(root, 'switch.lantern_plug'), 'desired': 'off'})
+        self.assertTrue(self.finished(request))
+        self.assertTrue(wait_for(lambda: self.service.updates.get(key, 1) > before))
+        self.assertEqual(self.service.level_holds, {})
+        with patch.object(smart_device_service, 'LEVEL_HOLD_MAX', .3), \
+                patch.object(smart_device_service, 'LEVEL_HOLD', 30):
+            self.fake.settle = {'steps': 2, 'span': .2}
+            before = self.service.updates[key]
+            request = self.send('devices.level', {**self.token(root, 'light.lantern_ceiling'), 'value': '10'})
+            self.assertTrue(self.finished(request))
+            self.assertTrue(wait_for(lambda: self.service.updates[key] > before, 3))
+
     def test_state_refresh_retains_token_but_rename_foreign_row_and_foreign_room_reject(self):
         root, _ = self.browse()
         before = root['SD:all:lantern']['view']

@@ -6,6 +6,7 @@ the only explicit device-write path. HA event callbacks only enqueue work.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import secrets
 import threading
@@ -24,6 +25,14 @@ MAX_VIEWS = 512
 MAX_PENDING = 64
 ACTION_TIMEOUT = 10.0
 UNCERTAIN_LIMIT = 30.0
+# A controller turning a level slider sends a value every second or so, and
+# the light keeps changing for a while after each one. Every list publish makes
+# the controller run a blocking Browse, so while a level gesture is in progress
+# the target's list changes are held and published once when it goes quiet.
+LEVEL_HOLD = 1.5        # seconds after the latest level action (received, started or finished);
+                        # a level call still in flight holds its targets throughout
+LEVEL_CHANGE_QUIET = 1.0  # seconds after the target's latest state change
+LEVEL_HOLD_MAX = 8.0    # never hold a list update longer than this after a gesture's first action
 DOMAINS = {'light', 'switch', 'input_boolean', 'fan', 'scene', 'script'}
 
 
@@ -49,6 +58,7 @@ class Job:
     targets: tuple
     feedback: str
     started: float
+    held: tuple = ()
 
 
 class SmartDeviceService:
@@ -68,6 +78,8 @@ class SmartDeviceService:
         self.snapshot, self.snapshot_revision = hub.snapshot(), hub.revision
         self.changed_entities, self.refresh_all = set(), True
         self.own_until, self.entity_index = {}, {}
+        self.level_holds, self.deferred = {}, {}
+        self.notify_batch = None
         self.closed, self.revision = False, 0
         self.catalogue = SmartCatalogue(self.snapshot, dict(self.client.states))
         self.connected = self.client.connected.is_set()
@@ -174,6 +186,21 @@ class SmartDeviceService:
             self.refresh_all = True
             self.condition.notify()
 
+    def _held(self, entity, now):
+        hold = self.level_holds.get(entity)
+        if not hold or now - hold['first'] >= LEVEL_HOLD_MAX: return False
+        if hold.get('busy'): return True
+        return now < max(hold['action'] + LEVEL_HOLD, hold['change'] + LEVEL_CHANGE_QUIET if hold['change'] else 0)
+
+    def _hold_level(self, entities, busy=None):
+        now = self.clock()
+        for entity in entities:
+            hold = self.level_holds.get(entity)
+            if hold is None or now - hold['first'] >= LEVEL_HOLD_MAX or not self._held(entity, now):
+                hold = self.level_holds[entity] = {'first': now, 'action': now, 'change': 0}
+            hold['action'] = now
+            if busy is not None: hold['busy'] = busy
+
     def _refresh(self):
         previous = self.catalogue
         states = dict(self.client.states)
@@ -183,6 +210,8 @@ class SmartDeviceService:
         # bypass the cap, and only in a view that actually depends on it.
         own_changes = {entity for entity, due in self.own_until.items()
                        if due >= now and previous.states.get(entity) != states.get(entity)}
+        for entity, hold in self.level_holds.items():
+            if previous.states.get(entity) != states.get(entity): hold['change'] = now
         connected = self.client.connected.is_set()
         availability = connected != self.connected
         self.connected = connected
@@ -208,6 +237,13 @@ class SmartDeviceService:
                 tuple((r.row_id, r.available) for r in view.rows)
             old_rows = view.rows
             changed, structural = self._replace_view(view, rows, self.catalogue.structural_signature(rows))
+            if changed and self.level_holds and not (structural or availability or row_availability):
+                held = {entity for catalogue, candidates in ((previous, old_rows), (self.catalogue, rows))
+                        for row in candidates for entity in self._expanded_targets(row, row.targets, catalogue)
+                        if entity in self.level_holds and self._held(entity, now)}
+                if held:
+                    self.deferred.setdefault((view.udn, view.container), set()).update(held)
+                    continue
             if changed:
                 own = bool(own_changes) and any(
                     own_changes.intersection(self._expanded_targets(row, row.targets, catalogue))
@@ -225,8 +261,27 @@ class SmartDeviceService:
         self.trailing.pop(key, None)
         self.last_publish[key] = now
         self.updates[key] = self.updates.get(key, 1) + 1
+        if self.notify_batch is not None: self.notify_batch.add(udn)
+        else: self._notify(udn)
+
+    def _notify(self, udn):
         player = self.household.by_udn.get(udn)
         if player: player.publish_changed('ContentDirectory')
+
+    @contextmanager
+    def _batched(self):
+        # The controller answers nearly every ContentDirectory NOTIFY with its
+        # own blocking Browse round, so one pass that bumps several containers
+        # of a room (Devices, its room and group folders) sends a single NOTIFY
+        # carrying all of their new ContainerUpdateIDs.
+        if self.notify_batch is not None:
+            yield
+            return
+        self.notify_batch = set()
+        try: yield
+        finally:
+            batch, self.notify_batch = self.notify_batch, None
+            for udn in sorted(batch): self._notify(udn)
 
     def event_ids(self, udn):
         with self.condition:
@@ -235,7 +290,7 @@ class SmartDeviceService:
 
     def browse(self, state, args):
         with self.condition:
-            self._refresh()
+            with self._batched(): self._refresh()
             object_id = args['ObjectID']
             flag = args.get('BrowseFlag', 'BrowseDirectChildren')
             if flag == 'BrowseMetadata' and not object_id.startswith('SD:'):
@@ -349,7 +404,7 @@ class SmartDeviceService:
     def _validate(self, context, params):
         if self.closed or not self.enabled or not self.client.connected.is_set():
             raise UIEventError('unavailable', 'Home Assistant unavailable')
-        self._refresh()
+        with self._batched(): self._refresh()
         view = self.tokens.get(params.get('view'))
         if view is None or view.udn != context.room_udn or view.address != context.controller_ip:
             raise UIEventError('list_changed', 'List changed. Select again.')
@@ -410,6 +465,7 @@ class SmartDeviceService:
                 row = self._validate(context, params)
                 if len(self.pending) >= MAX_PENDING:
                     raise UIEventError('busy', 'Device busy. Try again.')
+                if context.action == 'devices.level': self._hold_level(self._expanded_targets(row, row.targets))
                 job = Job(context, dict(params), tuple(row.targets), feedback, started)
                 superseded = []
                 if context.action != 'devices.activate':
@@ -434,6 +490,10 @@ class SmartDeviceService:
                             'outcome': outcome, 'duration_ms': round((self.clock() - started) * 1000)})
 
     def _finish(self, job, error=None, outcome='ok'):
+        if job.held:
+            with self.condition:
+                for entity in job.held:
+                    if entity in self.level_holds: self.level_holds[entity]['busy'] = False
         self.household.ui_events.complete(job.context, UIResult('Started' if job.context.action == 'devices.activate' else '',
                                                                {'pending': False}), error)
         self.household.log({'event': 'smart-device-action', 'action': job.context.action,
@@ -458,6 +518,9 @@ class SmartDeviceService:
                 versions = tuple(self.state_versions.get(t, 0) for t in targets)
                 affected = self._expanded_targets(row, targets)
                 for target in affected: self.own_until[target] = self.clock() + 10 + CONFIRM_TIMEOUT
+                if job.context.action == 'devices.level':
+                    job.held = tuple(affected)
+                    self._hold_level(affected, busy=True)
                 generation = self.client.connection_generation
             if not targets: return self._finish(job, outcome='superseded')
             action = job.context.action.rsplit('.', 1)[-1]
@@ -472,6 +535,7 @@ class SmartDeviceService:
             self.client.call_service(row.domain, service, list(targets), data, timeout=remaining_budget)
             with self.condition:
                 for target in affected: self.own_until[target] = self.clock() + CONFIRM_TIMEOUT
+                if job.context.action == 'devices.level': self._hold_level(affected, busy=False)
                 if all(self.state_versions.get(t, 0) == version for t, version in zip(targets, versions)):
                     self.confirmations.append((self.clock() + CONFIRM_TIMEOUT, targets, versions))
                 self.condition.notify()
@@ -487,11 +551,15 @@ class SmartDeviceService:
             message = 'Light not responding' if row and row.domain == 'light' else 'Device not responding'
             self._finish(job, UIEventError('device_failed', message))
 
-    def _affected(self, targets):
+    def _affected(self, targets, *, defer=False):
         targets = set(targets)
-        for view in list(self.views.values()):
-            if any(targets.intersection(row.targets) for row in view.rows):
-                self._publish(view.udn, view.container, bypass=True)
+        now = self.clock()
+        held = {t for t in targets if self._held(t, now)} if defer else set()
+        with self._batched():
+            for view in list(self.views.values()):
+                if any(targets.intersection(row.targets) for row in view.rows):
+                    if held: self.deferred.setdefault((view.udn, view.container), set()).update(held)
+                    else: self._publish(view.udn, view.container, bypass=True)
 
     def run(self):
         while True:
@@ -499,18 +567,25 @@ class SmartDeviceService:
                 if self.closed: return
                 changed, all_changed = self.changed_entities, self.refresh_all
                 self.changed_entities, self.refresh_all = set(), False
-                if changed or all_changed:
-                    self._refresh()
-                now = self.clock()
-                for key, due in list(self.trailing.items()):
-                    if due <= now: self._publish(*key, bypass=True)
-                for due, targets, versions in self.confirmations[:]:
-                    if any(self.state_versions.get(t, 0) != version for t, version in zip(targets, versions)):
-                        self.confirmations.remove((due, targets, versions))
-                        continue
-                    if due <= now:
-                        self.confirmations.remove((due, targets, versions))
-                        self._affected(targets)
+                with self._batched():
+                    if changed or all_changed:
+                        self._refresh()
+                    now = self.clock()
+                    for key, due in list(self.trailing.items()):
+                        if due <= now: self._publish(*key, bypass=True)
+                    for due, targets, versions in self.confirmations[:]:
+                        if any(self.state_versions.get(t, 0) != version for t, version in zip(targets, versions)):
+                            self.confirmations.remove((due, targets, versions))
+                            continue
+                        if due <= now:
+                            self.confirmations.remove((due, targets, versions))
+                            self._affected(targets, defer=True)
+                    for key, entities in list(self.deferred.items()):
+                        if not any(self._held(e, now) for e in entities):
+                            del self.deferred[key]
+                            self._publish(*key, bypass=True)
+                self.level_holds = {e: h for e, h in self.level_holds.items()
+                                    if now - h['first'] < LEVEL_HOLD_MAX and (self._held(e, now) or e in {x for v in self.deferred.values() for x in v})}
                 self.own_until = {e: due for e, due in self.own_until.items() if due > now}
                 job = self.pending.pop(0) if self.pending else None
                 if job is None:
