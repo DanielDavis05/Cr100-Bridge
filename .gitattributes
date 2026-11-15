@@ -1,2 +1,5 @@
 # Preserve protocol fixtures byte-for-byte, including the original CRLF/whitespace.
 tools/zp80/fixtures/** -text -whitespace
+
+# Vendored Ruffle player builds.
+tools/webui/vendor/ruffle/*.wasm binary

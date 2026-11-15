@@ -1550,6 +1550,10 @@ def publish_player_status(path, house, slots):
                    'parent_keys': sorted(player.component_parents)} for player in house.devices()]
     status = {'pid': os.getpid(), 'rooms': rooms, 'components': components}
     if house.smart_devices is not None: status['smart_devices'] = house.smart_devices.status()
+    # The web UI's controller preview browses this service as a named controller.
+    spotify = [service for service in music_service_controllers(getattr(house, 'music_service', None))
+               if getattr(service, 'menu_settings', None) is not None and hasattr(service, 'uri')]
+    if spotify: status['spotify_smapi'] = spotify[0].uri
     temporary.write_text(json.dumps(status) + '\n')
     temporary.replace(path)
 

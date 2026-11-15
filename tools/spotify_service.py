@@ -171,19 +171,27 @@ class SpotifyService(SmapiService):
         finally:
             self.request.entry = old
 
-    def _menu(self):
-        address = getattr(self.request, 'address', None)
-        mac = self.controller_resolver(address) if self.controller_resolver and address else None
-        settings = self.menu_settings() if callable(self.menu_settings) else self.menu_settings
-        return menu_for_controller(settings, mac)
+    def caller(self):
+        """(controller MAC or None, identity) of the current request.
 
-    def _context_key(self, entry, raw):
+        A web UI preview names its controller explicitly and gets an identity of its own,
+        so browsing a preview never adds to what the real controller was issued.
+        """
+        preview = getattr(self.request, 'preview', None)
+        if preview:
+            return preview, 'preview:' + preview
         address = getattr(self.request, 'address', None)
         mac = self.controller_resolver(address) if self.controller_resolver and address else None
         # An unresolved caller must not inherit another anonymous caller's issued
         # descendants merely because both currently use the default profile.
-        identity = mac.lower() if isinstance(mac, str) else address
-        return identity, entry['id'], entry['kind'], entry['target'], raw
+        return mac, mac.lower() if isinstance(mac, str) else address
+
+    def _menu(self):
+        settings = self.menu_settings() if callable(self.menu_settings) else self.menu_settings
+        return menu_for_controller(settings, self.caller()[0])
+
+    def _context_key(self, entry, raw):
+        return self.caller()[1], entry['id'], entry['kind'], entry['target'], raw
 
     def _issue(self, entry, raw):
         key = self._context_key(entry, raw)
@@ -206,7 +214,7 @@ class SpotifyService(SmapiService):
         if entry is None:
             raise LookupError('This menu shortcut is no longer available. Refresh Spotify.')
         if entry['locked']:
-            if self.on_locked:
+            if self.on_locked and not getattr(self.request, 'preview', None):
                 try:
                     self.on_locked(getattr(self.request, 'address', None), LOCK_MESSAGE)
                 except Exception:

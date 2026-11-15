@@ -54,7 +54,20 @@ _HERE = Path(__file__).resolve().parent
 STATIC_DIR = _HERE / 'webui'
 STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
                 '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
-                '.ico': 'image/x-icon'}
+                '.ico': 'image/x-icon', '.wasm': 'application/wasm'}
+# Vendored Ruffle (tools/webui/vendor/ruffle): large, versioned with the release, so cached.
+VENDOR_CACHE = 'public, max-age=86400'
+# The vendored Ruffle player compiles WebAssembly and puts two fixed <style> blocks in its
+# shadow root (one starts empty); allow exactly those, nothing inline of our own.
+RUFFLE_STYLE_HASHES = ("'sha256-/41hDcsIIBAm1cVarG/JxHYyotFaqJ4QezRVgbAgUtg='",
+                       "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='")
+CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+       "style-src 'self' https://fonts.googleapis.com %s; "
+       "font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'"
+       % ' '.join(RUFFLE_STYLE_HASHES))
+PREVIEW_TYPES = {'.swf': 'application/x-shockwave-flash', '.ttf': 'font/ttf'}
+PREVIEW_SMAPI_LIMIT = 16 * 1024
+PREVIEW_SMAPI_TIMEOUT = 20
 CR100_NETWORK = ipaddress.ip_network('192.168.69.0/24')   # sonos0: never serve the controllers' side
 MIN_PASSWORD = 8
 PBKDF2_ROUNDS = 300_000
@@ -99,6 +112,12 @@ def resolve(base_file, value, default):
     """A path from the config, relative to the config file's directory."""
     path = Path(value or default).expanduser()
     return path if path.is_absolute() else Path(base_file).resolve().parent / path
+
+
+class Raw:
+    """A non-JSON route response."""
+    def __init__(self, body, content_type, status=200, cache='no-store'):
+        self.body, self.content_type, self.status, self.cache = body, content_type, status, cache
 
 
 # --- password and sessions ---------------------------------------------------------
@@ -198,6 +217,8 @@ class Bridge:
         self._radio_management = None
         self._alarm_management = None
         self._online_update_management = None
+        self._preview_store, self._preview_lock = None, threading.Lock()
+        self.preview_secret = secrets.token_bytes(32)
         self.stop = threading.Event()
         self.managed = managed
 
@@ -511,6 +532,8 @@ class Bridge:
                            'components': status.get('components', [])}
                 if isinstance(status.get('smart_devices'), dict):
                     runtime['smart_devices'] = status['smart_devices']
+                if isinstance(status.get('spotify_smapi'), str):
+                    runtime['spotify_smapi'] = status['spotify_smapi']
                 return runtime
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -934,6 +957,85 @@ class Bridge:
         self.update_config(change)
         return {**self.reload_players(), 'controller': controller, 'items': items}
 
+    # controller preview ------------------------------------------------------------
+    def previews(self):
+        with self._preview_lock:
+            if self._preview_store is None:
+                from controller_preview import PreviewStore
+                self._preview_store = PreviewStore(self.config_path.resolve().parent / 'controller-preview',
+                                                   self.updates().packages, log=self.log)
+            return self._preview_store
+
+    def preview_token(self, session, mac):
+        """Binds a preview's SMAPI URL to the signed-in page (Ruffle cannot send X-Bridge)."""
+        message = ('%s|%s' % (session or '', mac)).encode()
+        return hmac.new(self.preview_secret, message, hashlib.sha256).hexdigest()[:32]
+
+    def spotify_preview(self, mac, session):
+        """How the Spotify page shows this controller's menu: the controller's own interface
+        (from uploaded firmware, run by Ruffle) or, without one, the page's drawing and why."""
+        controller = self.spotify_controller(mac)
+        settings, _ = self.spotify_settings()
+        try:
+            status = self.previews().status(controller['mac'])
+        except Exception as error:
+            self.log({'event': 'controller-preview-failed', 'error': repr(error)[:200]})
+            status = {'available': False, 'reason': 'The controller preview could not be prepared. Check the bridge log.'}
+        result = {'controller': controller, 'service_name': settings.get('name') or 'Spotify',
+                  'smapi_url': '/api/spotify/preview/%s/smapi?t=%s' % (controller['mac'],
+                                                                     self.preview_token(session, controller['mac'])),
+                  **{key: status[key] for key in ('available', 'firmware', 'reason') if key in status}}
+        if status['available']:
+            base = '/api/spotify/preview-files/%s/' % status['key']
+            result['movie'] = base + 'MainUI.swf'
+            result['fonts'] = [base + 'fonts/' + name for name in status['fonts']]
+        return result
+
+    def preview_file(self, key, name):
+        path = self.previews().path(key, name)
+        if path is None: raise ApiError(404, 'Not found.')
+        return Raw(path.read_bytes(), PREVIEW_TYPES[path.suffix], cache='private, max-age=31536000, immutable')
+
+    def spotify_preview_smapi(self, mac, raw):
+        """Forward one browse call to the running Spotify service as this controller.
+
+        Faults travel with HTTP 200: AVM1's XML.sendAndLoad drops the body of any other
+        status, and the controller UI shows the fault string in its own popup.
+        """
+        from smapi_service import PREVIEW_HEADER, PREVIEW_METHODS, SMAPI_NS, SOAP_NS
+        controller = self.spotify_controller(mac)
+        def fault(message, code='Server.ServiceUnavailable'):
+            envelope = ('<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="%s"><s:Body><s:Fault>'
+                        '<faultcode>s:%s</faultcode><faultstring>%s</faultstring></s:Fault></s:Body></s:Envelope>'
+                        % (SOAP_NS, code, html.escape(message, quote=False)))
+            return Raw(envelope.encode(), 'text/xml; charset=utf-8')
+        try:
+            if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper(): raise ValueError
+            import xml.etree.ElementTree as ET
+            body = ET.fromstring(raw).find('{%s}Body' % SOAP_NS)
+            method = body[0].tag if body is not None and len(body) == 1 else ''
+        except (ValueError, IndexError, SyntaxError):
+            method = ''
+        if not method.startswith('{%s}' % SMAPI_NS) or method[len(SMAPI_NS) + 2:] not in PREVIEW_METHODS:
+            return fault('The preview can only browse.', 'Client.InvalidRequest')
+        uri = urllib.parse.urlsplit(self.player_runtime().get('spotify_smapi') or '')
+        if uri.scheme != 'http' or uri.path != '/smapi' or not uri.hostname:
+            return fault("The bridge's Spotify service is not running. If you just saved, try again in a few seconds.")
+        import http.client
+        connection = http.client.HTTPConnection(uri.hostname, uri.port or 80, timeout=PREVIEW_SMAPI_TIMEOUT)
+        try:
+            connection.request('POST', '/smapi', raw, {'Content-Type': 'text/xml; charset="utf-8"',
+                                                     PREVIEW_HEADER: controller['mac']})
+            reply = connection.getresponse()
+            data = reply.read(4 * 1024 * 1024 + 1)
+        except OSError:
+            return fault("The bridge's Spotify service is restarting. Try again in a few seconds.")
+        finally:
+            connection.close()
+        if reply.status not in (200, 500) or len(data) > 4 * 1024 * 1024:
+            return fault("The bridge's Spotify service did not answer. Try again in a few seconds.")
+        return Raw(data, 'text/xml; charset=utf-8')
+
     def spotify_library(self):
         from spotify_client import SpotifyError
         client, provider = self.spotify_resources()
@@ -1263,9 +1365,9 @@ def default_profile_fetch(client_id, token_file):
 def make_handler(bridge, auth, log):
     routes = {}
 
-    def route(method, pattern, public=False, binary=False):
+    def route(method, pattern, public=False, binary=False, csrf='header'):
         def register(function):
-            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public, binary))
+            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public, binary, csrf))
             return function
         return register
 
@@ -1346,6 +1448,21 @@ def make_handler(bridge, auth, log):
     route('POST', '/api/spotify/sign-out')(lambda h, b, m: bridge.spotify_sign_out())
     route('GET', r'/api/spotify/menu/([^/]+)')(lambda h, b, m: bridge.spotify_menu(urllib.parse.unquote(m.group(1))))
     route('PUT', r'/api/spotify/menu/([^/]+)')(lambda h, b, m: bridge.save_spotify_menu(urllib.parse.unquote(m.group(1)), b))
+    route('GET', r'/api/spotify/preview/([^/]+)')(
+        lambda h, b, m: bridge.spotify_preview(urllib.parse.unquote(m.group(1)), h.session_token()))
+    route('GET', r'/api/spotify/preview-files/([0-9a-f]{24})/(MainUI\.swf|fonts/[a-z0-9_-]{1,40}\.ttf)')(
+        lambda h, b, m: bridge.preview_file(m.group(1), m.group(2)))
+
+    # Ruffle's XML.sendAndLoad cannot add the X-Bridge header; the URL carries a token
+    # bound to the signed-in session instead (see Bridge.preview_token).
+    @route('POST', r'/api/spotify/preview/([^/]+)/smapi', binary=True, csrf='token')
+    def preview_smapi(handler, body, match):
+        mac = urllib.parse.unquote(match.group(1)).lower()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+        token = (query.get('t') or [''])[0]
+        if not hmac.compare_digest(token, bridge.preview_token(handler.session_token(), mac)):
+            raise ApiError(403, 'Reload the page to preview this controller.')
+        return bridge.spotify_preview_smapi(mac, handler.read_raw(PREVIEW_SMAPI_LIMIT))
     route('GET', '/api/spotify/library')(lambda h, b, m: bridge.spotify_library())
     route('POST', '/api/spotify/resolve')(lambda h, b, m: bridge.spotify_resolve(b.get('uri')))
     route('GET', '/api/spotify/folders')(lambda h, b, m: bridge.spotify_folder_snapshot())
@@ -1418,16 +1535,18 @@ def make_handler(bridge, auth, log):
                 self.wfile.write(data)
                 return
             if method == 'GET' and not path.startswith('/api/'): return self.static(path)
-            for pattern, function, public, binary in routes.get(method, []):
+            for pattern, function, public, binary, csrf in routes.get(method, []):
                 match = pattern.match(path)
                 if not match: continue
-                if method != 'GET' and self.headers.get('X-Bridge') != '1':
+                if method != 'GET' and csrf == 'header' and self.headers.get('X-Bridge') != '1':
                     return self.reply(403, {'error': 'Missing request header.'})   # cross-site forms cannot set it
                 if not public and not auth.valid(self.session_token()):
                     return self.reply(401, {'error': 'Sign in first.'})
                 try:
                     body = self.read_body() if method != 'GET' and not binary else {}
-                    return self.reply(200, function(self, body, match))
+                    result = function(self, body, match)
+                    if isinstance(result, Raw): return self.raw(result)
+                    return self.reply(200, result)
                 except ApiError as error:
                     return self.reply(error.status, {'error': error.message})
                 except Exception as error:
@@ -1449,6 +1568,18 @@ def make_handler(bridge, auth, log):
             except ValueError: raise ApiError(400, 'Expected JSON.') from None
             if not isinstance(body, dict): raise ApiError(400, 'Expected a JSON object.')
             return body
+
+        def read_raw(self, limit):
+            if self.headers.get('Transfer-Encoding'):
+                raise ApiError(400, 'Send the request with a Content-Length header.')
+            lengths = self.headers.get_all('Content-Length', [])
+            if len(lengths) != 1 or len(lengths[0]) > 12 or not re.fullmatch(r'[0-9]+', lengths[0]):
+                raise ApiError(400, 'Invalid request Content-Length.')
+            length = int(lengths[0])
+            if not 0 < length <= limit: raise ApiError(413, 'Request too large.')
+            data = self.rfile.read(length)
+            if len(data) != length: raise ApiError(400, 'The request ended early.')
+            return data
 
         def read_firmware(self, path):
             if self.headers.get('Transfer-Encoding'):
@@ -1486,9 +1617,7 @@ def make_handler(bridge, auth, log):
             self.send_header('X-Frame-Options', 'DENY')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
-            self.send_header('Content-Security-Policy',
-                             "default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
-                             "font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy', CSP)
 
         def reply(self, status, value):
             data = json.dumps(value).encode()
@@ -1504,6 +1633,15 @@ def make_handler(bridge, auth, log):
             self.end_headers()
             self.wfile.write(data)
 
+        def raw(self, result):
+            self.send_response(result.status)
+            self.send_header('Content-Type', result.content_type)
+            self.send_header('Content-Length', str(len(result.body)))
+            self.send_header('Cache-Control', result.cache)
+            self.security_headers()
+            self.end_headers()
+            self.wfile.write(result.body)
+
         def static(self, path):
             name = 'index.html' if path in ('/', '') else path.lstrip('/')
             if name.startswith('static/'): name = name[len('static/'):]
@@ -1514,7 +1652,9 @@ def make_handler(bridge, auth, log):
             self.send_response(200)
             self.send_header('Content-Type', STATIC_TYPES[target.suffix])
             self.send_header('Content-Length', str(len(data)))
-            self.send_header('Cache-Control', 'no-store')   # a few small files; always the deployed copy
+            vendor = (STATIC_DIR / 'vendor').resolve() in target.parents
+            # A few small files, always the deployed copy; the vendored player is large and versioned.
+            self.send_header('Cache-Control', VENDOR_CACHE if vendor else 'no-store')
             self.security_headers()
             self.end_headers()
             self.wfile.write(data)

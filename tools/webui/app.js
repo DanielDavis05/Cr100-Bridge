@@ -915,6 +915,73 @@ function cr100Screen() {
   return { node, update, describe };
 }
 
+// The controller's own interface: MainUI.swf from firmware the user uploaded, run by the
+// vendored Ruffle player and browsing the bridge's Spotify service as the chosen controller.
+// Without uploaded firmware the drawing above stays. Ruffle loads only when it is needed.
+const RUFFLE_PATH = '/static/vendor/ruffle/';
+let rufflePlayer;
+function loadRuffle() {
+  if (!rufflePlayer) rufflePlayer = new Promise((resolve, reject) => {
+    window.RufflePlayer = window.RufflePlayer || {};
+    window.RufflePlayer.config = { publicPath: RUFFLE_PATH, polyfills: false, autoplay: 'on', unmuteOverlay: 'hidden',
+      splashScreen: false, contextMenu: 'off', letterbox: 'off', logLevel: 'error', allowScriptAccess: false,
+      openUrlMode: 'deny', showSwfDownload: false, warnOnUnsupportedContent: false };
+    const script = document.createElement('script');
+    script.src = RUFFLE_PATH + 'ruffle.js';
+    script.addEventListener('load', () => resolve(window.RufflePlayer.newest()));
+    script.addEventListener('error', () => { rufflePlayer = null; reject(new ApiError('The preview player did not load.')); });
+    document.head.append(script);
+  });
+  return rufflePlayer;
+}
+
+function controllerPreview(drawing) {
+  const screen = $('.cr100-screen', drawing.node), caption = $('figcaption', drawing.node);
+  const drawnCaption = caption.textContent;
+  const live = el('<div class="cr100-live" hidden></div>');
+  const tools = el(`<div class="cr100-live-tools" hidden>
+    <p class="hint">Click the screen, then use <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Enter</kbd> to open and <kbd>Esc</kbd> to go back.</p>
+    <button type="button" class="inline-button quiet cr100-restart">Restart preview</button></div>`);
+  screen.after(live);
+  drawing.node.append(tools);
+  let request = 0, player = null, current = null;
+  const showDrawing = (note) => {
+    player?.remove(); player = null; current = null;
+    live.hidden = true; tools.hidden = true; screen.hidden = false;
+    caption.textContent = note ? `${drawnCaption} ${note}` : drawnCaption;
+  };
+  const start = async (preview) => {
+    const version = request;
+    const ruffle = await loadRuffle();
+    if (version !== request) return;
+    player?.remove();
+    player = ruffle.createPlayer();
+    player.className = 'cr100-player';
+    player.setAttribute('aria-label', `${preview.controller.name}: controller interface preview`);
+    live.replaceChildren(player);
+    screen.hidden = true; live.hidden = false; tools.hidden = false;
+    caption.textContent = `The controller’s own interface (firmware ${preview.firmware}) with the saved menu. After saving, go back and open ${preview.service_name} again.`;
+    const instance = player.ruffle ? player.ruffle(1) : player;
+    try {
+      await instance.load({ url: preview.movie, fontSources: preview.fonts,
+        parameters: { smapiUrl: preview.smapi_url, serviceName: preview.service_name } });
+    } catch { throw new ApiError('This browser could not start the controller preview.'); }
+  };
+  const load = async (mac) => {
+    const version = ++request;
+    let preview;
+    try { preview = await api('GET', '/api/spotify/preview/' + encodeURIComponent(mac)); }
+    catch (error) { if (version === request) showDrawing(error.message); return; }
+    if (version !== request) return;
+    if (!preview.available) { showDrawing(preview.reason); return; }
+    current = preview;
+    try { await start(preview); }
+    catch (error) { if (version === request) showDrawing(error.message); }
+  };
+  $('.cr100-restart', tools).addEventListener('click', () => { if (current) start(current).catch((error) => showDrawing(error.message)); });
+  return { load, isLive: () => !live.hidden };
+}
+
 async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}, serviceName = () => 'Spotify') {
   const box = el(`<section class="popup spotify-menu-editor">
     <label class="field"><span>Controller</span><select class="sp-controller" aria-label="Controller to edit"></select></label>
@@ -937,6 +1004,7 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}, s
   </section>`);
   const preview = cr100Screen();
   $('.menu-workbench', box).append(preview.node);
+  const livePreview = controllerPreview(preview);
   const folders = el(`<section class="popup spotify-folder-panel">
     <div class="strip-head"><span class="dot sp-folder-dot"></span><span class="sp-folder-status" role="status">Loading folder status…</span></div>
     <p class="hint">Pin a Spotify folder to mirror its playlists and subfolders on this controller. What is inside follows Spotify and refreshes by itself; if Spotify is unavailable, the last complete tree is kept.</p>
@@ -1024,6 +1092,7 @@ async function spotifyMenuEditor(main, onDirty, onConnectionStatus = () => {}, s
     if (version !== generation) return;
     activeMac = mac; items = editorItems(result.items); baseline = JSON.stringify(items); selected = 0;
     renderItems(); changed(); addControls.hidden = false;
+    livePreview.load(mac);
   };
   select.addEventListener('change', async () => {
     const mac = select.value;

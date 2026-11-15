@@ -21,6 +21,10 @@ class Distribution(unittest.TestCase):
         self.assertIn('tools/zp80/fixtures/synthetic_public_key.bin', selected)
         self.assertIn('tools/zp80/fixtures/xml/device_description.xml', selected)
         self.assertIn('tools/webui/app.js', selected)
+        self.assertTrue({'tools/controller_preview.py', 'tools/controller_preview_host/host-actions.json',
+                         'tools/webui/vendor/ruffle/ruffle.js', 'tools/webui/vendor/ruffle/LICENSE_MIT'} <= selected)
+        # The preview's Sonos inputs come from the user's own upload at run time, never the release.
+        self.assertFalse(any(p.endswith(('.swf', '.ttf', '.upd')) for p in selected))
         self.assertIn('tools/spotify_connect.py', selected)
         self.assertIn('tools/spotify_autoplay.py', selected)
         self.assertIn('tools/nexmon_power.py', selected)

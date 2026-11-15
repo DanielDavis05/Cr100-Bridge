@@ -47,67 +47,116 @@ FORCE_UNAVAILABLE = ('Automatic update prompts are supported only on a controlle
 CFW_BUILD_ID = re.compile(r'cfw3:[0-9a-f]{64}\Z')
 
 
-def _mainui_from_cramfs(data):
-    """Bounded exact-path reader; no host extraction or optional dependencies."""
-    if (len(data) < 76 or struct.unpack_from('<4I', data) != (0x28cd3d45, len(data), 3, 0)
-            or data[16:32] != b'Compressed ROMFS'):
-        raise ValueError('Unsupported CramFS')
-    checked = bytearray(data)
-    checksum = struct.unpack_from('<I', checked, 32)[0]
-    struct.pack_into('<I', checked, 32, 0)
-    if zlib.crc32(checked) & 0xffffffff != checksum:
-        raise ValueError('Invalid CramFS checksum')
+class CramFS:
+    """Bounded exact-path reader for a CR100 root filesystem image.
 
-    def inode(position):
-        if not 0 <= position <= len(data) - 12:
+    No host extraction or optional dependencies. The image checksum is verified
+    once; each read walks one exact path and refuses links, padding tricks,
+    ambiguous names and oversized files.
+    """
+    def __init__(self, data):
+        if (len(data) < 76 or struct.unpack_from('<4I', data) != (0x28cd3d45, len(data), 3, 0)
+                or data[16:32] != b'Compressed ROMFS'):
+            raise ValueError('Unsupported CramFS')
+        checked = bytearray(data)
+        checksum = struct.unpack_from('<I', checked, 32)[0]
+        struct.pack_into('<I', checked, 32, 0)
+        if zlib.crc32(checked) & 0xffffffff != checksum:
+            raise ValueError('Invalid CramFS checksum')
+        self.data = data
+
+    def _inode(self, position):
+        if not 0 <= position <= len(self.data) - 12:
             raise ValueError('Invalid CramFS inode')
-        a, b, c = struct.unpack_from('<3I', data, position)
+        a, b, c = struct.unpack_from('<3I', self.data, position)
         return a & 0xffff, b & 0xffffff, (c >> 6) * 4, (c & 63) * 4
 
-    node = inode(64)
-    for name in (b'opt', b'swf', b'MainUI.swf'):
+    def _children(self, node):
+        data = self.data
         mode, size, offset, _ = node
         if not stat.S_ISDIR(mode) or offset + size > len(data) or size > 8192 * 264:
             raise ValueError('Invalid CramFS directory')
-        end, found = offset + size, []
+        end, children = offset + size, []
         while offset < end:
-            child = inode(offset)
+            child = self._inode(offset)
             padded = child[3]
             if not padded or offset + 12 + padded > end:
                 raise ValueError('Invalid CramFS name')
             raw = data[offset + 12:offset + 12 + padded].split(b'\0', 1)[0]
             if not raw or b'/' in raw or raw in (b'.', b'..'):
                 raise ValueError('Invalid CramFS name')
-            if raw == name:
-                found.append(child)
+            children.append((raw, child))
             offset += 12 + padded
-        if offset != end or len(found) != 1:
-            raise ValueError('Missing or ambiguous MainUI path')
-        node = found[0]
-    mode, size, offset, _ = node
-    if not stat.S_ISREG(mode) or not 0 < size <= 4 * 1024 * 1024:
-        raise ValueError('Invalid MainUI file')
-    count = (size + 4095) // 4096
-    position = offset + 4 * count
-    if position > len(data):
-        raise ValueError('Invalid MainUI block table')
-    result = []
-    for index, end in enumerate(struct.unpack_from('<%dI' % count, data, offset)):
-        if not position <= end <= len(data):
-            raise ValueError('Invalid MainUI block')
-        expected = min(4096, size - index * 4096)
-        if end == position:
-            chunk = bytes(expected)
-        else:
-            decoder = zlib.decompressobj()
-            chunk = decoder.decompress(data[position:end], expected + 1)
-            if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
-                raise ValueError('Invalid compressed MainUI block')
-        if len(chunk) != expected:
-            raise ValueError('Wrong MainUI block size')
-        result.append(chunk)
-        position = end
-    return b''.join(result)
+        if offset != end:
+            raise ValueError('Invalid CramFS directory')
+        return children
+
+    def _lookup(self, path):
+        node = self._inode(64)
+        for name in path.encode().split(b'/'):
+            found = [child for raw, child in self._children(node) if raw == name]
+            if len(found) != 1:
+                raise ValueError('Missing or ambiguous CramFS path %s' % path)
+            node = found[0]
+        return node
+
+    def listdir(self, path):
+        """Names in one directory, in image order."""
+        return [raw.decode('utf-8', 'replace') for raw, _ in self._children(self._lookup(path))]
+
+    def read(self, path, limit=4 * 1024 * 1024):
+        """One regular file's bytes; links and files over limit are refused."""
+        data = self.data
+        mode, size, offset, _ = self._lookup(path)
+        if not stat.S_ISREG(mode) or not 0 < size <= limit:
+            raise ValueError('Invalid CramFS file %s' % path)
+        count = (size + 4095) // 4096
+        position = offset + 4 * count
+        if position > len(data):
+            raise ValueError('Invalid CramFS block table')
+        result = []
+        for index, end in enumerate(struct.unpack_from('<%dI' % count, data, offset)):
+            if not position <= end <= len(data):
+                raise ValueError('Invalid CramFS block')
+            expected = min(4096, size - index * 4096)
+            if end == position:
+                chunk = bytes(expected)
+            else:
+                decoder = zlib.decompressobj()
+                chunk = decoder.decompress(data[position:end], expected + 1)
+                if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                    raise ValueError('Invalid compressed CramFS block')
+            if len(chunk) != expected:
+                raise ValueError('Wrong CramFS block size')
+            result.append(chunk)
+            position = end
+        return b''.join(result)
+
+
+def _mainui_from_cramfs(data):
+    return CramFS(data).read('opt/swf/MainUI.swf')
+
+
+def upd_records(data):
+    """(kind, offset, payload, flags) for each record of a UPD; structure only, no signature check."""
+    records, offset = [], 0
+    while offset < len(data):
+        if len(records) >= 128 or len(data) - offset < 16:
+            raise UpdateError('The firmware UPD contains invalid or truncated records.')
+        magic, kind, length, flags = struct.unpack_from('<4I', data, offset)
+        if magic != UPD_MAGIC or length < 16 or length > len(data) - offset:
+            raise UpdateError('The firmware UPD contains invalid or truncated records.')
+        records.append((kind, offset, data[offset + 16:offset + length], flags))
+        offset += length
+    return records
+
+
+def upd_rootfs(data):
+    """The single root filesystem record of a UPD."""
+    roots = [payload for kind, _, payload, _ in upd_records(data) if kind == 4]
+    if len(roots) != 1:
+        raise UpdateError('The CR100 firmware must contain its root filesystem and kernel.')
+    return roots[0]
 
 
 def firmware_build_id(rootfs):
@@ -181,15 +230,7 @@ def validate_firmware(source, *, allow_unverified=False):
     Unverified signatures can be returned as warning metadata for explicit review.
     """
     data = _read_upload(source)
-    records, offset = [], 0
-    while offset < len(data):
-        if len(records) >= 128 or len(data) - offset < 16:
-            raise UpdateError('The firmware UPD contains invalid or truncated records.')
-        magic, kind, length, flags = struct.unpack_from('<4I', data, offset)
-        if magic != UPD_MAGIC or length < 16 or length > len(data) - offset:
-            raise UpdateError('The firmware UPD contains invalid or truncated records.')
-        records.append((kind, offset, data[offset + 16:offset + length], flags))
-        offset += length
+    records = upd_records(data)
     signatures = [r for r in records if r[0] == 0xffffffff]
     signature_valid = False
     if len(signatures) == 1 and records[-1][0] == 0xffffffff and len(signatures[0][2]) == 128:
@@ -520,6 +561,24 @@ class UpdateManager:
         if path.is_symlink():
             raise UpdateError('Stored firmware must be a regular file.')
         return path
+
+    def packages(self):
+        """(mac, sha256, path) of every stored upload still on disk, newest first.
+
+        Read-only: listing never changes a record, expires nothing that a read
+        would not, and returns no token.
+        """
+        with self._state() as state:
+            found = []
+            for mac, record in state['controllers'].items():
+                try:
+                    path = self._package_path(record.get('stored_name'))
+                except UpdateError:
+                    continue
+                if path.is_file():
+                    found.append((record.get('updated_at') or 0, mac, record['stored_name'][:64], path))
+        found.sort(key=lambda item: item[0] if isinstance(item[0], (int, float)) else 0, reverse=True)
+        return [(mac, sha, path) for _, mac, sha, path in found]
 
     def selection(self, mac, current_version=None):
         mac = normalize_mac(mac)

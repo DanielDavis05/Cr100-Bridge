@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import html
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 import threading
@@ -21,6 +22,11 @@ LIST_VERSION = '2'
 ACCOUNT_NAME = 'bridge'
 MAX_REQUEST_BYTES = 1 << 20
 _NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]*\Z')
+# The web UI's controller preview browses as a named controller. Only the bridge itself
+# may ask for that, and only for read-only browse calls.
+PREVIEW_HEADER = 'X-Bridge-Preview-Controller'
+PREVIEW_METHODS = frozenset(('getMetadata', 'getMediaMetadata', 'getExtendedMetadata', 'search'))
+_MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 
 
 def text(value):
@@ -115,13 +121,28 @@ class SmapiService:
             self.server.server_close()
 
     @contextmanager
-    def request_context(self, address):
-        previous = getattr(self.request, 'address', None)
-        self.request.address = address
+    def request_context(self, address, preview=None):
+        previous = getattr(self.request, 'address', None), getattr(self.request, 'preview', None)
+        self.request.address, self.request.preview = address, preview
         try:
             yield
         finally:
-            self.request.address = previous
+            self.request.address, self.request.preview = previous
+
+    def preview_controller(self, request, method):
+        """The controller MAC a bridge-local preview request names, or None for a real caller."""
+        values = request.headers.get_all(PREVIEW_HEADER) or []
+        if not values:
+            return None
+        address = request.client_address[0]
+        try:
+            local = ipaddress.ip_address(address).is_loopback or address == self.host
+        except ValueError:
+            local = False
+        mac = values[0].strip().lower()
+        if len(values) != 1 or not local or not _MAC.fullmatch(mac) or method not in PREVIEW_METHODS:
+            raise SmapiFault('Client.InvalidRequest', 'Invalid request.')
+        return mac
 
     def handle_get(self, request):
         self.reply(request, 404, b'Not found', 'text/plain')
@@ -208,6 +229,7 @@ class SmapiService:
         try:
             with self.request_context(request.client_address[0]):
                 method, args, header = self.parse_request(request)
+                self.request.preview = self.preview_controller(request, method)
                 self.on_request(request, method, args, header)
                 result = self.dispatch(method, args)
             status = 200

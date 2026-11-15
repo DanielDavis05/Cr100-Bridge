@@ -291,6 +291,11 @@ The lock covers that entry and everything reached through it. The same music
 can still be reached through another unlocked entry. Lists already cached on
 the controller can remain visible until its next refresh.
 
+With controller firmware 4.3.2 uploaded on a Firmware panel, the editor previews
+the saved menu in the controller's own interface, run in the browser; without
+it, a drawing of the screen is shown. See
+[Controller preview](docs/features/CONTROLLER-PREVIEW.md).
+
 To mirror real Spotify folders, use Connect Spotify folders and sign in to the
 same account as the main Spotify connection. This separate authorization is
 shared with bridge-controlled Autoplay. After approving, Spotify redirects to

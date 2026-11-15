@@ -63,6 +63,9 @@ class SpotifyUIActions:
 
     def identity(self):
         service = self.service
+        preview = getattr(service.request, 'preview', None)
+        if preview:
+            return 'preview:' + preview
         address = getattr(service.request, 'address', None)
         identity = service.controller_resolver(address) if service.controller_resolver and address else None
         return str(identity) if identity else 'ip:' + str(address)
