@@ -841,8 +841,10 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 
 .pairing .meta-grid { margin-bottom: 12px; }
 .pair-row { display: flex; align-items: center; gap: 12px; padding-top: 12px; border-top: 1px solid rgba(28, 91, 175, 0.18); }
+.pair-row + .pair-row { margin-top: 12px; }
 .pair-row p { flex: 1; margin: 0; }
 .pair-row .inline-button { flex: none; }
+.pair-transfer p.hint { margin: 0; }
 
 @media (max-width: 760px) {
   .controller-body { padding: 12px 12px 16px; }

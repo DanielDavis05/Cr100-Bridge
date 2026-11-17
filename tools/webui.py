@@ -21,6 +21,8 @@ Usage: sudo python3 webui.py --config bridge-config.json --state bridge-state.js
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import html
@@ -45,7 +47,7 @@ import room_icons
 from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME, MAX_SLOTS,
                            apply_rooms, reconcile_sonos_rooms, room_key,
                            room_key_ref, update_config_file, write_json)
-from controller_state import controller_records
+from controller_state import controller_records, merge_controller, normalize_mac, normalize_state
 from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
                                    visible_components)
 from music_service_registry import provider_settings
@@ -650,6 +652,151 @@ class Bridge:
         subprocess.run(['systemctl', '--no-block', 'start', 'cr100-pair.service'],
                        capture_output=True, text=True, timeout=5, check=True)
         return {'message': 'Pairing started. Put the CR100 in its add-to-household setup mode.'}
+
+    def local_bssid(self, existing_state=None, imported_data=None):
+        """Return this Pi's wlan0 MAC for hardware ACKs, falling back to saved/imported BSSID."""
+        from bridge_service import radio_mac
+        for candidate in (radio_mac,
+                          lambda: (existing_state or {}).get('bssid'),
+                          lambda: (imported_data or {}).get('bssid')):
+            try:
+                value = candidate()
+                if value is not None:
+                    return normalize_mac(value)
+            except (OSError, ValueError):
+                continue
+        raise ApiError(400, 'Cannot determine the bridge Wi-Fi address (wlan0).')
+
+    @staticmethod
+    def _pairing_credentials(data, *, message, default_freq=None):
+        household = data.get('household')
+        raw_key = data.get('network_key')
+        freq = data.get('freq', default_freq)
+        try:
+            key_bytes = bytes.fromhex(raw_key) if isinstance(raw_key, str) else b''
+        except ValueError:
+            key_bytes = b''
+        if (not isinstance(household, str) or not household.startswith('Sonos_')
+                or len(household.encode('utf-8')) > 32 or len(key_bytes) != 16
+                or type(freq) is not int or freq not in FREQ_CHANNEL):
+            raise ApiError(400, message)
+        return household, key_bytes.hex(), freq
+
+    @contextlib.contextmanager
+    def _pair_lock(self):
+        if not self.run_dir:
+            yield
+            return
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(str(self.run_dir / 'pair.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(descriptor, 'w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ApiError(409, 'Wait for pairing to finish before importing.') from None
+            yield
+
+    def export_pairing(self):
+        """Return portable household credentials and controllers for another bridge."""
+        state, config = self.state(), self.config()
+        try:
+            controllers = controller_records(state)
+        except (ValueError, TypeError) as error:
+            raise ApiError(400, str(error)) from error
+        if not controllers:
+            raise ApiError(400, 'Pair a controller before exporting.')
+        household, network_key, freq = self._pairing_credentials(
+            state, message='Pairing state is incomplete.')
+        profiles = config.get('controllers')
+        if not isinstance(profiles, dict):
+            profiles = {}
+        exported = []
+        for record in controllers:
+            entry = dict(record)
+            profile = profiles.get(record['mac'])
+            name = profile.get('name') if isinstance(profile, dict) else None
+            if isinstance(name, str) and name:
+                entry['name'] = name
+            exported.append(entry)
+        return {'version': 1, 'household': household, 'network_key': network_key,
+                'freq': freq, 'controllers': exported}
+
+    def import_pairing(self, payload):
+        """Import a portable pairing bundle or bridge-state.json, bound to this Pi's radio MAC."""
+        data = payload['data'] if isinstance(payload, dict) and 'data' in payload else payload
+        if not isinstance(data, dict):
+            raise ApiError(400, 'Choose a valid pairing JSON file.')
+        if 'version' in data and (type(data['version']) is not int or data['version'] != 1):
+            raise ApiError(400, 'Unsupported pairing file version.')
+        if self.pairing_status().get('running'):
+            raise ApiError(409, 'Wait for pairing to finish before importing.')
+        household, network_key, freq = self._pairing_credentials(
+            data,
+            message='Pairing file must include a valid household, 16-byte network key, and radio channel.',
+            default_freq=2437)
+        try:
+            records = controller_records(data)
+        except (ValueError, TypeError) as error:
+            raise ApiError(400, str(error)) from error
+        if not records:
+            raise ApiError(400, 'The pairing file contains no controllers.')
+        names = {}
+        for item in data.get('controllers') or []:
+            if isinstance(item, dict) and item.get('name') is not None:
+                if not isinstance(item['name'], str) or not 0 < len(item['name'].strip()) <= MAX_ROOM_NAME:
+                    raise ApiError(400, 'Give the controller a name up to %d characters.' % MAX_ROOM_NAME)
+                names[normalize_mac(item['mac'])] = item['name'].strip()
+        for record in records:
+            record.pop('name', None)
+        with self.config_lock, self._pair_lock():
+            existing = self.state()
+            bssid = self.local_bssid(existing_state=existing, imported_data=data)
+            uuid = 'RINCON_' + bssid.replace(':', '').upper() + '01400'
+            try:
+                existing_controllers = bool(controller_records(existing))
+            except (ValueError, TypeError):
+                existing_controllers = False
+            existing_key = existing.get('network_key')
+            same_household = (existing.get('household') == household and isinstance(existing_key, str)
+                              and existing_key.lower() == network_key and existing_controllers)
+            if same_household:
+                merged = True
+                new_state = normalize_state({**existing, 'bssid': bssid, 'uuid': uuid, 'freq': freq,
+                                             'household': household, 'network_key': network_key})
+                for record in records:
+                    new_state = merge_controller(new_state, record)
+            else:
+                merged = False
+                new_state = normalize_state({'bssid': bssid, 'uuid': uuid, 'freq': freq,
+                                             'household': household, 'network_key': network_key,
+                                             'controllers': records})
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(self.state_path, new_state, mode=0o600)
+            if names:
+                def update_names(config):
+                    profiles = config.get('controllers')
+                    if not isinstance(profiles, dict):
+                        profiles = config['controllers'] = {}
+                    for mac, name in names.items():
+                        profile = profiles.get(mac)
+                        if not isinstance(profile, dict):
+                            profile = profiles[mac] = {}
+                        if not merged or not profile.get('name'):
+                            profile['name'] = name
+                update_config_file(self.config_path, update_names)
+        if self.managed:
+            subprocess.run(['systemctl', '--no-block', 'restart', 'cr100-bridge.service'],
+                           capture_output=True, text=True, timeout=5, check=True)
+        else:
+            self.reload_players()
+        count = len(new_state['controllers'])
+        self.log({'event': 'pairing-imported', 'household': household, 'bssid': bssid,
+                  'controllers': count, 'merged': merged})
+        return {'household': household, 'channel': FREQ_CHANNEL[freq], 'bssid': bssid,
+                'controllers': count, 'merged': merged, 'restarted': self.managed,
+                'message': 'Imported %d controller%s for %s.%s' % (
+                    count, '' if count == 1 else 's', household,
+                    ' Restarting the bridge.' if self.managed else '')}
 
     def controller_macs(self, state):
         return [controller['mac'] for controller in controller_records(state)]
@@ -1311,6 +1458,8 @@ def make_handler(bridge, auth, log):
     route('PUT', '/api/speakers')(lambda h, b, m: bridge.save_speakers(b))
     route('GET', '/api/controllers')(lambda h, b, m: bridge.controllers())
     route('POST', '/api/controllers/pair')(lambda h, b, m: bridge.pair_controller())
+    route('POST', '/api/controllers/pairing/export')(lambda h, b, m: bridge.export_pairing())
+    route('POST', '/api/controllers/pairing/import')(lambda h, b, m: bridge.import_pairing(b))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})')(lambda h, b, m: bridge.rename_controller(m.group(1), b.get('name')))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/reconnect')(lambda h, b, m: bridge.save_controller_reconnect(m.group(1), b))
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.controller_components(m.group(1)))

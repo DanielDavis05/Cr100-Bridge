@@ -13,7 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_ha
@@ -229,6 +229,149 @@ class Controllers(Fixture):
         self.assertEqual(webui.parse_uptime(' 4:40pm  up 32 min, load average'), 32 * 60)
         self.assertEqual(webui.parse_uptime(' up 3 days, 1:05, load'), 3 * 86400 + 3900)
         self.assertEqual([webui.signal_bars(r) for r in (5, 15, 63)], [0, 1, 4])
+
+    def test_export_pairing_includes_credentials_and_names_without_local_bssid(self):
+        with self.assertRaises(webui.ApiError) as caught:
+            self.bridge.export_pairing()
+        self.assertEqual(caught.exception.status, 400)
+        (self.dir / 'state.json').unlink()
+        with self.assertRaises(webui.ApiError) as caught:
+            self.bridge.export_pairing()
+        self.assertEqual(caught.exception.status, 400)
+
+        key = '0123456789abcdef0123456789abcdef'
+        write(self.dir / 'state.json', {
+            'bssid': 'dc:a6:32:e7:3b:0e', 'uuid': 'RINCON_DCA632E73B0E01400',
+            'household': HOUSEHOLD, 'network_key': key, 'freq': 2437, 'cr100_mac': CR,
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100}],
+        })
+        self.bridge.update_config(lambda c: c.update(controllers={
+            CR: {'name': 'Living Room', 'visible_components': ['cr100-bridge']},
+        }))
+        exported = self.bridge.export_pairing()
+        self.assertEqual(exported, {
+            'version': 1,
+            'household': HOUSEHOLD,
+            'network_key': key,
+            'freq': 2437,
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100, 'name': 'Living Room'}],
+        })
+        self.assertNotIn('bssid', exported)
+        self.assertNotIn('uuid', exported)
+        self.assertNotIn('cr100_mac', exported)
+        self.assertNotIn('visible_components', exported['controllers'][0])
+
+    def test_import_pairing_binds_local_bssid_preserves_rooms_and_restarts_managed_bridge(self):
+        import bridge_service
+        key = '0123456789abcdef0123456789abcdef'
+        write(self.dir / 'state.json', {
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
+            'freq': 2462, 'controllers': [{'mac': CR, 'aid': 1, 'txid': 5}],
+        })
+        self.bridge.rename_controller(CR, 'Den Remote')
+        bundle = self.bridge.export_pairing()
+
+        target_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(target_dir, ignore_errors=True))
+        target_config = target_dir / 'config.json'
+        target_state = target_dir / 'state.json'
+        target_run = target_dir / 'run'
+        write(target_config, {'rooms': [{'name': 'Garage', 'slot': 0}], 'other': {'local': True}})
+        target = webui.Bridge(target_config, target_state, target_run, target_dir / 'players.pid',
+                              webui.DataFile(target_dir / 'webui.json'), self.logs.append, managed=True)
+        self.addCleanup(target.close)
+
+        commands = []
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            if cmd[:2] == ['systemctl', 'show']:
+                return Mock(stdout='ActiveState=inactive\nResult=success\n')
+            return Mock(stdout='')
+
+        with patch.object(bridge_service, 'radio_mac', return_value='DC:A6:32:AA:BB:CC'), \
+                patch.object(webui.subprocess, 'run', side_effect=fake_run):
+            result = target.import_pairing({'data': bundle})
+
+        self.assertEqual((result['household'], result['channel'], result['bssid'],
+                          result['controllers'], result['merged'], result['restarted']),
+                         (HOUSEHOLD, 11, 'dc:a6:32:aa:bb:cc', 1, False, True))
+        self.assertEqual(target_state.stat().st_mode & 0o777, 0o600)
+        saved_state = bridge_service.validate_state(target_state)
+        self.assertEqual(saved_state['bssid'], 'dc:a6:32:aa:bb:cc')
+        self.assertEqual(saved_state['uuid'], 'RINCON_DCA632AABBCC01400')
+        self.assertEqual(saved_state['household'], HOUSEHOLD)
+        self.assertEqual(saved_state['network_key'], key)
+        self.assertEqual(saved_state['freq'], 2462)
+        self.assertEqual(saved_state['controllers'], [{'mac': CR, 'aid': 1, 'txid': 5}])
+        saved_config = json.loads(target_config.read_text())
+        self.assertEqual(saved_config['rooms'], [{'name': 'Garage', 'slot': 0}])
+        self.assertEqual(saved_config['other'], {'local': True})
+        self.assertEqual(saved_config['controllers'], {CR: {'name': 'Den Remote'}})
+        self.assertIn(['systemctl', '--no-block', 'restart', 'cr100-bridge.service'], commands)
+
+    def test_import_pairing_merges_controllers_for_same_household_and_key(self):
+        import bridge_service
+        key = '0123456789abcdef0123456789abcdef'
+        other = '00:0e:58:aa:bb:cc'
+        write(self.dir / 'state.json', {
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
+            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 4}],
+        })
+        self.bridge.update_config(lambda c: c.update(controllers={CR: {'name': 'Local Name'}}))
+        bundle = {
+            'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 9, 'name': 'Remote Name'},
+                            {'mac': other, 'aid': 2, 'name': 'Patio Remote'}],
+        }
+        with patch.object(bridge_service, 'radio_mac', return_value='dc:a6:32:e7:3b:0e'):
+            result = self.bridge.import_pairing({'data': bundle})
+            self.assertTrue(result['merged'])
+            self.assertEqual(result['controllers'], 2)
+            # An independent bridge may export a new controller with an AID already in use locally.
+            third = '00:0e:58:dd:ee:ff'
+            result2 = self.bridge.import_pairing({
+                'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
+                'controllers': [{'mac': third, 'aid': 4, 'name': 'Bedroom'}],
+            })
+        self.assertTrue(result2['merged'])
+        self.assertEqual(result2['controllers'], 3)
+        saved_state = json.loads((self.dir / 'state.json').read_text())
+        self.assertEqual(saved_state['controllers'], [
+            {'mac': CR, 'aid': 4, 'txid': 9},
+            {'mac': other, 'aid': 1},
+            {'mac': third, 'aid': 2},
+        ])
+        self.assertEqual(self.saved()['controllers'], {
+            CR: {'name': 'Local Name'},
+            other: {'name': 'Patio Remote'},
+            third: {'name': 'Bedroom'},
+        })
+
+    def test_import_pairing_rejects_invalid_or_active_pairing_without_changing_files(self):
+        import bridge_service
+        key = '0123456789abcdef0123456789abcdef'
+        write(self.dir / 'state.json', {
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
+            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 1}],
+        })
+        state_before = (self.dir / 'state.json').read_bytes()
+        config_before = self.config.read_bytes()
+        valid = {'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
+                 'controllers': [{'mac': CR, 'aid': 1}]}
+        for payload in ('not-a-dict', {'data': 'bad'}, {**valid, 'version': 2}, {**valid, 'version': True},
+                        {**valid, 'household': 'Other_123'}, {**valid, 'network_key': '01'},
+                        {**valid, 'freq': 2417}, {**valid, 'controllers': []},
+                        {**valid, 'controllers': [{'mac': CR, 'name': 'x' * 31}]}):
+            with self.subTest(payload=payload), self.assertRaises(webui.ApiError) as caught:
+                self.bridge.import_pairing({'data': payload} if isinstance(payload, dict) and 'data' not in payload else payload)
+            self.assertEqual(caught.exception.status, 400)
+        with patch.object(self.bridge, 'pairing_status', return_value={'available': True, 'running': True, 'failed': False}), \
+                patch.object(bridge_service, 'radio_mac', return_value='dc:a6:32:e7:3b:0e'):
+            with self.assertRaises(webui.ApiError) as caught:
+                self.bridge.import_pairing({'data': valid})
+            self.assertEqual(caught.exception.status, 409)
+        self.assertEqual((self.dir / 'state.json').read_bytes(), state_before)
+        self.assertEqual(self.config.read_bytes(), config_before)
 
 
 class Spotify(Fixture):
@@ -526,6 +669,34 @@ class Http(Fixture):
         for address, allowed in [('192.168.69.52', False), ('192.168.1.20', True), ('::ffff:192.168.69.60', False)]:
             probe.client_address = (address, 1234)
             self.assertEqual(probe.allowed_client(), allowed, address)
+
+    def test_pairing_export_and_import_routes_require_auth_and_round_trip(self):
+        import bridge_service
+        self.assertEqual(self.call('POST', '/api/controllers/pairing/export', {})[0], 401)
+        self.assertEqual(self.call('POST', '/api/controllers/pairing/import', {'data': {}})[0], 401)
+        self.call('POST', '/api/setup', {'password': 'long enough'})
+        self.assertEqual(self.call('POST', '/api/controllers/pairing/export', {}, header=False)[0], 403)
+        self.assertEqual(self.call('POST', '/api/controllers/pairing/import', {'data': {}}, header=False)[0], 403)
+
+        key = 'fedcba9876543210fedcba9876543210'
+        write(self.dir / 'state.json', {
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
+            'freq': 2412, 'controllers': [{'mac': CR, 'aid': 2}],
+        })
+        self.bridge.rename_controller(CR, 'Kitchen')
+        status, exported = self.call('POST', '/api/controllers/pairing/export', {})
+        self.assertEqual(status, 200)
+        self.assertEqual(exported['household'], HOUSEHOLD)
+
+        (self.dir / 'state.json').unlink()
+        with patch.object(bridge_service, 'radio_mac', return_value='dc:a6:32:11:22:33'):
+            status, imported = self.call('POST', '/api/controllers/pairing/import', {'data': exported})
+        self.assertEqual(status, 200)
+        self.assertEqual((imported['household'], imported['channel'], imported['bssid'], imported['controllers']),
+                         (HOUSEHOLD, 1, 'dc:a6:32:11:22:33', 1))
+        saved = json.loads((self.dir / 'state.json').read_text())
+        self.assertEqual((saved['bssid'], saved['household'], saved['network_key']),
+                         ('dc:a6:32:11:22:33', HOUSEHOLD, key))
 
 
 class LoginLimiter(unittest.TestCase):

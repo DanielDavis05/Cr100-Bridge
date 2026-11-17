@@ -484,6 +484,7 @@ views.controllers = {
     const firmwarePanels = new Map();
     const openLogs = new Set();
     let renaming = false;
+    let importing = false;
 
     const updateDevicesStatus = (data) => {
       const node = $('.smart-device-status', main);
@@ -542,6 +543,11 @@ views.controllers = {
           <div><dt>Radio channel</dt><dd>${escapeHtml(data.channel ?? 'Unknown')}</dd></div></dl>
         <div class="pair-row"><span class="dot ${pairState[0]}"></span><p>${pairState[1]}</p>
           <button type="button" class="inline-button" id="pair-controller" ${!pairing.available || pairing.running ? 'disabled' : ''}>${pairing.running ? 'Pairing…' : data.controllers.length ? 'Add controller' : 'Pair controller'}</button></div>
+        <div class="pair-row pair-transfer"><p class="hint">Use the same pairing on another bridge in a different location.</p>
+          <div class="radio-actions">
+            <button type="button" class="inline-button quiet" id="pairing-export" ${!data.controllers.length || pairing.running ? 'disabled' : ''}>Export pairing</button>
+            <span class="file-pick"><label><input type="file" id="pairing-import" accept="application/json,.json" ${pairing.running ? 'disabled' : ''}><span class="inline-button quiet">Import pairing…</span></label></span>
+          </div></div>
       </section>`));
       $('#pair-controller', main).addEventListener('click', async (event) => {
         event.currentTarget.disabled = true;
@@ -552,6 +558,48 @@ views.controllers = {
           toast('Pairing could not start', error.message, true);
         }
         await refresh();
+      });
+      $('#pairing-export', main).addEventListener('click', async () => {
+        try {
+          const exported = await api('POST', '/api/controllers/pairing/export', {});
+          const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2) + '\n'], { type: 'application/json' }));
+          const link = el('<a download="cr100-pairing.json">Download</a>');
+          link.href = url;
+          link.click();
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          toast('Export failed', error.message, true);
+        }
+      });
+      $('#pairing-import', main).addEventListener('change', async (event) => {
+        const input = event.currentTarget;
+        const file = input.files[0];
+        input.value = '';
+        if (!file) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(await file.text());
+        } catch {
+          toast('Import failed', 'Choose a valid JSON pairing file.', true);
+          return;
+        }
+        const incoming = parsed && typeof parsed === 'object' && typeof parsed.household === 'string' ? parsed.household : null;
+        const message = !data.household
+          ? `Import pairing${incoming ? ` for ${incoming}` : ''} onto this bridge?`
+          : incoming && incoming === data.household
+            ? `Import pairing for ${incoming}? Controllers will be merged into this household if the network key matches; otherwise the bridge’s pairing will be replaced.`
+            : `Replace this bridge’s pairing (${data.household}) with ${incoming || 'the imported household'}? Your speakers and room settings stay untouched.`;
+        if (!confirm(message)) return;
+        importing = true;
+        try {
+          const result = await api('POST', '/api/controllers/pairing/import', { data: parsed });
+          toast('Pairing imported', result.message);
+          await refresh();
+        } catch (error) {
+          toast('Import failed', error.message, true);
+        } finally {
+          importing = false;
+        }
       });
     };
 
@@ -861,7 +909,7 @@ views.controllers = {
       if (current !== 'controllers') return;
       for (const controller of data.controllers) controller.update = data.updates
         ? data.updates.controllers?.[controller.mac] || { status: 'none' } : undefined;
-      if (passive && (renaming || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
+      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
         for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware);
         updateBridgeStatus(data);
         updateDevicesStatus(data);
