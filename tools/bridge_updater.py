@@ -21,7 +21,7 @@ import urllib.request
 import build_info
 
 DEFAULT_REPO = 'DanielDavis05/Cr100-Bridge'
-DEFAULT_BRANCH = 'main'
+DEFAULT_BRANCH = 'master'
 DEFAULT_INSTALL_ROOT = Path('/opt/cr100-bridge')
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 256 * 1024 * 1024

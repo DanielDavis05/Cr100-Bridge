@@ -15,11 +15,11 @@ connection that does not use wlan0. Onboard wlan0 is reserved for the CR100.
 --no-start    Install and enable services without starting them now.
 --source DIR  Install a local source tree (default: directory containing this file).
 --repo URL    Fetch a Git repository when using the streamed installer.
---ref REF     Branch, tag or commit to fetch (default: main).
+--ref REF     Branch, tag or commit to fetch (default: master).
 EOF
 }
 die() { echo "Error: $*" >&2; exit 1; }
-SOURCE='' REPO='' REF=main CHECK=0 START=1
+SOURCE='' REPO='' REF=master CHECK=0 START=1
 while (($#)); do
   case "$1" in
     --source|--repo|--ref)

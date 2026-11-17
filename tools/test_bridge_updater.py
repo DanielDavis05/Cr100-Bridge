@@ -57,7 +57,7 @@ class BridgeUpdaterTests(unittest.TestCase):
         self.commit_a = 'a' * 40
         self.commit_b = 'b' * 40
         (self.current_root / build_info.STAMP).write_text(json.dumps({
-            'version': 'main',
+            'version': 'master',
             'commit': self.commit_a,
             'short_commit': self.commit_a[:8],
             'description': self.commit_a[:8],
@@ -112,7 +112,7 @@ class BridgeUpdaterTests(unittest.TestCase):
         self.assertEqual(first['target_short'], 'bbbbbbbb')
         self.assertEqual(first['summary'], 'Add GitHub bridge self-update')
         self.assertEqual(first['repo'], 'DanielDavis05/Cr100-Bridge')
-        self.assertEqual(first['branch'], 'main')
+        self.assertEqual(first['branch'], 'master')
 
         # Cached within TTL
         second = updater.check_for_update()
@@ -172,7 +172,7 @@ class BridgeUpdaterTests(unittest.TestCase):
             'target_commit': self.commit_b,
             'current_commit': self.commit_a,
             'repo': 'DanielDavis05/Cr100-Bridge',
-            'branch': 'main',
+            'branch': 'master',
         }
         dl_progress = []
         updater.download('tok1', offer, dl_progress.append)
@@ -186,7 +186,7 @@ class BridgeUpdaterTests(unittest.TestCase):
         self.assertTrue(active.is_dir())
         self.assertNotEqual(active, old_targets[0].resolve())
         self.assertEqual(build_info.read(active)['commit'], self.commit_b)
-        self.assertEqual(build_info.read(active)['version'], 'main')
+        self.assertEqual(build_info.read(active)['version'], 'master')
         self.assertEqual(updater.current_commit(), self.commit_b)
         self.assertTrue((self.bin_dir / 'cr100-bridge').is_file())
         self.assertTrue((self.systemd_dir / 'cr100-bridge.service').is_file())
@@ -238,7 +238,7 @@ class BridgeUpdaterTests(unittest.TestCase):
             opener=opener, command_runner=runner)
         self.addCleanup(updater.close)
 
-        offer = {'target_commit': self.commit_b, 'repo': 'DanielDavis05/Cr100-Bridge', 'branch': 'main'}
+        offer = {'target_commit': self.commit_b, 'repo': 'DanielDavis05/Cr100-Bridge', 'branch': 'master'}
         results = [[], []]
         barrier = threading.Barrier(2)
 
@@ -278,17 +278,17 @@ class BridgeUpdaterTests(unittest.TestCase):
         self.assertTrue(triggered.wait(1.0))
         callback.assert_called_once_with()
 
-    def test_default_branch_falls_back_from_main_to_master_on_422(self):
+    def test_default_branch_is_master_and_falls_back_to_the_repository_default_on_422(self):
         calls = []
 
         def opener(req, timeout=None):
             calls.append(req.full_url)
-            if req.full_url.endswith('/commits/main'):
-                raise urllib.error.HTTPError(req.full_url, 422, 'Unprocessable Entity', {}, None)
             if req.full_url.endswith('/commits/master'):
+                raise urllib.error.HTTPError(req.full_url, 422, 'Unprocessable Entity', {}, None)
+            if req.full_url.endswith('/commits/HEAD'):
                 return _FakeResponse(json.dumps({
                     'sha': self.commit_b,
-                    'commit': {'message': 'Commit on master'},
+                    'commit': {'message': 'Commit on the default branch'},
                 }).encode())
             raise AssertionError('Unexpected URL: ' + req.full_url)
 
@@ -297,13 +297,14 @@ class BridgeUpdaterTests(unittest.TestCase):
             opener=opener)
         self.addCleanup(updater.close)
 
+        self.assertEqual(bridge_updater.DEFAULT_BRANCH, 'master')
         result = updater.check_for_update()
         self.assertTrue(result['available'])
-        self.assertEqual(result['branch'], 'master')
+        self.assertEqual(result['branch'], 'HEAD')
         self.assertEqual(result['target_commit'], self.commit_b)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual([url.rpartition('/commits/')[2] for url in calls], ['master', 'HEAD'])
 
-        # Explicit branch overrides do not fall back to master
+        # Explicit branch overrides do not fall back
         self.config.write_text(json.dumps({'updates': {'branch': 'custom-branch'}}))
         calls.clear()
 

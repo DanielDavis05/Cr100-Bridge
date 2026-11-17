@@ -107,12 +107,12 @@ Clone the repository from GitHub and use the same installer, or stream the
 script while supplying the repository URL:
 
 ```sh
-# Replace VERSION with a branch (default: main), tag, or commit.
-curl -fsSL https://raw.githubusercontent.com/DanielDavis05/Cr100-Bridge/main/install.sh \
-  | sudo bash -s -- --repo https://github.com/DanielDavis05/Cr100-Bridge.git --ref main
+# Replace VERSION with a branch (default: master), tag, or commit.
+curl -fsSL https://raw.githubusercontent.com/DanielDavis05/Cr100-Bridge/master/install.sh \
+  | sudo bash -s -- --repo https://github.com/DanielDavis05/Cr100-Bridge.git --ref master
 ```
 
-`--ref` accepts a branch, tag, or commit (default `main`). Use the same release
+`--ref` accepts a branch, tag, or commit (default `master`). Use the same release
 for the script URL and source reference. The script can also install an explicit
 local source using `--source /path/to/cr100-bridge`. `--no-start` installs and
 enables services without starting them in the current boot.

@@ -933,7 +933,7 @@ class GitHubSelfUpdateIntegration(unittest.TestCase):
         self.commit_a = 'a' * 40
         self.commit_b = 'b' * 40
         (self.current_root / build_info.STAMP).write_text(json.dumps({
-            'version': 'main',
+            'version': 'master',
             'commit': self.commit_a,
             'short_commit': self.commit_a[:8],
             'description': self.commit_a[:8],
