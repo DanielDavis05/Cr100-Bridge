@@ -2,10 +2,12 @@
 import html
 import http.client
 import http.server
+import io
 import json
 from pathlib import Path
 import queue
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -14,6 +16,9 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
+import bridge_updater
+import build_info
+import distribution
 import online_updates
 import update_service
 import zoneplayers
@@ -909,6 +914,209 @@ class UpdateServiceIntegration(unittest.TestCase):
                 stop.set()
                 worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
+
+
+class GitHubSelfUpdateIntegration(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.config = self.root / 'bridge-config.json'
+        self.config.write_text('{}')
+        self.package, modulus = build_test_package()
+        key = patch.object(online_updates, 'VENDOR_MODULUS', modulus)
+        key.start()
+        self.addCleanup(key.stop)
+        self.install_root = self.root / 'opt/cr100-bridge'
+        self.current_root = self.root / 'running'
+        self.current_root.mkdir()
+        self.commit_a = 'a' * 40
+        self.commit_b = 'b' * 40
+        (self.current_root / build_info.STAMP).write_text(json.dumps({
+            'version': 'main',
+            'commit': self.commit_a,
+            'short_commit': self.commit_a[:8],
+            'description': self.commit_a[:8],
+            'dirty': False,
+            'tag': '',
+        }))
+        archive_path = self.root / 'github-source.tar.gz'
+        distribution.archive(archive_path)
+        self.tarball = archive_path.read_bytes()
+        self.restarted = threading.Event()
+        self.api_error = None
+
+        def opener(req, timeout=None):
+            if req.full_url.startswith('https://api.github.com/'):
+                if self.api_error is not None:
+                    raise self.api_error
+                body = json.dumps({
+                    'sha': self.commit_b,
+                    'commit': {'message': 'Support Pi 3B+ and self-updates'},
+                }).encode()
+            elif req.full_url.startswith('https://codeload.github.com/'):
+                body = self.tarball
+            else:
+                raise AssertionError('Unexpected URL: ' + req.full_url)
+            stream = io.BytesIO(body)
+            stream.headers = {'Content-Length': str(len(body))}
+            return stream
+
+        def runner(cmd, **kwargs):
+            if len(cmd) >= 3 and str(cmd[1]).endswith('tools/distribution.py'):
+                return subprocess.run(cmd, **kwargs)
+            if len(cmd) >= 3 and cmd[1:3] == ['-m', 'venv']:
+                venv_python = Path(cmd[3]) / 'bin/python'
+                venv_python.parent.mkdir(parents=True, exist_ok=True)
+                venv_python.write_text('#!/bin/sh\nexit 0\n')
+                venv_python.chmod(0o755)
+                return subprocess.CompletedProcess(cmd, 0)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        self.backend = MemoryBackend('memory')
+        self.logs = []
+        self.house = zoneplayers.Household(zp, HOUSEHOLD, ['Den'], ['127.0.0.1'], self.logs.append,
+            port=0, backends=[self.backend], refs=[('memory', 'den')], bridge_ip='192.0.2.200',
+            controller_resolver=ADDRESSES.get, controller_addresses=lambda: dict(ADDRESSES))
+        self.addCleanup(self.house.close)
+        self.manager = online_updates.UpdateManager(self.config)
+        self.updater = bridge_updater.BridgeReleaseUpdater(
+            self.config, install_root=self.install_root, current_root=self.current_root,
+            bin_dir=None, systemd_dir=None, compatible_path=None,
+            opener=opener, command_runner=runner, restart_callback=self.restarted.set)
+        self.service = update_service.UpdateService(
+            self.house, self.manager, '127.0.0.1', tls_port=None, http_port=0, tcp_port=0,
+            phase_delay=0, recover=False, release_updater=self.updater)
+        self.house.updates = self.service
+        self.house.start('127.0.0.1', ssdp=False)
+        self.house.stop.set()
+        self.room = self.house.players[0]
+        self.bridge = self.house.about_players[zoneplayers.BRIDGE_KEY]
+        servers = [player.http for player in self.house.devices()] + self.service.transport.servers
+        self.sources = SourceAddresses(servers, [IP_A, IP_B, UNKNOWN])
+        self.addCleanup(self.sources.close)
+        for player in self.house.devices():
+            player.http._test_source_addresses = self.sources
+            player.config.callback_network = '127.0.0.0/8'
+
+    def check(self, source=IP_A, current='25.2-50130'):
+        status, body, _ = soap(self.room, source, 'ZoneGroupTopology', 'CheckForUpdate', CHECK,
+            extra_headers={'User-Agent': 'Linux UPnP/1.0 Sonos/%s (CR100)' % current})
+        self.assertEqual(status, 200, body)
+        item = field(body, 'UpdateItem')
+        return ET.fromstring(item) if item else None
+
+    def update_http(self, source, path):
+        server = self.service.transport.servers[0]
+        connection = self.sources.connection(*server.server_address, source)
+        try:
+            connection.request('GET', path)
+            response = connection.getresponse()
+            return response.status, response.read(), dict(response.getheaders())
+        finally:
+            connection.close()
+
+    def test_live_github_bridge_update_flows_through_native_protocol_and_restarts(self):
+        events = queue.Queue()
+
+        class Callback(http.server.BaseHTTPRequestHandler):
+            def do_NOTIFY(self):
+                events.put((self.path, self.rfile.read(int(self.headers['Content-Length']))))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Callback)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        status, _, _ = request(self.room, IP_A, 'SUBSCRIBE', '/ZoneGroupTopology/Event', headers={
+            'CALLBACK': '<http://127.0.0.1:%d/a>' % server.server_port, 'NT': 'upnp:event', 'TIMEOUT': 'Second-300'})
+        self.assertEqual(status, 200)
+
+        item = self.check()
+        self.assertEqual(item.get('Version'), '25.2-50130')
+        manifest_status, body, _ = self.update_http(IP_A, urlsplit(item.get('ManifestURL')).path)
+        self.assertEqual(manifest_status, 200)
+        manifest = ET.fromstring(body)
+        self.assertEqual(manifest.get('system_version'), '25.2-50130')
+        images = {x.get('model'): x for x in manifest.find('update_list')}
+        self.assertEqual(set(images), {'1'})
+        target, url = images['1'].get('version'), images['1'].text
+
+        message = self.service.message(A)
+        self.assertEqual(message['MessageHeader'], 'Bridge software update')
+        self.assertEqual(message['AllowUpdate'], 'true')
+        self.assertIn(self.commit_b[:8], message['MessageBody'])
+        self.assertIn('Support Pi 3B+ and self-updates', message['MessageBody'])
+
+        for player in self.house.devices():
+            begin_status, _, _ = soap(player, IP_A, 'ZoneGroupTopology', 'BeginSoftwareUpdate',
+                '<UpdateURL>%s</UpdateURL><Flags>2</Flags>' % html.escape(url))
+            self.assertEqual(begin_status, 200)
+        tcp_server = self.service.transport.player_servers['127.0.0.1']
+        for _ in range(2):
+            connection = self.sources.connection(*tcp_server.server_address, IP_A)
+            if connection.sock is None:
+                connection.connect()
+            self.addCleanup(connection.close)
+            stream = connection.sock.makefile('rwb', buffering=0)
+            self.addCleanup(stream.close)
+            stream.write(b'HELLO?version=25.2-50130\n')
+            self.assertEqual(stream.readline(), b'HELLO?version=1\n')
+            for phase in (b'DOWNLOAD', b'FLASHWRITE'):
+                stream.write(phase + b'\n')
+                for percent in (0, 25, 75, 100):
+                    self.assertEqual(stream.readline(), b'STATUS?phase=' + phase +
+                                     b';percent-complete=' + str(percent).encode() + b'\n')
+                self.assertEqual(stream.readline(), b'COMPLETE?phase=' + phase + b'\n')
+            stream.write(b'REBOOT?Delay=0\n')
+            self.assertEqual(stream.readline(), b'')
+
+        wait_for(lambda: self.service.coordinator.status(A)['status'] == 'completed', timeout=5)
+        self.assertEqual(self.service.version, target)
+        deadline = time.monotonic() + 3
+        saw_target = False
+        while time.monotonic() < deadline:
+            _, notify_body = events.get(timeout=max(0.05, deadline - time.monotonic()))
+            tree = ET.fromstring(ET.fromstring(notify_body).findtext('.//ZoneGroupState'))
+            if {x.get('SoftwareVersion') for x in tree.iter('ZoneGroupMember')} == {target}:
+                saw_target = True
+                break
+        self.assertTrue(saw_target)
+
+        status = self.manager.bridge_status()
+        self.assertEqual(status['mode'], 'github')
+        self.assertFalse(status['stub'])
+        self.assertTrue(status['automatic_installation'])
+        self.assertEqual(status['target_commit'], self.commit_b)
+        installed = (self.install_root / 'current').resolve()
+        self.assertEqual(build_info.read(installed)['commit'], self.commit_b)
+
+        with patch.object(self.updater, 'expedite_restart',
+                          side_effect=lambda: self.updater._arm_restart_timer_locked(0.02)):
+            self.assertEqual(soap(self.bridge, IP_A, 'SystemProperties', 'DoPostUpdateTasks',
+                                  path='/SystemProperties/Control')[0], 200)
+            self.assertTrue(self.restarted.wait(2))
+        self.assertFalse(self.updater.check_for_update()['available'])
+
+    def test_github_check_network_error_falls_back_to_inert_manifest(self):
+        self.api_error = OSError('network unreachable')
+        inert = self.check()
+        self.assertIsNotNone(inert)
+        self.assertEqual(self.service.offers[A]['kind'], 'none')
+        self.assertEqual(self.service.message(A)['AllowUpdate'], 'false')
+
+    def test_armed_controller_package_takes_precedence_over_available_github_update(self):
+        self.manager.stage_controller(A, self.package, current_version='25.2-50130')
+        item = self.check()
+        status, body, _ = self.update_http(IP_A, urlsplit(item.get('ManifestURL')).path)
+        self.assertEqual(status, 200)
+        images = {x.get('model'): x for x in ET.fromstring(body).find('update_list')}
+        self.assertEqual(set(images), {'1', '2'})
+        self.assertEqual(images['2'].get('version'), '25.2-50130')
 
 
 if __name__ == '__main__':

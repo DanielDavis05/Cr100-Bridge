@@ -1,16 +1,18 @@
 # Online Updates
 
 The bridge routes the CR100's original **System Settings → Online Updates**
-to the firmware explicitly armed for that paired controller. Without an armed
-controller selection, a fresh inert manifest retains the current player persona
-and controller version while omitting controller firmware. The exact v2 native
-guard then reports no update. An empty UpdateItem would instead display a native
-connection error. Bridge demonstrations require
-an explicit laboratory selection and are not offered by ordinary Online Updates.
+to the firmware explicitly armed for that paired controller, or — when no
+controller firmware is armed — checks GitHub (`DanielDavis05/Cr100-Bridge`,
+`main` branch) for a newer bridge commit. When a newer commit is available,
+the bridge offers it as a Sonos system/player update (model 1 only) while
+leaving controller firmware unchanged. Without an armed controller package or
+available bridge commit, a fresh inert manifest retains the current player
+persona and controller version while omitting controller firmware, so the exact
+v2 native guard reports no update. An empty UpdateItem would instead display a
+native connection error.
 
 The implementation is present in this checkout. This document does not assert
-that it has been deployed, that a physical controller has been flashed, or that
-the bridge can install a new bridge release automatically.
+that a physical controller has been flashed with custom firmware.
 
 ## Upload and install controller firmware
 
@@ -197,41 +199,56 @@ HTTP prefixes, including `http://192.168.` and `http://10.`. A direct private-IP
 update URL can therefore use the stock generic confirmation without fetching
 the custom text. Hostnames resolve locally as described below.
 
-## Bridge update demonstration
+## Bridge self-updates and demonstration mode
 
-The explicit laboratory `UpdateService.check(..., demonstration=True)` selection
-exercises the original system update path: discovery/check, manifest fetch, TLS message, confirmation,
-`BeginSoftwareUpdate`, and TCP update commands `HELLO`, `DOWNLOAD`, `FLASHWRITE`,
-and delayed `REBOOT`. The controller displays its original progress and
-completion screens. The coordinator tracks the visible virtual components,
-serializes the household operation, and advances their common simulated
-software version after every required component reaches the reboot command.
+When no controller `.upd` is armed for the requesting controller, `CheckForUpdate`
+queries GitHub (`DanielDavis05/Cr100-Bridge` `main`, configurable via `"updates":
+{"repo": "...", "branch": "..."}` in `bridge-config.json`) via
+`tools/bridge_updater.py` and compares the remote commit SHA against the running
+build's `build-info.json`:
 
-**There is no bridge-release downloader or installer behind this path yet.**
-DOWNLOAD/FLASHWRITE/restart are simulated protocol phases. Completion does not
-mean a new bridge package was installed or the Pi rebooted. Real Sonos/Home
-Assistant speakers are not firmware-update targets. Controller model-2 firmware
-is left unchanged on this path: bridge demonstration manifests omit model 2.
+1. If a newer commit exists, the manifest offers a `model="1"` system update
+   without any `model="2"` image, and `system_version` matches the controller's
+   own version so the controller leaves its own firmware untouched.
+2. Selecting **Update bridge** on the CR100 drives `BeginSoftwareUpdate` and
+   TCP port 4444 (`HELLO`, `DOWNLOAD`, `FLASHWRITE`, `REBOOT`):
+   - `DOWNLOAD` fetches the GitHub commit archive once per job, verifies its
+     structure, and stamps `build-info.json`.
+   - `FLASHWRITE` stages a new `/opt/cr100-bridge/releases/release-*` tree,
+     builds its `.venv`, verifies imports, updates unit/CLI files, and
+     atomically flips `/opt/cr100-bridge/current` while keeping older releases
+     for rollback.
+   - `REBOOT` advances `BootSeq` and software version, notifies the controller,
+     and restarts `cr100-webui.service` and `cr100-bridge.service` right after
+     `DoPostUpdateTasks` (with a 5 s fallback timer).
+
+The explicit laboratory `UpdateService.check(..., demonstration=True)` path
+retains the simulated stub behavior (`stub=True`) for offline tests without
+network requests or disk changes. Real Sonos/Home Assistant speakers are never
+firmware-update targets. Controller model-2 firmware is left unchanged on both
+paths: bridge manifests omit model 2.
 Only an active, armed controller package selection emits a model-2 image,
 including when that selected package has the same version as the controller.
 This also prevents a custom controller that supports same-version reinstall
 from treating an unarmed current-version placeholder as an installation offer.
 Stock clients can use both the generic `UpdateItem.Version` and the manifest's
 `system_version` as controller fallbacks when model 2 is absent. On the
-demonstration path both defaults use the requesting controller's known current
+bridge path both defaults use the requesting controller's known current
 version. Setting only the manifest header is insufficient: the native stock
 4.3.2 control still attempted a controller handoff in that case. With both
 defaults equal to its current version, it reported no update when the explicit
 model-1 image was also unchanged. The model-1 image and coordinator still carry
-the demonstration's actual player target. When the controller version is
+the bridge update's actual player target. When the controller version is
 unknown, the bridge keeps the existing generic defaults rather than inventing
 a controller version. Armed controller packages retain their existing generic
 version, header and explicit model-2 target.
 
 The web UI's Bridge updates section reads the coordinator receipt and shows the
-latest/active status, phase, percentage, and errors. It is a status view; ordinary
-Online Updates does not arm demonstrations. Its internal simulated version is not
-the bridge's Git/build identity.
+latest/active status, target commit, phase, percentage, and errors. Its
+internal simulated player version (`34.16-*`) is incremented per bridge update
+so the CR100 triggers native discovery/reboot completion; the actual Git
+commit identity is tracked in `build-info.json` and shown in About My Sonos
+System.
 
 ## Local DNS and listeners
 

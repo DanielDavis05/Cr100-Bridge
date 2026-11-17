@@ -505,7 +505,7 @@ views.controllers = {
       const node = $('.bridge-update-status', main);
       if (!node) return;
       const state = data.updates?.bridge || {};
-      $('.bridge-update-message', node).textContent = state.message || 'Automatic bridge updates are not available yet. Online Updates on the controller runs a demonstration.';
+      $('.bridge-update-message', node).textContent = state.message || 'Open System Settings → Online Updates on a controller to check GitHub and update the bridge.';
       const meta = state.status
         ? [state.status, state.phase, Number.isFinite(state.percent) ? `${state.percent}%` : ''].filter(Boolean).join(' · ')
         : 'A staged controller update comes first';

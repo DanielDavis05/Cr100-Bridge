@@ -11,6 +11,8 @@ import hashlib
 import html
 import re
 import secrets
+import subprocess
+import tarfile
 import threading
 from urllib.parse import unquote, urlsplit
 
@@ -32,8 +34,10 @@ _SOFTWARE_PROPERTIES = frozenset(('R_CustomerID', 'R_UpdatePreference', 'R_LastU
 
 class UpdateService:
     def __init__(self, house, manager, listen_ip, *, origin=ORIGIN, transport_factory=UpdateTransport,
-                 tls_port=443, http_port=80, tcp_port=4444, phase_delay=2, recover=True):
+                 tls_port=443, http_port=80, tcp_port=4444, phase_delay=2, recover=True,
+                 release_updater=None):
         self.house, self.manager, self.listen_ip = house, manager, listen_ip
+        self.release_updater = release_updater
         self.origin = origin.rstrip('/')
         self.lock = threading.RLock()
         self.offers, self.versions, self.generations, self.floors, self.availability = {}, {}, {}, {}, {}
@@ -47,10 +51,13 @@ class UpdateService:
             release = getattr(manager, 'release_prompts', None)
             if callable(release):
                 release('The bridge restarted; use Online Updates to retry.')
-        self.transport = transport_factory(listen_ip, house.controller_resolver, self.message,
-            self.coordinator, manager.storage / 'tls', request=self.request, log=house.log,
+        transport_kwargs = dict(request=self.request, log=house.log,
             tls_port=tls_port, http_port=http_port, tcp_port=tcp_port, phase_delay=phase_delay,
             delivery_failed=self.delivery_failed)
+        if release_updater is not None:
+            transport_kwargs['phase_runner'] = self.run_bridge_phase
+        self.transport = transport_factory(listen_ip, house.controller_resolver, self.message,
+            self.coordinator, manager.storage / 'tls', **transport_kwargs)
         self.started = False
 
     def _mac(self, address):
@@ -138,6 +145,25 @@ class UpdateService:
     def close(self):
         self.transport.close()
         self.coordinator.close()
+        if self.release_updater is not None:
+            self.release_updater.close()
+
+    def run_bridge_phase(self, mac, token, player, command, report_progress):
+        offer = self.coordinator.status(mac)
+        if (not self.release_updater or not offer or offer.get('token') != token
+                or offer.get('stub', True)):
+            raise UpdateTransportError('Bridge update package is no longer available')
+        try:
+            if command == 'DOWNLOAD':
+                self.release_updater.download(token, offer, report_progress)
+            elif command == 'FLASHWRITE':
+                self.release_updater.install(token, offer, report_progress)
+            else:
+                raise UpdateTransportError('Unknown update command')
+        except UpdateTransportError:
+            raise
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, tarfile.TarError) as error:
+            raise UpdateTransportError(str(error) or 'Bridge update failed') from error
 
     def bridge_completed(self, offer):
         compatibility = offer['kind'] == 'controller-compatibility'
@@ -151,8 +177,15 @@ class UpdateService:
                 if not compatibility or player.config.udn in offer['restart_players']:
                     player.config.boot_sequence = player.config.boot_sequence % 0xffffffff + 1
         self.house.updates_changed()
-        self.house.log({'event': 'controller-player-compatibility-completed' if compatibility
-                        else 'bridge-update-stub-completed', 'version': self.version})
+        event = ('controller-player-compatibility-completed' if compatibility
+                 else 'bridge-update-stub-completed' if offer.get('stub', True)
+                 else 'bridge-update-completed')
+        record = {'event': event, 'version': self.version}
+        if offer.get('target_commit'):
+            record['commit'] = offer['target_commit']
+        self.house.log(record)
+        if not compatibility and not offer.get('stub', True) and self.release_updater is not None:
+            self.release_updater.schedule_restart()
 
     def compatibility_valid(self, mac, token, player=None):
         """Revalidate the live selection and visibility at every transport phase."""
@@ -209,12 +242,20 @@ class UpdateService:
             selected = self.coordinator.offer(mac, players, self.version)
             selected['controller_version'] = current
         else:
-            # The native client treats an empty UpdateItem as a connection
-            # error. An inert manifest expresses no update while preserving
-            # the guarded model-specific lookup and current player persona.
-            selected = dict(kind='none', token=secrets.token_urlsafe(24),
-                controller_version=current, version=current or self.version,
-                expires_at=self.manager.clock() + min(900, self.manager.ttl))
+            release = self.release_updater.check_for_update() if self.release_updater is not None else None
+            if release and release.get('error'):
+                self.house.log({'event': 'bridge-update-check-failed', 'error': release['error']})
+            if release and release.get('available'):
+                players = [p.config.udn for p in self.house.devices(address)]
+                selected = self.coordinator.offer(mac, players, self.version, release=release)
+                selected['controller_version'] = current
+            else:
+                # The native client treats an empty UpdateItem as a connection
+                # error. An inert manifest expresses no update while preserving
+                # the guarded model-specific lookup and current player persona.
+                selected = dict(kind='none', token=secrets.token_urlsafe(24),
+                    controller_version=current, version=current or self.version,
+                    expires_at=self.manager.clock() + min(900, self.manager.ttl))
         with self.lock:
             self.offers[mac] = dict(selected)
         self.tick()
@@ -329,8 +370,18 @@ class UpdateService:
             return dict(statusCode='1', MessageHeader='Bridge update in progress',
                 MessageBody='Another controller is updating the bridge. Please check again when it finishes.',
                 CancelPrompt='Back to settings', AllowUpdate='false')
+        body = 'Update the CR100 Bridge. Your controller firmware will stay unchanged.'
+        if offer.get('target_commit'):
+            short = offer['target_commit'][:8]
+            summary = (offer.get('summary') or '').strip()
+            body = 'Update the CR100 Bridge to %s. Your controller firmware will stay unchanged.' % short
+            if summary:
+                candidate = 'Update the CR100 Bridge to %s (%s). Your controller firmware will stay unchanged.' % (
+                    short, summary)
+                if len(candidate.encode('utf-8')) <= 511:
+                    body = candidate
         return dict(statusCode='1', MessageHeader='Bridge software update',
-            MessageBody='Update the CR100 Bridge. Your controller firmware will stay unchanged.',
+            MessageBody=body,
             ContinuePrompt='Update bridge', CancelPrompt='Later', AllowUpdate='true')
 
     def soap(self, state, service, action, args, address):
@@ -381,6 +432,8 @@ class UpdateService:
                     state.properties[name] = args.get('StringValue', '')
             return {}, ['SystemProperties']
         if service == 'SystemProperties' and action == 'DoPostUpdateTasks':
+            if self.release_updater is not None:
+                self.release_updater.expedite_restart()
             return {}, []
         return None
 
@@ -440,5 +493,8 @@ class UpdateService:
 
 
 def configure_updates(house, config_path, listen_ip, **options):
+    if 'release_updater' not in options:
+        from bridge_updater import BridgeReleaseUpdater
+        options['release_updater'] = BridgeReleaseUpdater(config_path)
     house.updates = UpdateService(house, UpdateManager(config_path), listen_ip, **options)
     return house.updates

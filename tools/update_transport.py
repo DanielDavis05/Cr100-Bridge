@@ -111,6 +111,11 @@ class BridgeUpdateCoordinator:
                         continue
                     if type(number) not in (int, float) or not math.isfinite(number):
                         raise ValueError('Invalid bridge update timestamp')
+                for key in ('target_commit', 'current_commit', 'summary', 'repo', 'branch'):
+                    if key in offer and not isinstance(offer[key], str):
+                        raise ValueError('Invalid bridge update metadata')
+                if 'stub' in offer and type(offer['stub']) is not bool:
+                    raise ValueError('Invalid bridge update stub flag')
             self.installed_version = installed
             self.offers = value['controllers']
             for offer in self.offers.values():
@@ -212,11 +217,12 @@ class BridgeUpdateCoordinator:
                 offer['status'] = 'cancelled'
                 self._save()
 
-    def offer(self, mac, player_ids, current_version):
+    def offer(self, mac, player_ids, current_version, *, release=None):
         mac = normalize_mac(mac)
         players = list(dict.fromkeys(player_ids))
         if not players or len(players) > 128 or any(not isinstance(x, str) or not x for x in players):
             raise UpdateTransportError('Choose valid virtual players for the update')
+        release_commit = release.get('target_commit') if isinstance(release, dict) else None
         with self.condition:
             if self.closed:
                 raise UpdateTransportError('The update service is stopped')
@@ -226,7 +232,11 @@ class BridgeUpdateCoordinator:
                 if old['token'] == self.active:
                     raise UpdateTransportError('A controller compatibility session is active')
                 old = None
-            if old and ((old.get('status') == 'completed' and
+            same_mode = old is not None and (
+                (release is None and old.get('stub', True))
+                or (release is not None and not old.get('stub', True) and old.get('target_commit') == release_commit)
+            )
+            if old and same_mode and ((old.get('status') == 'completed' and
                          self.clock() - old.get('completed_at', 0) < self.cooldown) or
                         (old['expires_at'] > self.clock() and old['players'] == players and
                          old['status'] in ('offered', 'accepted', 'downloading', 'installing', 'restarting'))):
@@ -235,11 +245,16 @@ class BridgeUpdateCoordinator:
             if old and old['token'] == self.active:
                 return copy.deepcopy(old)
             target = next_version(self.installed_version or current_version)
-            offer = dict(kind='bridge', stub=True, token=secrets.token_urlsafe(24), mac=mac,
+            offer = dict(kind='bridge', stub=release is None, token=secrets.token_urlsafe(24), mac=mac,
                          current_version=self.installed_version or current_version,
                          version=target, target_version=target, players=players,
                          status='offered', accepted=[], states={}, created_at=self.clock(),
                          expires_at=self.clock() + self.offer_ttl)
+            if isinstance(release, dict):
+                for key in ('target_commit', 'current_commit', 'summary', 'repo', 'branch'):
+                    value = release.get(key)
+                    if isinstance(value, str) and value:
+                        offer[key] = value
             self.offers[mac] = offer
             self._save()
             return copy.deepcopy(offer)
@@ -633,11 +648,20 @@ class _Upgrade(socketserver.StreamRequestHandler):
                         token, player = coordinator.claim(mac, self.server.players, transport.accept_timeout)
                     elif token is None:
                         raise UpdateTransportError('DOWNLOAD is required')
-                    for percent in (0, 25, 75, 100):
-                        coordinator.progress(mac, token, player, command, percent)
-                        self.event('STATUS', ('phase', command), ('percent-complete', percent))
-                        if transport.stop.wait(transport.phase_delay / 4):
-                            return
+                    offer = coordinator.status(mac)
+                    if transport.phase_runner is not None and offer and offer.get('stub') is False:
+                        def report_progress(percent):
+                            if transport.stop.is_set():
+                                raise UpdateTransportError('The update transport stopped')
+                            coordinator.progress(mac, token, player, command, percent)
+                            self.event('STATUS', ('phase', command), ('percent-complete', percent))
+                        transport.phase_runner(mac, token, player, command, report_progress)
+                    else:
+                        for percent in (0, 25, 75, 100):
+                            coordinator.progress(mac, token, player, command, percent)
+                            self.event('STATUS', ('phase', command), ('percent-complete', percent))
+                            if transport.stop.wait(transport.phase_delay / 4):
+                                return
                     coordinator.phase_complete(mac, token, player, command)
                     self.event('COMPLETE', ('phase', command))
                 elif command == 'REBOOT':
@@ -671,10 +695,11 @@ class _Upgrade(socketserver.StreamRequestHandler):
 class UpdateTransport:
     def __init__(self, bind, controller_resolver, message_for_mac, coordinator, cert_dir,
                  request=None, log=lambda _: None, tls_port=443, http_port=80, tcp_port=4444,
-                 phase_delay=2, accept_timeout=10, delivery_failed=None):
+                 phase_delay=2, accept_timeout=10, delivery_failed=None, phase_runner=None):
         self.bind, self.controller_resolver, self.message_for_mac = bind, controller_resolver, message_for_mac
         self.coordinator, self.cert_dir, self.request, self.log = coordinator, cert_dir, request, log
         self.delivery_failed = delivery_failed
+        self.phase_runner = phase_runner
         self.tls_port, self.http_port, self.tcp_port = tls_port, http_port, tcp_port
         self.phase_delay, self.accept_timeout = phase_delay, accept_timeout
         self.servers, self.threads, self.stop = [], [], threading.Event()

@@ -353,7 +353,7 @@ class UpdateManager:
         """Read the transport's atomic job receipt without exposing bearer data."""
         result = dict(mode='stub', stub=True, automatic_installation=False,
             status='unavailable', available=False, controllers={},
-            message='Online Updates requires an armed controller package; bridge installation is not implemented.')
+            message='Open System Settings \u2192 Online Updates on a controller to check GitHub and update the bridge.')
         path = self.storage / 'bridge.json'
         try:
             if path.is_symlink() or path.stat().st_size > 2 * 1024 * 1024:
@@ -362,7 +362,8 @@ class UpdateManager:
             if not isinstance(state, dict) or not isinstance(state.get('controllers'), dict):
                 return result
             fields = frozenset(('mac', 'kind', 'stub', 'status', 'phase', 'percent',
-                'version', 'target_version', 'current_version', 'created_at',
+                'version', 'target_version', 'current_version', 'target_commit',
+                'current_commit', 'summary', 'repo', 'branch', 'created_at',
                 'expires_at', 'completed_at', 'restart_at', 'error'))
             active, latest, latest_at = None, None, -1
             for mac, offer in state['controllers'].items():
@@ -390,11 +391,28 @@ class UpdateManager:
                 if value is None or isinstance(value, (str, int, float)):
                     result[key] = value
             if selected:
-                for key in ('status', 'phase', 'percent', 'mac', 'version', 'target_version', 'current_version'):
+                for key in ('status', 'phase', 'percent', 'mac', 'version', 'target_version',
+                            'current_version', 'target_commit', 'current_commit', 'summary', 'repo', 'branch'):
                     if key in selected:
                         result[key] = selected[key]
                 if selected.get('error'):
                     result['last_error'] = selected['error']
+                if selected.get('stub') is False:
+                    result.update(mode='github', stub=False, automatic_installation=True)
+                    target = (selected.get('target_commit') or '')[:8]
+                    current = (selected.get('current_commit') or '')[:8]
+                    label = ('%s -> %s' % (current, target)) if current and target else (target or 'latest')
+                    status = selected.get('status')
+                    if status == 'completed':
+                        result['message'] = 'Bridge updated (%s).' % label
+                    elif status in ('accepted', 'downloading', 'installing', 'restarting', 'completing'):
+                        result['message'] = 'Updating bridge (%s)...' % label
+                    elif status == 'offered':
+                        result['message'] = 'Bridge update %s available; confirm on the controller to install.' % label
+                    elif status == 'failed':
+                        result['message'] = 'Bridge update (%s) failed.' % label
+                    else:
+                        result['message'] = 'Bridge update (%s): %s.' % (label, status or 'idle')
             return result
         except (OSError, ValueError, TypeError, AttributeError):
             return result

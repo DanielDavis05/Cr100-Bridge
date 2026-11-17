@@ -30,7 +30,8 @@ class Distribution(unittest.TestCase):
         self.assertTrue({'tools/smart_devices.py', 'tools/smart_device_service.py'} <= selected)
         self.assertIn('docs/features/SMART-DEVICES.md', selected)
         self.assertTrue({'tools/online_updates.py', 'tools/update_service.py',
-                         'tools/update_transport.py', 'docs/features/ONLINE-UPDATES.md'} <= selected)
+                         'tools/update_transport.py', 'tools/bridge_updater.py',
+                         'docs/features/ONLINE-UPDATES.md'} <= selected)
         self.assertIn('firmware/nexmon-ownership/apply.py', selected)
         self.assertIn('firmware/nexmon-ownership/status.py', selected)
         self.assertIn('firmware/nexmon-ownership/manifest.json', selected)

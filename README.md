@@ -103,13 +103,13 @@ gateway; the home network's DHCP/DNS configuration is untouched.
 
 ## GitHub and streamed installation
 
-The repository is currently local. Once hosted, clone it and use the same
-installer, or stream the script while supplying the repository URL:
+Clone the repository from GitHub and use the same installer, or stream the
+script while supplying the repository URL:
 
 ```sh
-# Replace OWNER/REPOSITORY and VERSION with the published repository and tag/commit.
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/VERSION/install.sh \
-  | sudo bash -s -- --repo https://github.com/OWNER/REPOSITORY.git --ref VERSION
+# Replace VERSION with a branch (default: main), tag, or commit.
+curl -fsSL https://raw.githubusercontent.com/DanielDavis05/Cr100-Bridge/main/install.sh \
+  | sudo bash -s -- --repo https://github.com/DanielDavis05/Cr100-Bridge.git --ref main
 ```
 
 `--ref` accepts a branch, tag, or commit (default `main`). Use the same release
