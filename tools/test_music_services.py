@@ -329,6 +329,23 @@ class PlaybackPolicies(unittest.TestCase):
         self.policy.before_action.assert_called_once_with(self.room, 'AVTransport', 'Next', args)
         self.policy.after_action.assert_not_called()
 
+    def test_policy_claims_next_on_the_last_queue_row_where_the_player_omits_it(self):
+        # Sonos drops Next from CurrentTransportActions on the final row; an
+        # armed Autoplay run must still receive it to start continuation.
+        self.room.next = Mock()
+        supports = self.room.supports
+        self.room.supports = lambda operation: operation != 'next' and supports(operation)
+        self.policy.claims_action.return_value = False
+        with self.assertRaisesRegex(zp.UPnPError, 'next is unavailable'):
+            self.den.state.action('AVTransport', 'Next', {'InstanceID': '0'})
+        self.policy.before_action.assert_not_called()
+        self.policy.claims_action.return_value = True
+        self.policy.before_action.return_value = {}
+        self.den.state.action('AVTransport', 'Next', {'InstanceID': '0'})
+        self.policy.claims_action.assert_called_with(self.room, 'AVTransport', 'Next', {'InstanceID': '0'})
+        self.policy.before_action.assert_called_once_with(self.room, 'AVTransport', 'Next', {'InstanceID': '0'})
+        self.room.next.assert_not_called()
+
     def test_unowned_successful_transport_is_notified_once_and_read_only_is_not(self):
         args = {'InstanceID': '0', 'Speed': '1'}
         self.den.state.action('AVTransport', 'Play', args)

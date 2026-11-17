@@ -440,6 +440,81 @@ class OwnershipAndCancellation(PolicyFixture):
         self.assertEqual(self.transport.commands, [])
         self.assertEqual([call[2] for call in self.connection.calls if call[0] == 'play_track'], [NEXT])
 
+    def queue_state(self, row, title, **changes):
+        state = speaker_state(title=title, source='x-rincon-queue:' + self.transport.uuid + '#0',
+                              uri=self.transport.rows[row - 1], index=row)
+        state.update(changes)
+        return state
+
+    def test_play_now_adopts_after_the_player_finishes_transitioning(self):
+        # A CR100 Play Now is Clear, Add, Seek TRACK_NR, Play; S1/S2 Spotify
+        # then reports TRANSITIONING for several seconds.
+        self.transport.rows = ['x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22]
+        self.transport.current = self.queue_state(1, 'Seed', state='TRANSITIONING')
+        self.policy.after_action(self.room, 'AVTransport', 'Play', {})
+        self.assertEqual(self.policy.runs, {})
+        self.policy._retry_adoptions()
+        self.assertEqual(self.policy.runs, {})
+        self.transport.current['state'] = 'PLAYING'
+        self.now += 3
+        self.policy._retry_adoptions()
+        run = next(iter(self.policy.runs.values()))
+        self.assertEqual((run.mode, run.seed), ('queue', SEED))
+        self.assertEqual(self.policy.pending, {})
+
+    def test_pending_adoption_expires_and_is_cancelled_by_stop(self):
+        self.transport.rows = ['x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22]
+        self.transport.current = self.queue_state(1, 'Seed', state='TRANSITIONING')
+        self.policy.after_action(self.room, 'AVTransport', 'Play', {})
+        self.now += 60
+        self.transport.current['state'] = 'PLAYING'
+        self.policy._retry_adoptions()
+        self.assertEqual((self.policy.runs, self.policy.pending), ({}, {}))
+        self.transport.current['state'] = 'TRANSITIONING'
+        self.policy.after_action(self.room, 'AVTransport', 'Play', {})
+        self.policy._register(Run(self.room, self.transport, 'queue', SEED, started=self.now))
+        self.policy.before_action(self.room, 'AVTransport', 'Stop', {})
+        self.assertEqual((self.policy.runs, self.policy.pending), ({}, {}))
+
+    def test_finished_multi_row_queue_rewinds_to_row_one_then_continues(self):
+        first = 'x-sonos-spotify:spotify%3atrack%3a' + 'C' * 22
+        last = 'x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22
+        self.transport.rows = [first, last]
+        self.transport.current = self.queue_state(2, 'Seed', position=97, duration=100)
+        run = Run(self.room, self.transport, 'queue', SEED, queue=list(self.transport.rows), started=self.now)
+        self.policy._register(run)
+        self.tick(run)
+        self.tick(run, position=99)
+        # Observed on S1 and S2: STOPPED, row 1, its own title and duration, 0:00.
+        rewound = self.queue_state(1, 'Another recommendation', state='STOPPED', position=0, duration=257)
+        self.transport.current = rewound
+        self.tick(run)
+        self.assertFalse(run.cancelled.is_set())
+        self.tick(run)
+        self.assertEqual(self.transport.commands, [])
+        self.assertEqual([call[2] for call in self.connection.calls if call[0] == 'play_track'], [NEXT])
+
+    def test_stop_mid_track_then_rewound_row_is_not_mistaken_for_queue_end(self):
+        first = 'x-sonos-spotify:spotify%3atrack%3a' + 'C' * 22
+        last = 'x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22
+        self.transport.rows = [first, last]
+        self.transport.current = self.queue_state(2, 'Seed', position=40, duration=100)
+        run = Run(self.room, self.transport, 'queue', SEED, queue=list(self.transport.rows), started=self.now)
+        self.policy._register(run)
+        self.tick(run)
+        self.transport.current = self.queue_state(1, 'Another recommendation', state='STOPPED', position=0)
+        self.tick(run)
+        self.assertTrue(run.cancelled.is_set())
+        self.assertNotIn('play_track', [call[0] for call in self.connection.calls])
+
+    def test_armed_run_claims_next_even_when_the_player_omits_it(self):
+        self.assertFalse(self.policy.claims_action(self.room, 'AVTransport', 'Next', {}))
+        run = self.start()
+        self.assertTrue(self.policy.claims_action(self.room, 'AVTransport', 'Next', {}))
+        self.assertFalse(self.policy.claims_action(self.room, 'AVTransport', 'Previous', {}))
+        run.cancelled.set()
+        self.assertFalse(self.policy.claims_action(self.room, 'AVTransport', 'Next', {}))
+
     def test_duplicate_queue_occurrence_resets_natural_end_progress(self):
         encoded = 'x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22
         self.transport.rows = [encoded, encoded]

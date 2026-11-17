@@ -622,6 +622,12 @@ def build_classes(zp):
                               'Previous': 'previous', 'AddURIToQueue': 'queue_add',
                               'RemoveTrackFromQueue': 'queue_remove', 'RemoveAllTracksFromQueue': 'queue_clear',
                               'BecomeCoordinatorOfStandaloneGroup': 'group'}
+                if action == 'Next' and not room.supports('next'):
+                    # A player omits Next on the last queue row; an armed
+                    # continuation policy (Spotify Autoplay) still handles it.
+                    policy_room = self.household.playback_room(self, service, action, args)
+                    if policy_room is not None and self.household.playback_claims(policy_room, service, action, args):
+                        return
                 if action in operations: room.require(operations[action]); return
                 if action == 'Seek':
                     room.require('queue_play' if args.get('Unit') == 'TRACK_NR' else 'seek'); return
@@ -916,6 +922,17 @@ class Household:
                 return None
         coordinator = self.by_udn.get(self.coordinator.get(player.config.udn, player.config.udn), player)
         return coordinator.state.backend
+
+    def playback_claims(self, room, service, action, args):
+        """Whether a policy will handle an action the room itself does not offer now."""
+        for policy in self.playback_policies:
+            claims = getattr(policy, 'claims_action', None)
+            try:
+                if callable(claims) and claims(room, service, action, args):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def before_playback_action(self, room, service, action, args):
         for policy in self.playback_policies:

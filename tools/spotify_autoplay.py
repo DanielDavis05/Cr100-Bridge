@@ -18,6 +18,8 @@ from sonos_upnp import soap, parse_didl
 PREFETCH_TRACKS = 5
 RECENT_TRACKS = 100
 MAX_SKIPPED_BATCHES = 8
+# Spotify on S1/S2 reports TRANSITIONING for several seconds after Play.
+ADOPT_WINDOW = 15
 
 
 def spotify_track(uri):
@@ -125,6 +127,7 @@ class Run:
     last_index: int = 0
     last_queue_length: int = 0
     last_position: int | None = None
+    last_duration: int | None = None   # the current row's, kept across the end-of-queue rewind
     loading: bool = False
     prefetch_failed: bool = False
     deadline: float | None = None
@@ -148,6 +151,7 @@ class SpotifyAutoplay:
         self.submit = submit or (lambda job: threading.Thread(target=job,
             name='spotify-related-metadata', daemon=True).start())
         self.runs = {}
+        self.pending = {}   # key -> (room, deadline): Play issued, not yet PLAYING
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.thread, self.connect = None, None
@@ -185,6 +189,7 @@ class SpotifyAutoplay:
         except BackendError:
             return
         with self.lock:
+            self.pending.pop(key, None)
             run = self.runs.pop(key, None)
             if run:
                 run.cancelled.set()
@@ -267,6 +272,16 @@ class SpotifyAutoplay:
                     run.transport.move_next(first, count, run.cursor + 1)
             self._queue_sync(run)
 
+    def claims_action(self, room, service, action, args):
+        """Next on an armed run is ours even when the player omits it (last queue row)."""
+        if service != 'AVTransport' or action != 'Next':
+            return False
+        try:
+            run = self.runs.get(self._key(room))
+        except BackendError:
+            return False
+        return run is not None and not run.cancelled.is_set() and (run.mode == 'native' or self.is_enabled())
+
     def before_action(self, room, service, action, args):
         if service != 'AVTransport':
             return None
@@ -343,22 +358,50 @@ class SpotifyAutoplay:
             interval = seconds(args.get('NewSleepTimerDuration', ''))
             run.deadline = self.clock() + interval if interval else None
         if self.is_enabled() and action in ('Play', 'Seek'):
-            self._adopt_queue(room)
+            self._adopt_queue(room, retry=True)
 
-    def _adopt_queue(self, room):
+    def _adopt_queue(self, room, retry=False):
+        """Arm continuation for a Spotify row already PLAYING from the Sonos queue.
+
+        The player usually reports TRANSITIONING right after Play, so with
+        retry the service loop keeps checking for ADOPT_WINDOW seconds.
+        """
         try:
             key = self._key(room)
+        except BackendError:
+            return False
+        with self.lock:
             if key in self.runs:
-                return
+                self.pending.pop(key, None)
+                return True
+        try:
             transport = self.transport_factory(room)
             snap = transport.snapshot()
             seed = spotify_track(snap['uri'])
-            if snap['state'] != 'PLAYING' or not snap['source'].startswith('x-rincon-queue:') or not seed:
-                return                           # never adopt external autonomous Connect
-            run = Run(room, transport, 'queue', seed, queue=transport.queue(), started=self.clock())
-            self._register(run)
+            # Never adopt external autonomous Connect.
+            if snap['state'] == 'PLAYING' and snap['source'].startswith('x-rincon-queue:') and seed:
+                run = Run(room, transport, 'queue', seed, queue=transport.queue(), started=self.clock())
+                with self.lock:
+                    self.pending.pop(key, None)
+                self._register(run)
+                return True
         except Exception:
-            return
+            pass
+        if retry:
+            with self.lock:
+                self.pending[key] = (room, self.clock() + ADOPT_WINDOW)
+        return False
+
+    def _retry_adoptions(self):
+        with self.lock:
+            pending = list(self.pending.items())
+        for key, (room, deadline) in pending:
+            if self.clock() >= deadline or not self.is_enabled():
+                with self.lock:
+                    if self.pending.get(key, (None,))[0] is room:
+                        del self.pending[key]
+                continue
+            self._adopt_queue(room)
 
     def _queue_sync(self, run):
         new = run.transport.queue()
@@ -373,6 +416,7 @@ class SpotifyAutoplay:
             return
         run.mode, run.identity, run.maximum, run.terminal = 'queue', None, 0, 0
         run.last_position, run.last_index, run.last_queue_length = None, 0, 0
+        run.last_duration = None
         run.transport.play_queue(run.cursor + 1)
         run.started = self.clock()
 
@@ -473,6 +517,7 @@ class SpotifyAutoplay:
         run.mode, run.expected, run.identity = 'native', name, None
         run.maximum, run.terminal, run.started = 0, 0, self.clock()
         run.last_position, run.last_index, run.last_queue_length = None, 0, 0
+        run.last_duration = None
         run.played.add(uri)
         run.recent.append(uri)
         run.recent = run.recent[-RECENT_TRACKS:]
@@ -535,16 +580,24 @@ class SpotifyAutoplay:
                     run.maximum = 0                # external seek/repeat must not look finished
                 run.last_position = snap['position']
             run.maximum = max(run.maximum, snap['position'] or 0)
+            run.last_duration = snap['duration']
             run.terminal = 0
             # Metadata only: the current finite track is untouched while this loads.
             self._prefetch(run)
             return
         if snap['state'] not in ('PAUSED_PLAYBACK', 'STOPPED', 'NO_MEDIA_PRESENT'):
             return
-        if snap['title'] and identity != run.identity:
+        # At the end of a queue, S1 and S2 players stop and rewind to row 1, so a
+        # finished multi-row queue reports the first row's title at 0:00.
+        rewound = (run.mode == 'queue' and snap['state'] == 'STOPPED' and identity != run.identity
+                   and snap['source'] == run.identity[0] and (snap['position'] or 0) <= 1
+                   and run.last_duration and run.maximum >= run.last_duration - 2)
+        if snap['title'] and identity != run.identity and not rewound:
             run.cancelled.set()                    # a different externally selected item
             return
         duration, position = snap['duration'], snap['position']
+        if rewound:
+            duration, position = run.last_duration, 0
         complete = duration and run.maximum >= duration - 2 and position is not None \
             and (position <= 1 or position >= duration)
         if not complete:
@@ -577,6 +630,10 @@ class SpotifyAutoplay:
                 except Exception:
                     pass
             previous_enabled = now_enabled
+            try:
+                self._retry_adoptions()
+            except Exception:
+                pass
             with self.lock:
                 runs = list(self.runs.items())
             for key, run in runs:

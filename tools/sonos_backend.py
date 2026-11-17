@@ -592,6 +592,10 @@ class SonosRoom(NativeSettingsRoom):
         if self.backend.line_in_sources(): operations.add('line_in')
         avt = self.avt
         actions = {value.strip().lower() for value in (avt.get('CurrentTransportActions') or '').split(',')}
+        # S1 and S2 players advertise time seeking as the DLNA extension
+        # (e.g. "Set, Stop, Pause, Play, X_DLNA_SeekTime, Next, X_DLNA_SeekTrackNr"),
+        # never as a plain "Seek".
+        if 'x_dlna_seektime' in actions: actions.add('seek')
         operations.update(actions & {'play', 'pause', 'stop'})
         # A paused/stopped source can still be resumed; these are supported
         # native actions even when a device omits them from an empty state.

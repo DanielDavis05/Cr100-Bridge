@@ -578,6 +578,19 @@ class ConnectState(unittest.TestCase):
             self.backend.read_position(self.speaker)
             self.assertEqual(len(notifications), 1)
 
+    def test_real_player_dlna_seek_action_enables_seek(self):
+        # Exact strings read from an S1 ZP80 and an S2 player on a Spotify queue.
+        for actions, expected in (
+                ('Set, Stop, Pause, Play, X_DLNA_SeekTime, Next, X_DLNA_SeekTrackNr', {'seek', 'next'}),
+                ('Set, Stop, Pause, Play, X_DLNA_SeekTime, Previous, X_DLNA_SeekTrackNr', {'seek', 'previous'}),
+                ('Set, Stop, Pause, Play, X_DLNA_SeekTime, Next, Previous, X_DLNA_SeekTrackNr',
+                 {'seek', 'next', 'previous'}),
+                ('Set, Stop, Play', set())):
+            with self.subTest(actions=actions):
+                self.speaker.avt['CurrentTransportActions'] = actions
+                self.assertEqual(self.room.capabilities(), frozenset(expected))
+                self.assertEqual('Seek' in self.room.transport_actions().split(','), 'seek' in expected)
+
     def test_partial_track_transitions_coalesce_a_prompt_metadata_read(self):
         for index in range(2, 20):
             self.event(CurrentTrack=index)
