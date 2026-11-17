@@ -507,6 +507,20 @@ class OwnershipAndCancellation(PolicyFixture):
         self.assertTrue(run.cancelled.is_set())
         self.assertNotIn('play_track', [call[0] for call in self.connection.calls])
 
+    def test_next_after_queue_tail_recommendation_advances_instead_of_replaying_the_tail(self):
+        first = 'x-sonos-spotify:spotify%3atrack%3a' + 'C' * 22
+        last = 'x-sonos-spotify:spotify%3atrack%3a' + 'A' * 22
+        self.transport.rows = [first, last]
+        self.transport.current = self.queue_state(2, 'Seed', position=10)
+        run = Run(self.room, self.transport, 'queue', SEED, queue=list(self.transport.rows), started=self.now)
+        self.policy._register(run)
+        self.tick(run)
+        self.assertEqual(self.policy.before_action(self.room, 'AVTransport', 'Next', {}), {})
+        self.tick(run, position=5)
+        self.assertEqual(self.policy.before_action(self.room, 'AVTransport', 'Next', {}), {})
+        self.assertEqual(self.transport.commands, [])
+        self.assertEqual([call[2] for call in self.connection.calls if call[0] == 'play_track'], [NEXT, LATER])
+
     def test_armed_run_claims_next_even_when_the_player_omits_it(self):
         self.assertFalse(self.policy.claims_action(self.room, 'AVTransport', 'Next', {}))
         run = self.start()

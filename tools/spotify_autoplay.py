@@ -514,6 +514,9 @@ class SpotifyAutoplay:
             return True
         run.candidates.remove(uri)
         connection.play_track(run.transport.base, uri)
+        # Every existing row is now history; a later Next must not replay the
+        # final queue row that Next-on-last-row just left.
+        run.cursor = max(run.cursor, pending_cursor)
         run.mode, run.expected, run.identity = 'native', name, None
         run.maximum, run.terminal, run.started = 0, 0, self.clock()
         run.last_position, run.last_index, run.last_queue_length = None, 0, 0
