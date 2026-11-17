@@ -1,7 +1,7 @@
 """Where optional development inputs outside this repository live.
 
 The installed bridge never needs these. They are only used by lab tools
-(`radio_emulator_lab.py`, `cr100_flash.make_bundle`) and by the optional
+(`radio_emulator_lab.py`, `lab_peer_vm.py`, `cr100_flash.make_bundle`) and by the optional
 private-capture regression in `test_link.py`, which skips when they are absent.
 
 Defaults follow the author's workspace layout:
