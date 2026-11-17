@@ -1,3 +1,11 @@
+# Slop Notice
+
+This is a long-running project of mine, but this version of the codebase was largely created using AI coding tools.
+
+The original version required a ZP80 running outdated, exploitable firmware. This version runs on a Raspberry Pi 3B+ or 4 and includes a web UI for configuration.
+
+I plan to go through the codebase and clean it up and add proper documentation, starting with this README. Until that work is complete, please refrain from using this version.
+
 # CR100 Bridge
 
 Use a Sonos CR100 controller with modern Sonos speakers, directly or through Home
