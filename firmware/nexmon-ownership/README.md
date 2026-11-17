@@ -93,7 +93,9 @@ by the released manifest.
 ## Installation and loaded-firmware checks
 
 The main installer applies `manifest.json` after Kali's Nexmon packages and before
-activating the bridge release. `apply.py` accepts the exact canonical image, either
+activating the bridge release. The Raspberry Pi 3 Model B+ and 4 Model B share this
+chip and Kali's single packaged image; `apply.py` patches the image the driver loads
+for the running board unless `--firmware` names another. `apply.py` accepts the exact canonical image, either
 explicit previous-image upgrade route, or an already-patched target. It validates
 all byte preconditions and the common complete target hash before atomic
 replacement. Firmware board-name/alternatives symlinks remain intact. Backups and

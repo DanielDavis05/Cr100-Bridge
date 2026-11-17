@@ -25,7 +25,7 @@ by default and remains an explicit compatibility option for stock firmware.
 
 ## Supported installation
 
-- **Raspberry Pi 4 Model B, 64-bit Kali Linux, systemd, Python 3.11 or newer.**
+- **Raspberry Pi 4 Model B or 3 Model B+, 64-bit Kali Linux, systemd, Python 3.11 or newer.**
 - Ethernet or a separate network adapter for the home network and internet.
   The built-in `wlan0` is dedicated to the CR100; ordinary Wi-Fi on that radio
   cannot be the installation/SSH connection or upstream connection.
@@ -37,6 +37,11 @@ by default and remains an explicit compatibility option for stock firmware.
 Raspberry Pi OS, 32-bit Kali, and other Pi models are not supported by this installer.
 The recorded working radio setup is Pi 4/Kali 2026.3, kernel
 `6.12.34+rpt-rpi-v8`, `brcmfmac-nexmon-dkms 6.12.2`, and Nexmon firmware 7.45.206.
+The Pi 3 Model B+ has the same BCM43455c0 radio and, on that Kali release, the same
+kernel, driver and byte-identical firmware image, so it takes the same patch. Its
+slower CPU and 1 GB of memory have not yet been through a controller soak.
+Supported boards and the radio each uses are listed in
+[`tools/radio_platform.py`](tools/radio_platform.py), which the installer reads.
 Fresh installation on physical hardware still needs acceptance testing; offline
 tests cannot validate a board's driver, packet injection, or CR100 pairing.
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pi 4 / Kali installer. Also works via: curl <raw-install-url> | sudo bash -s -- --repo <https-url> --ref <tag-or-sha>
+# Raspberry Pi / Kali installer. Also works via: curl <raw-install-url> | sudo bash -s -- --repo <https-url> --ref <tag-or-sha>
 set -Eeuo pipefail
 umask 077
 
@@ -9,8 +9,8 @@ Usage: sudo ./install.sh [--source DIR] [--no-start]
        curl <raw-install-url> | sudo bash -s -- --repo <https-url> [--ref <tag-or-sha>]
        ./install.sh --check
 
-Supports Raspberry Pi 4 Model B, 64-bit Kali, systemd, and an upstream connection
-that does not use wlan0. Onboard wlan0 is reserved for the CR100.
+Supports Raspberry Pi 4 Model B and 3 Model B+, 64-bit Kali, systemd, and an upstream
+connection that does not use wlan0. Onboard wlan0 is reserved for the CR100.
 --check       Read-only platform/network preflight; no installation.
 --no-start    Install and enable services without starting them now.
 --source DIR  Install a local source tree (default: directory containing this file).
@@ -33,13 +33,18 @@ while (($#)); do
   esac
 done
 [[ -z "$SOURCE" || -z "$REPO" ]] || die 'Choose --source or --repo.'
-[[ $(uname -s) == Linux ]] || die 'Only Linux on Raspberry Pi 4 is supported.'
+[[ $(uname -s) == Linux ]] || die 'Only Kali Linux on a supported Raspberry Pi is supported.'
 # shellcheck source=/dev/null
 . /etc/os-release
 [[ ${ID:-} == kali ]] || die 'Only Kali is supported. Raspberry Pi OS support is planned separately.'
 [[ $(uname -m) == aarch64 ]] || die 'Use a 64-bit Kali image (aarch64).'
+# Early gate for the streamed installer, which runs before any source exists.
+# tools/radio_platform.py is the registry; test_install.py keeps this list equal to it.
+SUPPORTED_BOARDS='raspberrypi,4-model-b raspberrypi,3-model-b-plus'
+[[ -r /proc/device-tree/compatible ]] || die 'This machine has no device tree; a supported Raspberry Pi is required.'
 MODEL=$(tr -d '\0' < /proc/device-tree/model)
-[[ "$MODEL" == 'Raspberry Pi 4 Model B'* ]] || die "Unsupported board: $MODEL"
+BOARD=$(tr '\0' '\n' < /proc/device-tree/compatible | head -n 1)
+[[ " $SUPPORTED_BOARDS " == *" $BOARD "* ]] || die "Unsupported board: $MODEL ($BOARD)"
 [[ -d /run/systemd/system ]] || die 'Boot Kali with systemd before installing.'
 command -v ip >/dev/null || die 'Install iproute2 before running preflight.'
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die 'Python 3.11 or newer is required.'
@@ -92,16 +97,6 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates git python3 python3-venv python3-pip iproute2 iw \
   dnsmasq-base libpcap0.8t64 ethtool rfkill kmod dkms build-essential ffmpeg tzdata
-# Do not change kernels automatically. DKMS needs headers for the kernel actually booted.
-if [[ ! -e /lib/modules/$(uname -r)/build/Makefile ]]; then
-  apt-cache show "linux-headers-$(uname -r)" >/dev/null 2>&1 || \
-    die "No headers for $(uname -r). Update Kali's kernel/headers, reboot, then rerun the installer."
-  apt-get install -y "linux-headers-$(uname -r)"
-fi
-apt-get install -y brcmfmac-nexmon-dkms firmware-nexmon
-dkms status | awk -v kernel="$(uname -r)" '/brcmfmac/ && index($0, kernel ",") && /: installed/ {found=1} END {exit !found}' || \
-  die 'The Nexmon DKMS driver is not installed for the running kernel. Check dkms status.'
-
 if [[ -n "$REPO" ]]; then
   git init -q "$TEMP/source"
   git -C "$TEMP/source" remote add origin "$REPO"
@@ -110,6 +105,26 @@ if [[ -n "$REPO" ]]; then
   SOURCE=$TEMP/source
 fi
 [[ -f "$SOURCE/tools/distribution.py" ]] || die 'The source is not a complete CR100 bridge checkout.'
+
+# The source's registry says what this board's radio needs: packages, DKMS module, firmware patch.
+radio_field() { python3 "$SOURCE/tools/radio_platform.py" --board "$BOARD" --field "$1"; }
+RADIO=$(radio_field radio) || die "This release does not support $MODEL ($BOARD)."
+read -ra RADIO_PACKAGES <<< "$(radio_field packages)"
+RADIO_DKMS=$(radio_field dkms_module)
+RADIO_PATCH=$(radio_field firmware_patch)
+echo "Radio: $(radio_field description) [$RADIO]"
+# Do not change kernels automatically. DKMS needs headers for the kernel actually booted.
+if [[ -n "$RADIO_DKMS" && ! -e /lib/modules/$(uname -r)/build/Makefile ]]; then
+  apt-cache show "linux-headers-$(uname -r)" >/dev/null 2>&1 || \
+    die "No headers for $(uname -r). Update Kali's kernel/headers, reboot, then rerun the installer."
+  apt-get install -y "linux-headers-$(uname -r)"
+fi
+((${#RADIO_PACKAGES[@]} == 0)) || apt-get install -y "${RADIO_PACKAGES[@]}"
+if [[ -n "$RADIO_DKMS" ]]; then
+  dkms status | awk -v kernel="$(uname -r)" -v module="$RADIO_DKMS/" \
+    'index($0, module) == 1 && index($0, kernel ",") && /: installed/ {found=1} END {exit !found}' || \
+    die "The $RADIO_DKMS DKMS driver is not installed for the running kernel. Check dkms status."
+fi
 check_uplink
 
 install -d -m 755 /opt/cr100-bridge /opt/cr100-bridge/releases
@@ -132,7 +147,7 @@ if [[ "$PAIR_STATE" == active || "$PAIR_STATE" == activating || "$PAIR_STATE" ==
 fi
 # Patch only the exact supported package image, retaining its alternatives links
 # and a private original backup. Running firmware is verified by the radio service.
-"$RELEASE/.venv/bin/python" "$RELEASE/firmware/nexmon-ownership/apply.py" --apply
+[[ -z "$RADIO_PATCH" ]] || "$RELEASE/.venv/bin/python" "$RELEASE/$RADIO_PATCH" --apply
 systemctl stop cr100-bridge.service cr100-webui.service cr100-radio.service 2>/dev/null || true
 OLD_RELEASE=$(readlink -e /opt/cr100-bridge/current 2>/dev/null || true)   # -e: empty on a first install
 ln -s "$RELEASE" /opt/cr100-bridge/.current-new

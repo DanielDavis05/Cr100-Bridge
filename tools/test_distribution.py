@@ -25,6 +25,7 @@ class Distribution(unittest.TestCase):
         self.assertIn('tools/spotify_autoplay.py', selected)
         self.assertIn('tools/nexmon_power.py', selected)
         self.assertIn('tools/nexmon_clock.py', selected)
+        self.assertIn('tools/radio_platform.py', selected)
         self.assertIn('tools/ha_hub.py', selected)
         self.assertTrue({'tools/smart_devices.py', 'tools/smart_device_service.py'} <= selected)
         self.assertIn('docs/features/SMART-DEVICES.md', selected)

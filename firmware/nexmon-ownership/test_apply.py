@@ -45,6 +45,23 @@ class FirmwarePatch(unittest.TestCase):
         self.save_manifest()
         return upgrade
 
+    def test_default_firmware_follows_the_running_board(self):
+        compatible = self.root / 'compatible'
+        for board in ('raspberrypi,4-model-b', 'raspberrypi,3-model-b-plus'):
+            link = self.root / ('brcmfmac43455-sdio.%s.bin' % board)
+            link.symlink_to(self.target)
+            compatible.write_bytes(board.encode() + b'\0brcm,bcm2837\0')
+            self.assertEqual(apply.default_firmware(compatible, self.root), link)
+            self.assertEqual(self.run_patch(apply.default_firmware(compatible, self.root))['resolved_path'],
+                             str(self.target))
+
+    def test_default_firmware_refuses_unidentified_or_unpackaged_boards(self):
+        compatible = self.root / 'compatible'
+        for content in (b'', b'vendor,unpackaged-board\0', b'../escape\0', b'\xff\0'):
+            compatible.write_bytes(content)
+            with self.assertRaises(ValueError): apply.default_firmware(compatible, self.root)
+        with self.assertRaises(ValueError): apply.default_firmware(self.root / 'missing', self.root)
+
     def test_check_is_read_only_and_apply_is_idempotent(self):
         before = self.target.stat()
         self.assertEqual(self.run_patch()['state'], 'patch_available')

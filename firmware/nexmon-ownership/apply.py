@@ -22,12 +22,29 @@ import tempfile
 import uuid
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_FIRMWARE = Path('/lib/firmware/brcm/brcmfmac43455-sdio.raspberrypi,4-model-b.bin')
+FIRMWARE_DIR = Path('/lib/firmware/brcm')
+COMPATIBLE = Path('/proc/device-tree/compatible')
 DEFAULT_BACKUPS = Path('/var/lib/cr100-bridge/firmware-backups')
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 
 
 def digest(data): return hashlib.sha256(data).hexdigest()
+
+
+def default_firmware(compatible=COMPATIBLE, directory=FIRMWARE_DIR):
+    """The image the driver loads on this board: it tries the board-specific name first.
+
+    Every supported board's name links to the one packaged image, and the manifest's
+    hashes still reject any image that is not the reviewed one.
+    """
+    try: board = Path(compatible).read_bytes().split(b'\0')[0].decode('ascii')
+    except (OSError, UnicodeDecodeError): board = ''
+    if not board or '/' in board:
+        raise ValueError('Cannot identify this board; pass --firmware explicitly.')
+    path = Path(directory) / ('brcmfmac43455-sdio.%s.bin' % board)
+    if not path.exists():
+        raise ValueError('No BCM43455 firmware for board %s at %s.' % (board, path))
+    return path
 
 
 def _unique_object(pairs):
@@ -223,12 +240,12 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--check', action='store_true', help='read-only hash and byte-precondition verification')
     action.add_argument('--apply', action='store_true', help='back up and atomically patch a recognized image')
-    parser.add_argument('--firmware', type=Path, default=DEFAULT_FIRMWARE)
+    parser.add_argument('--firmware', type=Path, help='default: the image the driver loads on this board')
     parser.add_argument('--manifest', type=Path, default=HERE / 'manifest.json')
     parser.add_argument('--backup-dir', type=Path, default=DEFAULT_BACKUPS)
     args = parser.parse_args()
     try:
-        result = patch_file(args.firmware, args.manifest, args.backup_dir, args.apply)
+        result = patch_file(args.firmware or default_firmware(), args.manifest, args.backup_dir, args.apply)
     except (OSError, ValueError) as error:
         print(json.dumps({'ok': False, 'error': str(error)}, indent=2), file=sys.stderr)
         return 1
