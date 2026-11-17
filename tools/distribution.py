@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNTIME = '''bridge_service.py controller_state.py controller_visibility.py sonosnet_link.py nexmon_power.py nexmon_clock.py frames.py ccmp.py ccmp_pn.py zoneplayers.py
 backends.py bridge_config.py provider_playback.py room_capabilities.py sonos_settings.py content.py ha_backend.py ha_client.py ha_hub.py ha_content.py ha_linein.py smart_devices.py smart_device_service.py room_icons.py music_service_events.py
 smapi_service.py smapi_stub.py speaker_settings.py music_services.py music_service_registry.py sonos_queue_art.py spotify_auth.py spotify_client.py spotify_playback.py
-spotify_service.py spotify_ui_actions.py spotify_menu.py spotify_folders.py spotify_controllers.py spotify_connect.py spotify_autoplay.py webui.py netstart_pair.py synthetic_public_key.bin fake_ha.py
+spotify_service.py spotify_ui_actions.py spotify_menu.py spotify_folders.py spotify_controllers.py spotify_connect.py spotify_autoplay.py webui.py netstart_pair.py link_pairing.py synthetic_public_key.bin fake_ha.py
 sonos_backend.py sonos_content.py sonos_upnp.py sonos_identity.py fake_sonos.py build_info.py
 radio_store.py radiotime.py radio_catalog.py native_radio.py radio_playback.py radio_management.py radio_runtime.py radio_transcode.py alarms.py alarm_runtime.py alarm_timezones.py patch_native_radio_ui.py patch_controller_settings_ui.py
 online_updates.py update_transport.py update_service.py bridge_updater.py ui_events.py workspace.py radio_platform.py

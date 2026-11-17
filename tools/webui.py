@@ -653,6 +653,38 @@ class Bridge:
                        capture_output=True, text=True, timeout=5, check=True)
         return {'message': 'Pairing started. Put the CR100 in its add-to-household setup mode.'}
 
+    def set_channel(self, payload):
+        """Move the household to channel 1, 6 or 11 and restart the radio link.
+
+        Paired CR100s keep the household and key; one that loses the bridge scans
+        channels 1, 6 and 11 and the link answers it on the new one. Channel 1 is the
+        CR100 setup channel, so pairing there needs no channel visits.
+        """
+        if not self.managed: raise ApiError(400, 'Changing the channel requires the installed bridge services.')
+        channel = (payload or {}).get('channel') if isinstance(payload, dict) else None
+        freq = {value: key for key, value in FREQ_CHANNEL.items()}.get(channel) if type(channel) is int else None
+        if freq is None: raise ApiError(400, 'Choose channel 1, 6 or 11.')
+        if self.pairing_status().get('running'):
+            raise ApiError(409, 'Wait for pairing to finish before changing the channel.')
+        with self.config_lock, self._pair_lock('Wait for pairing to finish before changing the channel.'):
+            state = self.state()
+            try:
+                controllers = controller_records(state)
+            except (ValueError, TypeError):
+                controllers = []
+            if not controllers or state.get('freq') not in FREQ_CHANNEL:
+                raise ApiError(400, 'Pair a controller before changing the channel.')
+            if state['freq'] == freq:
+                return {'channel': channel, 'changed': False, 'message': 'The bridge is already on channel %d.' % channel}
+            previous = FREQ_CHANNEL[state['freq']]
+            write_json(self.state_path, {**state, 'freq': freq}, mode=0o600)
+        subprocess.run(['systemctl', '--no-block', 'restart', 'cr100-bridge.service'],
+                       capture_output=True, text=True, timeout=5, check=True)
+        self.log({'event': 'channel-changed', 'from': previous, 'to': channel})
+        return {'channel': channel, 'changed': True,
+                'message': 'Moving the bridge to channel %d. Awake controllers find it within about a minute; '
+                           'a sleeping one finds it when you wake it.' % channel}
+
     def local_bssid(self, existing_state=None, imported_data=None):
         """Return this Pi's wlan0 MAC for hardware ACKs, falling back to saved/imported BSSID."""
         from bridge_service import radio_mac
@@ -683,7 +715,7 @@ class Bridge:
         return household, key_bytes.hex(), freq
 
     @contextlib.contextmanager
-    def _pair_lock(self):
+    def _pair_lock(self, busy='Wait for pairing to finish before importing.'):
         if not self.run_dir:
             yield
             return
@@ -693,7 +725,7 @@ class Bridge:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise ApiError(409, 'Wait for pairing to finish before importing.') from None
+                raise ApiError(409, busy) from None
             yield
 
     def export_pairing(self):
@@ -1458,6 +1490,7 @@ def make_handler(bridge, auth, log):
     route('PUT', '/api/speakers')(lambda h, b, m: bridge.save_speakers(b))
     route('GET', '/api/controllers')(lambda h, b, m: bridge.controllers())
     route('POST', '/api/controllers/pair')(lambda h, b, m: bridge.pair_controller())
+    route('PUT', '/api/controllers/channel')(lambda h, b, m: bridge.set_channel(b))
     route('POST', '/api/controllers/pairing/export')(lambda h, b, m: bridge.export_pairing())
     route('POST', '/api/controllers/pairing/import')(lambda h, b, m: bridge.import_pairing(b))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})')(lambda h, b, m: bridge.rename_controller(m.group(1), b.get('name')))

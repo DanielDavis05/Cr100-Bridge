@@ -537,10 +537,16 @@ views.controllers = {
       const pairing = data.pairing || {};
       const pairState = pairing.running ? ['wait', 'Waiting for a CR100. Put it in add-to-household setup mode within 3 minutes.']
         : pairing.failed ? ['alert', 'Pairing failed. Check the Pi’s service logs, then try again.']
-        : ['idle', 'Adds a CR100 to this household. Paired controllers keep their settings; the bridge pauses while pairing.'];
+        : ['idle', data.channel === 1 || !data.controllers.length
+          ? 'Adds a CR100 to this household. Paired controllers keep their settings and stay connected.'
+          : `Adds a CR100 to this household. Paired controllers stay connected; while pairing, the bridge also listens on channel 1, so they respond a little more slowly.`];
+      const channelChoices = [1, 6, 11].map((value) => `<option value="${value}" ${data.channel === value ? 'selected' : ''}>Channel ${value}${value === 1 ? ' (pairing channel)' : ''}</option>`).join('');
       main.append(el(`<h2 class="group-title">Pairing</h2>`), el(`<section class="popup pairing">
         <dl class="meta-grid"><div><dt>Household</dt><dd>${escapeHtml(data.household || 'Not paired')}</dd></div>
           <div><dt>Radio channel</dt><dd>${escapeHtml(data.channel ?? 'Unknown')}</dd></div></dl>
+        ${data.controllers.length ? `<div class="pair-row"><p class="hint">Channel 1 is where a CR100 pairs, so pairing on it needs no channel switching. Pick another channel if channel 1 is crowded.</p>
+          <div class="radio-actions"><select id="radio-channel" aria-label="Radio channel" ${!pairing.available || pairing.running ? 'disabled' : ''}>${channelChoices}</select>
+            <button type="button" class="inline-button quiet" id="radio-channel-save" disabled>Change channel</button></div></div>` : ''}
         <div class="pair-row"><span class="dot ${pairState[0]}"></span><p>${pairState[1]}</p>
           <button type="button" class="inline-button" id="pair-controller" ${!pairing.available || pairing.running ? 'disabled' : ''}>${pairing.running ? 'Pairing…' : data.controllers.length ? 'Add controller' : 'Pair controller'}</button></div>
         <div class="pair-row pair-transfer"><p class="hint">Use the same pairing on another bridge in a different location.</p>
@@ -556,6 +562,20 @@ views.controllers = {
           toast('Pairing started', 'Put the CR100 in its add-to-household setup mode.');
         } catch (error) {
           toast('Pairing could not start', error.message, true);
+        }
+        await refresh();
+      });
+      const channelSelect = $('#radio-channel', main), channelSave = $('#radio-channel-save', main);
+      channelSelect?.addEventListener('change', () => { channelSave.disabled = Number(channelSelect.value) === data.channel; });
+      channelSave?.addEventListener('click', async () => {
+        const channel = Number(channelSelect.value);
+        if (!confirm(`Move the bridge to channel ${channel}? The radio restarts, and each controller reconnects on the new channel. A sleeping controller reconnects when you wake it.`)) return;
+        channelSave.disabled = true;
+        try {
+          const result = await api('PUT', '/api/controllers/channel', { channel });
+          toast(result.changed ? 'Channel changed' : 'Channel unchanged', result.message);
+        } catch (error) {
+          toast('Channel not changed', error.message, true);
         }
         await refresh();
       });
@@ -909,7 +929,7 @@ views.controllers = {
       if (current !== 'controllers') return;
       for (const controller of data.controllers) controller.update = data.updates
         ? data.updates.controllers?.[controller.mac] || { status: 'none' } : undefined;
-      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
+      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
         for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware);
         updateBridgeStatus(data);
         updateDevicesStatus(data);

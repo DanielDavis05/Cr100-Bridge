@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import secrets
 import signal
 import subprocess
 import sys
@@ -200,7 +201,8 @@ def supervise(state_path, config_path, run_dir, stop=None):
 
         link = launch([sys.executable, '-u', str(HERE / 'sonosnet_link.py'), '--state', str(state_path),
                        '--config', str(config_path),
-                       '--tap', 'sonos0', '--addr', '192.168.69.1/24', '--log', str(run_dir / 'link.jsonl')])
+                       '--tap', 'sonos0', '--addr', '192.168.69.1/24', '--log', str(run_dir / 'link.jsonl'),
+                       '--run-dir', str(run_dir)])
         deadline = time.monotonic() + 15
         while not stop.is_set():
             if link.poll() is not None: raise RuntimeError('Radio link exited before sonos0 was ready')
@@ -265,23 +267,84 @@ def supervise(state_path, config_path, run_dir, stop=None):
             pid_path.unlink(missing_ok=True)
 
 
+PAIR_ACK_TIMEOUT = 20.0   # s for a running link to take the request (it may still be starting)
+PAIR_POLL = 0.25
+
+
+def bridge_active():
+    result = subprocess.run(['systemctl', 'is-active', 'cr100-bridge.service'], capture_output=True,
+                            text=True, timeout=STARTUP_COMMAND_TIMEOUT, check=False)
+    return result.stdout.strip() == 'active'
+
+
+def pair_in_link(run_dir, seconds=None, clock=time.monotonic, wall=time.time, sleep=time.sleep):
+    """Ask the running link to pair (link_pairing). Return False if it never answered.
+
+    Paired controllers stay connected; on channel 6 or 11 the link visits channel 1
+    between beacons while the window is open.
+    """
+    import link_pairing
+    seconds = link_pairing.PAIR_SECONDS if seconds is None else seconds
+    request_path, status_path = run_dir / link_pairing.PAIR_REQUEST, run_dir / link_pairing.PAIR_STATUS
+    request = {'id': secrets.token_hex(8), 'until': wall() + seconds}
+    link_pairing.write_json_atomic(request_path, request)
+    try:
+        def status():
+            try: value = json.loads(status_path.read_text())
+            except (OSError, ValueError): return None
+            return value if isinstance(value, dict) and value.get('id') == request['id'] else None
+
+        started = clock()
+        current = status()
+        reported = set()
+        while current is None:
+            if clock() - started >= PAIR_ACK_TIMEOUT: return False
+            sleep(PAIR_POLL)
+            current = status()
+        hop = ' The bridge visits channel 1 between beacons while it waits.' if current.get('hopping') else ''
+        print('Waiting for a CR100 in add-to-household setup mode. Paired controllers stay connected.' + hop,
+              flush=True)
+        while True:
+            for mac in current.get('controllers') or []:
+                if mac not in reported:
+                    reported.add(mac)
+                    print('Paired ' + mac + '.', flush=True)
+            state = current.get('state')
+            if state == 'done': return True
+            if state == 'expired': raise RuntimeError('No CR100 responded within three minutes. Try pairing again.')
+            if state == 'failed': raise RuntimeError('Pairing failed: %s' % (current.get('error') or 'unknown error'))
+            if wall() > request['until'] + 30: raise RuntimeError('The bridge stopped reporting pairing progress.')
+            sleep(PAIR_POLL)
+            current = status() or current
+    finally:
+        request_path.unlink(missing_ok=True)
+
+
 def pair(state_path, run_dir):
     """Add to the current household; preserve its keys and controllers on failure."""
+    import link_pairing
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / 'pair.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = validate_state(state_path) if state_path.exists() else None
+        if previous and bridge_active():
+            if pair_in_link(run_dir):
+                print('Paired. The bridge kept running.', flush=True)
+                return
+            print('The running bridge did not take the pairing request; pausing it to pair.', flush=True)
+        # First pairing, or no running link: pair on the setup channel with the bridge stopped.
         subprocess.run(['systemctl', 'stop', 'cr100-bridge.service'], check=True)
         fd, temporary = tempfile.mkstemp(prefix='.pair-', suffix='.json', dir=state_path.parent)
         os.close(fd)
         temporary = Path(temporary)
         temporary.unlink()
         try:
-            prepare_radio(1)
+            prepare_radio(link_pairing.SETUP_CHANNEL)
             mac = previous['bssid'] if previous else radio_mac()
+            # A new household uses the setup channel, so later pairings need no channel visits.
             command = [sys.executable, '-u', str(HERE / 'netstart_pair.py'),
                        '--iface', 'mon0', '--mac', mac,
-                       '--freq', str(previous['freq'] if previous else 2437),
+                       '--freq', str(previous['freq'] if previous else link_pairing.SETUP_FREQ),
                        '--seconds', '180', '--state', str(temporary)]
             if previous:
                 command += ['--previous-state', str(state_path)]

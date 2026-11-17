@@ -38,7 +38,7 @@ class Pairing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '--mac'):
             pair.initial_state(self.args())
         initial = pair.initial_state(self.args(mac=STATE['bssid']))
-        self.assertEqual(initial['freq'], 2437)
+        self.assertEqual(initial['freq'], 2412)
         self.assertEqual(len(bytes.fromhex(initial['network_key'])), 16)
         self.assertTrue(initial['household'].startswith('Sonos_'))
         self.assertFalse(self.path.exists())

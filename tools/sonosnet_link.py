@@ -44,6 +44,8 @@ from cryptography.exceptions import InvalidTag
 import ccmp
 from ccmp_pn import PacketNumbers
 import frames
+import link_pairing
+import netstart_pair as netstart
 from controller_state import controller_records, normalize_mac
 from nexmon_clock import ClockUnavailable, HardwareClock
 
@@ -222,7 +224,8 @@ class Station:
 
 class Link:
     def __init__(self, state, radio, tap_fd, log, reopen=None, tsf_lead_us=TSF_LEAD_US,
-                 pn_allocator=None, config_path=None, hardware_clock=None):
+                 pn_allocator=None, config_path=None, hardware_clock=None, run_dir=None, state_path=None,
+                 iface='mon0', set_channel=None):
         self.tsf_lead_us = tsf_lead_us
         # Production main supplies the radio clock. The process-relative clock
         # remains available only to isolated frame/test harnesses.
@@ -243,7 +246,25 @@ class Link:
         if not self.stations: raise ValueError('No paired controllers')
         self.household = state['household'].encode()
         self.key = bytes.fromhex(state['network_key'])
+        self.freq = state['freq']
         self.channel = {2412: 1, 2437: 6, 2462: 11}[state['freq']]
+        # The channel the radio is tuned to; it differs from self.channel only while a
+        # pairing window visits the setup channel (link_pairing). None: unknown.
+        self.tuned = self.channel
+        self.run_dir = Path(run_dir) if run_dir is not None else None
+        self.state_path = Path(state_path) if state_path is not None else None
+        self.set_channel = set_channel or (lambda channel: subprocess.run(
+            ['iw', 'dev', iface, 'set', 'channel', str(channel)], check=True, capture_output=True,
+            timeout=RADIO_COMMAND_TIMEOUT))
+        self.pairing = None
+        self.pair_check_at = 0.0
+        self.pair_finished = None
+        self.pair_reported = None
+        self.away_until = None
+        self.tune_cost = 0.0     # s, a decaying maximum of recent channel changes
+        self.last_beacon_at = None
+        self.next_alive = 0.0
+        self.state_lock = threading.Lock()
         self.radio, self.tap_fd, self.log, self.reopen = radio, tap_fd, log, reopen
         self.radio_down = False
         self.lock = threading.RLock()
@@ -354,18 +375,23 @@ class Link:
         self.seq = (self.seq + 1) & 0xfff
         return self.seq
 
-    def send(self, frame, block=True):
+    def send(self, frame, block=True, channel=None):
         """Return SENT, BUSY (transmit queue full: try again later) or FAILED.
 
         Every socket send is nonblocking: management traffic must also leave the
         main loop free to log stats and reopen a failed radio. ``block`` permits
         only the bounded pacing wait, never a wait for transmit-buffer space.
+        A frame for another channel than the tuned one (by default the home
+        channel) is BUSY: it waits while a pairing window visits channel 1.
         """
         if self.radio_down:
             self.stats['tx_radio_down'] += 1
             return FAILED
         try:
             with self.tx_lock:
+                if self.tuned != (self.channel if channel is None else channel):
+                    self.stats['tx_off_channel'] += 1
+                    return BUSY
                 now = time.monotonic()
                 if len(self.tx_times) == PACE_FRAMES and now - self.tx_times[0] < PACE_WINDOW:
                     if not block:
@@ -443,6 +469,9 @@ class Link:
         self.log({'mac': frames.mac_text(station.mac), **record})
 
     def send_data(self, station, inner, more_data):
+        if self.tuned != self.channel:   # away for pairing: keep the frame, and its nonce unspent
+            self.stats['tx_off_channel'] += 1
+            return BUSY
         next_pn = self.tx_pn + 1
         if next_pn >= 1 << 48: raise OverflowError('CCMP packet number exhausted; re-pair with a new key')
         if self.pn_allocator: self.pn_allocator.ensure(next_pn)
@@ -520,6 +549,13 @@ class Link:
     def on_frame(self, raw):
         if len(raw) < 16: return
         if raw[0] & 3: return  # only 802.11 protocol version 0 is defined here
+        if raw[0] == 0x40 and len(raw) >= 24 and raw[10:16] != self.bssid:
+            # A Netstart probe request (pairing) is never a station's discovery probe.
+            payload = netstart.parse_body(raw[24:])
+            if payload is not None:
+                session = self.pairing
+                if session is not None: session.receive(frames.mac_text(raw[10:16]), payload)
+                return
         station = self.stations.get(raw[10:16])
         if station is None: return
         now = time.monotonic()
@@ -802,6 +838,134 @@ class Link:
                 result = self.send_mgmt(5, station.mac, body, block=False)
                 if result == SENT: station.next_probe = now + SEARCH_PROBE_INTERVAL
 
+    # --- pairing (link_pairing) ------------------------------------------------
+    def tune(self, channel):
+        """Retune the radio; hold the transmit lock so no frame leaves mid-change."""
+        with self.tx_lock:
+            if self.tuned == channel: return True
+            started = time.monotonic()
+            try:
+                self.set_channel(channel)
+            except (OSError, subprocess.SubprocessError) as error:
+                self.tuned = None
+                self.stats['channel_change_failures'] += 1
+                self.log({'event': 'channel-change-failed', 'channel': channel, 'error': repr(error)})
+                if channel == self.channel:
+                    raise RuntimeError('Cannot return the radio to channel %d' % channel) from error
+                return False
+            self.tuned = channel
+            self.stats['channel_changes'] += 1
+            # Plan visits around the slowest recent change (the board, load and driver all vary).
+            self.tune_cost = max(time.monotonic() - started, self.tune_cost * 0.98)
+            return True
+
+    def persist_controller(self, record):
+        """Radio thread: save a newly paired controller, then accept it as a station."""
+        from bridge_service import validate_state
+        if self.state_path is None: raise RuntimeError('No pairing state file')
+        with self.state_lock:
+            current = validate_state(self.state_path)
+            for name, value in (('bssid', frames.mac_text(self.bssid)), ('household', self.household.decode()),
+                                ('network_key', self.key.hex()), ('freq', self.freq)):
+                if current[name] != value:
+                    raise ValueError('The saved household changed (%s); restart the bridge' % name)
+            saved = netstart.save_pairing(self.state_path, current, [record])
+        aid = next(item['aid'] for item in saved['controllers'] if item['mac'] == record['mac'])
+        mac = frames.mac_bytes(record['mac'])
+        with self.lock:
+            if mac not in self.stations:
+                # Probe it at once so it finds the household; the next policy load applies
+                # any saved automatic-search preference for this MAC.
+                self.stations[mac] = Station(mac, aid)
+                self.station_log(self.stations[mac], event='controller-added', aid=aid)
+        self.config_signature, self.config_check_at = None, 0.0
+
+    def send_netstart(self, payload):
+        with self.lock:
+            seq = self.next_seq()
+        frame = (b'\x40\x00\x00\x00' + frames.BROADCAST + self.bssid + frames.BROADCAST
+                 + struct.pack('<H', (seq & 0xfff) << 4) + netstart.frame_body(payload))
+        return self.send(frame, block=False, channel=link_pairing.SETUP_CHANNEL)
+
+    def send_pairing_frames(self, session, now):
+        """On the setup channel: queued RESPONSEs first, then ALIVE every 100 ms."""
+        # The shared pacer spaces frames 1.5 ms apart: send what it allows, the rest next pass.
+        while (reply := session.next_reply()) is not None:
+            if self.send_netstart(reply) != SENT: return
+            session.reply_sent(reply)
+            self.stats['pairing_responses'] += 1
+        if now >= self.next_alive and self.send_netstart(session.alive) == SENT:
+            self.next_alive = now + link_pairing.ALIVE_INTERVAL
+            self.stats['pairing_alive'] += 1
+
+    def write_pair_status(self, session):
+        if self.run_dir is None: return
+        try:
+            link_pairing.write_json_atomic(self.run_dir / link_pairing.PAIR_STATUS, session.status(
+                channel=self.channel, hopping=self.channel != link_pairing.SETUP_CHANNEL))
+        except OSError as error:
+            self.log({'event': 'pairing-status-failed', 'error': repr(error)})
+
+    def check_pair_request(self):
+        request = link_pairing.read_request(self.run_dir / link_pairing.PAIR_REQUEST)
+        session = self.pairing
+        if session is not None and (request is None or request['id'] != session.id):
+            session.fail('Pairing was cancelled')
+            self.end_pairing()
+            session = None
+        if session is None and request is not None and request['id'] != self.pair_finished:
+            state = {'bssid': frames.mac_text(self.bssid), 'household': self.household.decode(),
+                     'network_key': self.key.hex(), 'freq': self.freq}
+            self.pairing = link_pairing.Session(request, state, self.persist_controller, self.log)
+            self.pair_reported, self.next_alive = None, 0.0
+            self.log({'event': 'pairing-started', 'pairing': request['id'], 'channel': self.channel,
+                      'hopping': self.channel != link_pairing.SETUP_CHANNEL})
+
+    def end_pairing(self):
+        session, self.pairing = self.pairing, None
+        self.pair_finished = session.id
+        if self.tuned != self.channel: self.tune(self.channel)
+        self.away_until = None
+        self.write_pair_status(session)
+        status = session.status()
+        self.log({'event': 'pairing-ended', 'pairing': session.id, 'result': status['state'],
+                  'controllers': status['controllers'], 'error': status['error']})
+
+    def service_pairing(self, now, next_beacon):
+        """Main loop: open/close pairing windows and visit the setup channel between beacons."""
+        if self.run_dir is not None and now >= self.pair_check_at:
+            self.pair_check_at = now + link_pairing.REQUEST_CHECK_INTERVAL
+            self.check_pair_request()
+        session = self.pairing
+        if session is None: return
+        if session.finish_if_due() is not None:
+            self.end_pairing()
+            return
+        reported = len(session.persisted)
+        if reported != self.pair_reported:
+            self.pair_reported = reported
+            self.write_pair_status(session)
+        if self.channel == link_pairing.SETUP_CHANNEL:
+            self.send_pairing_frames(session, now)
+            return
+        if self.tuned == self.channel:
+            if next_beacon is None or self.last_beacon_at is None: return
+            back = next_beacon - max(link_pairing.RETURN_MARGIN, self.tune_cost + link_pairing.RETURN_SLACK)
+            if now < self.last_beacon_at + link_pairing.HOME_DWELL or back - now < link_pairing.MIN_AWAY: return
+            self.last_beacon_at = None   # at most one visit per beacon interval
+            if not self.tune(link_pairing.SETUP_CHANNEL):
+                session.fail('The radio could not change to the setup channel')
+                self.tune(self.channel)
+                return
+            self.away_until, self.next_alive = back, 0.0
+            self.stats['pairing_visits'] += 1
+        if self.tuned == link_pairing.SETUP_CHANNEL:
+            now = time.monotonic()
+            if now >= self.away_until:
+                self.tune(self.channel)
+            else:
+                self.send_pairing_frames(session, now)
+
     def station_status(self, station, now):
         return {'mac': frames.mac_text(station.mac), 'aid': station.aid, 'associated': station.associated,
                 'auto_reconnect': station.auto_reconnect,
@@ -849,15 +1013,20 @@ class Link:
             elif next_beacon is None:
                 next_beacon = self.beacon_deadline(now)
             if next_beacon is not None and now >= next_beacon:
+                if self.tuned != self.channel:   # a pairing visit overran: beacons come first
+                    self.stats['pairing_visit_overruns'] += 1
+                    self.tune(self.channel)
                 try:
                     beacon_late.append(self.send_beacon())
                 except ClockUnavailable as error:
                     self.clock_stale(error)
                     next_beacon = None
                 else:
-                    next_beacon = self.beacon_deadline(time.monotonic())
+                    self.last_beacon_at = time.monotonic()
+                    next_beacon = self.beacon_deadline(self.last_beacon_at)
                 now = time.monotonic()
             self.reload_reconnect_policy(now)
+            self.service_pairing(time.monotonic(), next_beacon)
             now = time.monotonic()
             # Harnesses retain in-place reopen. Production must restart through
             # firmware/MPC validation and a fresh clock after any lost radio,
@@ -886,6 +1055,8 @@ class Link:
                               'queued': sum(station['queued'] for station in stations),
                               'workers': {name: worker.is_alive() for name, worker in self.workers.items()},
                               'clock': self.hardware_clock.status() if self.hardware_clock else None,
+                              'pairing': self.pairing.status() if self.pairing else None,
+                              'tuned': self.tuned, 'tune_ms': round(self.tune_cost * 1000, 1),
                               'beacons': len(beacon_late), 'beacon_late_us_p50': late[len(late) // 2],
                               'beacon_late_us_min': late[0], 'beacon_late_us_max': late[-1],
                               'beacon_grid_error_us_abs_max': max(abs(value) for value in late), **self.stats})
@@ -914,6 +1085,7 @@ def main():
     parser.add_argument('--tap', default='sonos0')
     parser.add_argument('--addr', default='192.168.69.1/24', help='address for the Linux end of the TAP')
     parser.add_argument('--log', help='also append JSON lines here')
+    parser.add_argument('--run-dir', type=Path, help='pairing requests and status (link_pairing)')
     parser.add_argument('--seconds', type=float)
     parser.add_argument('--tsf-lead-us', type=int, default=TSF_LEAD_US,
                         help='legacy software timestamp lead in µs; required firmware overwrites the timestamp')
@@ -954,7 +1126,8 @@ def main():
                     raise ClockUnavailable('Radio hardware clock calibration failed; verify the radio firmware')
                 clock.start()
                 Link(state, radio, tap_fd, log, reopen, tsf_lead_us=args.tsf_lead_us,
-                     pn_allocator=numbers, config_path=args.config, hardware_clock=clock).run(args.seconds)
+                     pn_allocator=numbers, config_path=args.config, hardware_clock=clock,
+                     run_dir=args.run_dir, state_path=args.state, iface=args.iface).run(args.seconds)
             finally:
                 clock.close()
                 radio.close()

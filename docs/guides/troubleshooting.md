@@ -116,7 +116,17 @@ release fixed it.
 - Pairing happens on channel 1, then the controller moves to the bridge channel.
   `sudo cr100-bridge pair` waits up to three minutes. Put the CR100 in its
   add-to-household setup mode first.
-- A failed attempt keeps the previous pairing and restarts the bridge.
+- With a controller already paired, the running link does the pairing
+  (`tools/link_pairing.py`), so other controllers stay connected. On channel 6 or
+  11 it visits channel 1 for about 30 ms of each 102 ms beacon interval. The link
+  log shows `pairing-started`, `controller-added` and `pairing-ended`, and
+  `/run/cr100-bridge/pair-status.json` holds the latest result.
+- If the running link doesn't answer within 20 s, the command pauses the bridge
+  and pairs the old way. A failed attempt keeps the previous pairing and restarts
+  the bridge.
+- **Changing the channel** (Controllers → Radio channel) restarts the radio link.
+  Each paired CR100 loses the bridge, scans channels 1, 6 and 11, and reconnects
+  on the new one. A sleeping controller reconnects when you wake it.
 - Keep `/var/lib/cr100-bridge/bridge-state.radio-pn.json` with the pairing state.
   Losing it causes nonce reuse and replay drops. If it's corrupt, the radio
   refuses to start rather than encrypt with a reused counter.

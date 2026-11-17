@@ -89,7 +89,8 @@ Open the printed **`http://<pi-address>:8080`** URL from your home network:
 3. Choose the speakers to show on the CR100 under Speakers.
 4. Under Controllers, choose **Pair controller**, then put the CR100 into its
    add-to-household setup mode. Pairing waits up to three minutes and the bridge
-   starts automatically after success. Use **Add controller** to pair another
+   starts automatically after success. A new household uses channel 1, the CR100's
+   pairing channel; you can change it later under Controllers. Use **Add controller** to pair another
    CR100 with the same household. Existing controllers and their settings are kept.
 
 The web UI runs before pairing and stays available if the bridge/radio fails.
@@ -124,7 +125,7 @@ enables services without starting them in the current boot.
 | `cr100-webui.service` | Settings on port 8080, independent of pairing/radio |
 | `cr100-radio.service` | Verify Nexmon, create `mon0`, disable radio power saving |
 | `cr100-bridge.service` | Supervise the continuous radio link, DHCP, virtual players |
-| `cr100-pair.service` | Pair a CR100; pause the bridge and restart it afterward |
+| `cr100-pair.service` | Pair a CR100 through the running bridge (or, for the first one, with it stopped) |
 | `/opt/cr100-bridge/current` | Symlink to the installed application release and venv |
 | `/var/lib/cr100-bridge/` | Configuration, pairing key/state, tokens, web password data |
 | `/run/cr100-bridge/` | Leases, player PID, bounded radio status log |
@@ -193,7 +194,11 @@ sudo cr100-bridge stop
 
 A failed pairing attempt retains the previous pairing and restarts that bridge.
 Additional controllers share the existing household, channel, and network key;
-pairing briefly pauses the bridge for all controllers. Pairing a known controller
+paired controllers stay connected while another one pairs. A CR100 pairs only on
+channel 1, so on channel 6 or 11 the bridge visits channel 1 between beacons during
+the pairing window; other controllers respond a little more slowly until it ends.
+If the running bridge doesn't take the request within 20 s, pairing pauses the
+bridge as before. Pairing a known controller
 does not add a duplicate. Older single-controller state files remain supported.
 No default network key, live controller state, HA token, or Spotify credential is shipped.
 

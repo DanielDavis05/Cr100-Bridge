@@ -214,7 +214,7 @@ def initial_state(args):
     if requested['bssid'] is None:
         raise ValueError('--mac is required for the first controller')
     return {'bssid': requested['bssid'], 'uuid': player_uuid(requested['bssid']).decode(),
-            'freq': requested['freq'] if requested['freq'] is not None else 2437,
+            'freq': requested['freq'] if requested['freq'] is not None else 2412,   # setup channel 1
             'household': requested['household'] or new_household().decode(),
             'network_key': requested['network_key'] or secrets.token_bytes(16).hex()}
 
@@ -325,7 +325,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--iface', default='mon0')
     parser.add_argument('--mac', help='bridge MAC: defaults to existing state; required for first pairing')
-    parser.add_argument('--freq', type=int, help='MHz: defaults to existing state, otherwise 2437')
+    parser.add_argument('--freq', type=int, help='MHz: defaults to existing state, otherwise 2412')
     parser.add_argument('--household', help='defaults to existing state, otherwise a new household')
     parser.add_argument('--key', help='network key: defaults to existing state, otherwise random')
     parser.add_argument('--state', default='bridge-state.json')
