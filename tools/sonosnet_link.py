@@ -159,9 +159,11 @@ def open_verified_radio(iface, channel):
     from bridge_service import verify_injection_ownership
     radio = open_radio(iface, channel)
     try:
-        verify_injection_ownership()
+        # MPC off first: a reloaded firmware re-enables it and powers the idle core
+        # down, which makes the clock/beacon verification report not ready.
         from nexmon_power import disable_mpc
         disable_mpc()
+        verify_injection_ownership()
         return radio
     except BaseException:
         radio.close()

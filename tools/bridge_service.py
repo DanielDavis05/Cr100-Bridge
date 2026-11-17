@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Installed service supervisor and radio/pairing helpers for Pi 4 on Kali."""
+"""Installed service supervisor and radio/pairing helpers for the Nexmon radio on Kali.
+
+Supported boards and their radios are listed in radio_platform.py."""
 from __future__ import annotations
 
 import argparse
@@ -75,12 +77,15 @@ def prepare_radio(channel=6):
     subprocess.run(['rfkill', 'unblock', 'wifi'], check=True, timeout=STARTUP_COMMAND_TIMEOUT)
     subprocess.run(['modprobe', 'tun'], check=True, timeout=STARTUP_COMMAND_TIMEOUT)
     subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'], check=True, timeout=STARTUP_COMMAND_TIMEOUT)
-    verify_injection_ownership()
-    subprocess.run(['iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], check=True,
-                   timeout=STARTUP_COMMAND_TIMEOUT)
+    # MPC must be off before verifying: with it on, the firmware powers the idle
+    # core down within seconds, and the clock/beacon queries then report not ready.
+    # Clearing MPC uses the stock Nexmon iovar and sends nothing over the air.
     from nexmon_power import disable_mpc
     previous = disable_mpc()
     log(event='radio-power-save', mpc=0, previous=previous)
+    verify_injection_ownership()
+    subprocess.run(['iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], check=True,
+                   timeout=STARTUP_COMMAND_TIMEOUT)
     open_radio('mon0', channel).close()
 
 

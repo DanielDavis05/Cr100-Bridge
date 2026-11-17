@@ -120,6 +120,7 @@ class FirmwarePreflight(unittest.TestCase):
         with patch.object(service, 'nexmon_loaded', return_value=True), \
                 patch.object(service.subprocess, 'run'), \
                 patch.object(service, 'verify_injection_ownership', side_effect=RuntimeError('not loaded')), \
+                patch('nexmon_power.disable_mpc', return_value=0), patch.object(service, 'log'), \
                 patch('sonosnet_link.open_radio') as radio:
             with self.assertRaisesRegex(RuntimeError, 'not loaded'): service.prepare_radio()
         radio.assert_not_called()
@@ -130,11 +131,29 @@ class FirmwarePreflight(unittest.TestCase):
             return Mock(returncode=0)
         with patch.object(service, 'nexmon_loaded', return_value=True), \
                 patch.object(service.subprocess, 'run', side_effect=run), \
-                patch('sonosnet_link.open_radio') as radio, \
-                patch('nexmon_power.disable_mpc') as power:
+                patch('sonosnet_link.open_radio') as radio, patch.object(service, 'log'), \
+                patch('nexmon_power.disable_mpc', return_value=1) as power:
             with self.assertRaisesRegex(RuntimeError, '432/433'): service.prepare_radio()
         radio.assert_not_called()
-        power.assert_not_called()
+        power.assert_called_once_with()  # MPC off first, so the radio core is up when verified.
+
+    def test_startup_disables_mpc_before_verifying_the_radio(self):
+        order = []
+        with patch.object(service, 'nexmon_loaded', return_value=True), \
+                patch.object(service.subprocess, 'run'), patch.object(service, 'log'), \
+                patch('nexmon_power.disable_mpc', side_effect=lambda: order.append('mpc') or 1), \
+                patch.object(service, 'verify_injection_ownership', side_effect=lambda: order.append('verify')), \
+                patch('sonosnet_link.open_radio', side_effect=lambda *_: order.append('open') or Mock()):
+            service.prepare_radio()
+        self.assertEqual(order, ['mpc', 'verify', 'open'])
+
+    def test_reopened_socket_disables_mpc_before_verifying(self):
+        order = []
+        with patch.object(link, 'open_radio', return_value=Mock()), \
+                patch('nexmon_power.disable_mpc', side_effect=lambda: order.append('mpc')), \
+                patch.object(service, 'verify_injection_ownership', side_effect=lambda: order.append('verify')):
+            link.open_verified_radio('mon0', 6)
+        self.assertEqual(order, ['mpc', 'verify'])
 
     def test_each_reopened_socket_verifies_loaded_firmware_and_closes_on_failure(self):
         radio = Mock()
@@ -147,7 +166,8 @@ class FirmwarePreflight(unittest.TestCase):
         self.assertEqual(power.call_count, 2)
         radio.close.assert_not_called()
         with patch.object(link, 'open_radio', return_value=radio), \
-                patch.object(service, 'verify_injection_ownership', side_effect=RuntimeError('not patched')):
+                patch.object(service, 'verify_injection_ownership', side_effect=RuntimeError('not patched')), \
+                patch('nexmon_power.disable_mpc'):
             with self.assertRaisesRegex(RuntimeError, 'not patched'): link.open_verified_radio('mon0', 6)
         radio.close.assert_called_once_with()
 
@@ -160,7 +180,7 @@ class FirmwarePreflight(unittest.TestCase):
                 link.open_verified_radio('mon0', 6)
         radio.close.assert_called_once_with()
 
-    def test_radio_feature_failure_closes_a_reopened_socket_before_mpc_or_injection(self):
+    def test_radio_feature_failure_closes_a_reopened_socket_before_injection(self):
         radio = Mock()
         with patch.object(link, 'open_radio', return_value=radio), \
                 patch.object(service.subprocess, 'run', side_effect=[reply(VALID), reply(VALID)]), \
@@ -168,7 +188,8 @@ class FirmwarePreflight(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '432/433'):
                 link.open_verified_radio('mon0', 6)
         radio.close.assert_called_once_with()
-        power.assert_not_called()
+        radio.send.assert_not_called()
+        power.assert_called_once_with()
 
     def test_clock_only_firmware_cannot_inject_and_fresh_socket_is_closed(self):
         legacy = {key: value for key, value in VALID_RADIO.items()
@@ -181,7 +202,7 @@ class FirmwarePreflight(unittest.TestCase):
                 link.open_verified_radio('mon0', 6)
         radio.close.assert_called_once_with()
         radio.send.assert_not_called()
-        power.assert_not_called()
+        power.assert_called_once_with()
 
 
 if __name__ == '__main__': unittest.main()
