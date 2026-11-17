@@ -3,7 +3,7 @@
 The bridge routes the CR100's original **System Settings → Online Updates**
 to the firmware explicitly armed for that paired controller, or — when no
 controller firmware is armed — checks GitHub (`DanielDavis05/Cr100-Bridge`,
-`main` branch) for a newer bridge commit. When a newer commit is available,
+`main` branch, falling back to `master`) for a newer bridge commit. When a newer commit is available,
 the bridge offers it as a Sonos system/player update (model 1 only) while
 leaving controller firmware unchanged. Without an armed controller package or
 available bridge commit, a fresh inert manifest retains the current player
