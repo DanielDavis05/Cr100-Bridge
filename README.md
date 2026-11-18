@@ -560,4 +560,4 @@ Cable changes and input names come from the Sonos AudioIn service. The Pi must
 accept event callbacks from the Sonos products, including when using Home
 Assistant. Home Assistant's Sonos integration and registries identify the source
 products; playback commands still go through Home Assistant. Other Home Assistant
-media players continue to use their normal playback controls.
+media players continue to use their normal playback controls. 
