@@ -80,6 +80,20 @@ function el(html) {
   return template.content.firstElementChild;
 }
 
+// Save a value as a JSON file. The link must belong to this document (not an el() template,
+// whose inert document has no window and ignores clicks), and the URL outlives the click.
+function downloadJson(filename, value) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2) + '\n'], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function openModal(overlay, trigger, initialFocus) {
   const close = ({ restoreFocus = true } = {}) => {
     overlay.remove();
@@ -581,12 +595,7 @@ views.controllers = {
       });
       $('#pairing-export', main).addEventListener('click', async () => {
         try {
-          const exported = await api('POST', '/api/controllers/pairing/export', {});
-          const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2) + '\n'], { type: 'application/json' }));
-          const link = el('<a download="cr100-pairing.json">Download</a>');
-          link.href = url;
-          link.click();
-          URL.revokeObjectURL(url);
+          downloadJson('cr100-pairing.json', await api('POST', '/api/controllers/pairing/export', {}));
         } catch (error) {
           toast('Export failed', error.message, true);
         }
@@ -1646,9 +1655,7 @@ views.radio = {
     }));
     $('#radio-export', main).addEventListener('click', async () => {
       try {
-        const exported = await api('POST', '/api/radio/export', {});
-        const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' }));
-        const link = el('<a download="cr100-radio.json">Download</a>'); link.href = url; link.click(); URL.revokeObjectURL(url);
+        downloadJson('cr100-radio.json', await api('POST', '/api/radio/export', {}));
       } catch (e) { toast('Export failed', e.message, true); }
     });
     $('#radio-import', main).addEventListener('change', async (event) => {
