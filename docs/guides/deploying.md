@@ -13,11 +13,13 @@ PI=kali@<pi-address>          # the Pi's home-network address, key-based SSH
 
 ```sh
 python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt   # first time only
-.venv/bin/python -m unittest discover -s tools -p 'test_*.py' -q
+.venv/bin/python tools/run_tests.py
 .venv/bin/python tools/test_link.py
 ```
 
-The full suite takes a few minutes. `test_link.py` also runs a private radio-capture
+`run_tests.py` runs the test modules in parallel and takes under a minute; it also
+runs the `cr100_flash` tests. Plain `python -m unittest discover -s tools` still works
+but takes about ten minutes. `test_link.py` also runs a private radio-capture
 regression when `research/bridge-captures/` is present (see `tools/workspace.py`);
 otherwise it skips that part.
 

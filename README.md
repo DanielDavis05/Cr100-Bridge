@@ -329,9 +329,8 @@ change. Playlist, album and track browsing uses the existing Web API connection.
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m unittest discover -s tools -p 'test_*.py' -q
+.venv/bin/python tools/run_tests.py
 (cd firmware/nexmon-ownership && ../../.venv/bin/python -m unittest discover -p 'test_*.py' -q)
-(cd tools && ../.venv/bin/python -m unittest discover -s cr100_flash/tests -t . -p 'test_*.py' -q)
 .venv/bin/python tools/test_link.py
 python3 tools/distribution.py --archive /tmp/cr100-bridge.tar.gz
 ```

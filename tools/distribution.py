@@ -33,7 +33,7 @@ def files(root=ROOT):
     selected += sorted(p for p in (root / 'docs').rglob('*')
                        if p.is_file() and p.suffix in ('.md', '.png'))
     selected += [root / 'firmware/nexmon-ownership' / name for name in FIRMWARE_ASSETS]
-    selected += sorted((root / 'tools').glob('test_*.py'))
+    selected += sorted((root / 'tools').glob('test_*.py')) + [root / 'tools' / 'run_tests.py']
     for name in ('systemd', 'scripts', 'config', '.github', 'tools/zp80', 'tools/webui'):
         selected += sorted(p for p in (root / name).rglob('*')
                            if p.is_file() and '__pycache__' not in p.parts and p.name != '.DS_Store')
