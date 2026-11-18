@@ -16,8 +16,8 @@ import netstart_pair as netstart
 import sonosnet_link as sl
 
 KEY = '0123456789abcdef0123456789abcdef'
-STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test', 'network_key': KEY, 'freq': 2437,
-         'uuid': 'RINCON_02000000000101400', 'controllers': [{'mac': '02:00:00:00:00:02', 'aid': 1}]}
+STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test', 'freq': 2437,
+         'uuid': 'RINCON_02000000000101400', 'controllers': [{'mac': '02:00:00:00:00:02', 'aid': 1, 'key': KEY}]}
 AP = frames.mac_bytes(STATE['bssid'])
 OLD = frames.mac_bytes('02:00:00:00:00:02')
 NEW = '02:00:00:00:00:07'

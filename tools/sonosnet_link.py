@@ -3,8 +3,10 @@
 
 The radio side is a userspace AP on a nexmon monitor interface: beacons with a
 TIM, probe responses while the CR100 searches, association responses, and CCMP
-(KeyID 2) data in both directions. Each data frame tunnels a whole Ethernet frame
-under SNAP ethertype 0x6969 (STATIC-FINDINGS §5), so the TAP side carries the
+(KeyID 2) data in both directions. Each controller has its own link key from
+pairing; the link picks it by the transmitter (receive) or destination (transmit),
+so one controller cannot read or forge another's traffic. Each data frame tunnels
+a whole Ethernet frame under SNAP ethertype 0x6969 (STATIC-FINDINGS §5), so the TAP side carries the
 CR100's own Ethernet traffic: ARP, DHCP, SSDP, HTTP. Anything later (a DHCP
 server, a UPnP player surface, a bridge to the LAN) attaches to the TAP.
 
@@ -15,6 +17,10 @@ own AID's TIM bit. Each PS-Poll releases one frame from that station's queue, wi
 MoreData if more wait; a data or Null frame with PM clear releases its whole queue.
 Nothing is sent to a dozing CR100 unprompted. Ethernet multicast is replicated to
 associated controllers; Ethernet unicast is routed by destination MAC.
+
+A controller forgotten in the pairing state (controller_state.set_forgotten) is
+dropped within a second, without a restart: the link sends it a deauthentication
+and then ignores it. Restoring it adds it back with the same AID and key.
 
 Usage: sudo python3 sonosnet_link.py --state bridge-state.json --tap sonos0 --addr 192.168.69.1/24
 """
@@ -46,7 +52,7 @@ from ccmp_pn import PacketNumbers
 import frames
 import link_pairing
 import netstart_pair as netstart
-from controller_state import controller_records, normalize_mac
+from controller_state import active_controllers, confirm_key, controller_records, normalize_mac
 from nexmon_clock import ClockUnavailable, HardwareClock
 
 TUNSETIFF, IFF_TAP, IFF_NO_PI = 0x400454ca, 0x0002, 0x1000
@@ -110,6 +116,8 @@ RADIO_BUSY = {errno.EAGAIN, errno.ENOBUFS, errno.ENOMEM}
 FRAME_ERRORS = {errno.EMSGSIZE, errno.EINVAL}
 RADIO_COMMAND_TIMEOUT = 2.0
 RECONNECT_CONFIG_INTERVAL = 1.0
+CONTROLLER_STATE_INTERVAL = 1.0   # s between checks of the pairing state for forget/restore
+DEAUTH_REASON = 2                 # previous authentication no longer valid
 TAP_BUSY = {errno.EAGAIN, errno.ENOBUFS, errno.ENOMEM}
 SENT, BUSY, FAILED = 'sent', 'busy', 'failed'
 # mon0's MTU (1500) bounds radiotap + 802.11 header + CCMP + SNAP + the inner Ethernet
@@ -220,6 +228,9 @@ class Station:
     auto_reconnect: bool = True
     poll_pending_until: float | None = None
     management_replies: dict = field(default_factory=dict)
+    key: bytes = b''                  # this controller's link key from pairing
+    previous_key: bytes | None = None  # accepted until the current key is heard (a re-pair)
+    tx_key: bytes = b''               # the key the controller was last heard using
 
 
 class Link:
@@ -240,12 +251,10 @@ class Link:
         self.bssid = frames.mac_bytes(state['bssid'])
         # With an explicit config, fail closed for proactive probes until its
         # first valid policy is loaded. Received traffic remains fully enabled.
-        self.stations = {frames.mac_bytes(record['mac']): Station(frames.mac_bytes(record['mac']), record['aid'],
-                                                               auto_reconnect=self.config_path is None)
-                         for record in controller_records(state)}
+        self.stations = {frames.mac_bytes(record['mac']): self.new_station(record, auto_reconnect=self.config_path is None)
+                         for record in active_controllers(state)}
         if not self.stations: raise ValueError('No paired controllers')
         self.household = state['household'].encode()
-        self.key = bytes.fromhex(state['network_key'])
         self.freq = state['freq']
         self.channel = {2412: 1, 2437: 6, 2462: 11}[state['freq']]
         # The channel the radio is tuned to; it differs from self.channel only while a
@@ -289,9 +298,94 @@ class Link:
         self.config_check_at = 0.0
         self.config_signature = None
         self.config_error = False
+        self.state_check_at = 0.0
+        self.state_signature = self.state_file_signature()
+        self.state_error = None
+        self.key_confirmations = set()   # MACs heard on a new key whose previous key is still saved
         if tap_fd >= 0:
             os.set_blocking(tap_fd, False)
         self.reload_reconnect_policy(self.start, force=True)
+
+    @staticmethod
+    def new_station(record, auto_reconnect=True):
+        key = bytes.fromhex(record['key'])
+        previous = bytes.fromhex(record['previous_key']) if record.get('previous_key') else None
+        return Station(frames.mac_bytes(record['mac']), record['aid'], auto_reconnect=auto_reconnect,
+                       key=key, previous_key=previous, tx_key=key)
+
+    def state_file_signature(self):
+        if self.state_path is None: return None
+        try: info = self.state_path.stat()
+        except OSError: return None
+        return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+
+    def reload_controllers(self, now, force=False):
+        """Apply forgotten, restored and re-keyed controllers from the pairing state.
+
+        The web UI forgets or restores a controller by rewriting the state file while no
+        pairing can run (it holds pair.lock). Hold state_lock across read and apply, so a
+        snapshot read before persist_controller saved cannot remove what it just added.
+        A state for another household, BSSID or channel is ignored: those restart the link.
+        """
+        if self.state_path is None or (not force and now < self.state_check_at): return
+        self.state_check_at = now + CONTROLLER_STATE_INTERVAL
+        with self.state_lock:
+            signature = self.state_file_signature()
+            if not force and signature == self.state_signature: return
+            try:
+                state = json.loads(self.state_path.read_text())
+                if (normalize_mac(state.get('bssid')) != frames.mac_text(self.bssid)
+                        or state.get('household') != self.household.decode() or state.get('freq') != self.freq):
+                    raise ValueError('The saved household changed; restart the bridge')
+                records = {frames.mac_bytes(record['mac']): record for record in active_controllers(state)}
+                if not records: raise ValueError('No paired controllers')
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                if str(error) != self.state_error: self.log({'event': 'controller-state-invalid', 'error': str(error)})
+                self.state_error = str(error)
+                return
+            self.state_signature, self.state_error = signature, None
+            with self.lock:
+                for mac in [mac for mac in self.stations if mac not in records]:
+                    station = self.stations.pop(mac)
+                    if station.associated:
+                        self.send_mgmt(12, mac, struct.pack('<H', DEAUTH_REASON), block=False)
+                    self.key_confirmations.discard(mac)
+                    self.station_log(station, event='controller-forgotten', aid=station.aid)
+                for mac, record in records.items():
+                    station = self.stations.get(mac)
+                    if station is None:
+                        # Probe it at once; the next policy load applies its saved preference.
+                        self.stations[mac] = self.new_station(record)
+                        self.station_log(self.stations[mac], event='controller-restored', aid=record['aid'])
+                    elif station.key != bytes.fromhex(record['key']):
+                        self.rekey(station, record)
+        self.config_signature, self.config_check_at = None, 0.0
+
+    def rekey(self, station, record):
+        """A new pairing gave this station a new key; caller holds the lock."""
+        fresh = self.new_station(record)
+        station.key, station.previous_key, station.tx_key = fresh.key, fresh.previous_key, fresh.key
+        self.key_confirmations.discard(station.mac)
+        self.station_log(station, event='controller-rekeyed', previous_key_accepted=fresh.previous_key is not None)
+
+    def confirm_keys(self):
+        """Main loop: drop saved previous keys once their controllers used the new one."""
+        if self.state_path is None: return
+        with self.lock:
+            pending = [(mac, self.stations[mac].key) for mac in self.key_confirmations if mac in self.stations]
+            self.key_confirmations.clear()
+        if not pending: return
+        from bridge_service import validate_state
+        try:
+            with self.state_lock:
+                state = validate_state(self.state_path)
+                for mac, key in pending:
+                    state = confirm_key(state, frames.mac_text(mac), key.hex())
+                netstart.write_state(self.state_path, state)
+                self.state_signature = self.state_file_signature()
+        except (OSError, ValueError) as error:
+            # The link already stopped accepting the old key; only the saved copy lingers.
+            self.log({'event': 'key-confirm-save-failed', 'error': str(error)})
 
     def reload_reconnect_policy(self, now, force=False):
         """Apply only automatic-search preferences, preserving every radio identity.
@@ -478,7 +572,7 @@ class Link:
         self.tx_pn = next_pn
         header = frames.data_header(station.mac, self.bssid, self.next_seq(), more_data)
         plaintext = ccmp.SNAP_PREFIX + b'\x69\x69' + inner
-        result = self.send(ccmp.encrypt(header, plaintext, self.key, self.tx_pn), block=False)
+        result = self.send(ccmp.encrypt(header, plaintext, station.tx_key, self.tx_pn), block=False)
         if result == SENT: self.count(station, 'tx_data')
         # Consume the nonce even on a failed send; acceptance can be uncertain.
         return result
@@ -633,9 +727,33 @@ class Link:
                 return
             if not pm and station.queue: self.flush(station)
 
+    def decrypt(self, station, raw):
+        """Return (pn, key_id, plaintext) under this station's key; caller holds the lock.
+
+        After a re-pair the previous key is still accepted, and answered, until the
+        controller is heard on the new one: a pairing that stopped halfway must not
+        lock out a CR100 that kept its old key.
+        """
+        try:
+            result = ccmp.decrypt(raw, station.key)
+        except InvalidTag:
+            if station.previous_key is None: raise
+            result = ccmp.decrypt(raw, station.previous_key)
+            if station.tx_key != station.previous_key:
+                station.tx_key = station.previous_key
+                self.station_log(station, event='controller-previous-key')
+            self.count(station, 'rx_previous_key')
+            return result
+        if station.previous_key is not None:
+            # The new key's PNs start afresh; the old key's high-water mark does not apply.
+            station.previous_key, station.tx_key, station.rx_last_pn = None, station.key, -1
+            self.key_confirmations.add(station.mac)
+            self.station_log(station, event='controller-key-confirmed')
+        return result
+
     def receive_data(self, station, raw):
         try:
-            pn, key_id, plaintext = ccmp.decrypt(raw, self.key)
+            pn, key_id, plaintext = self.decrypt(station, raw)
         except (InvalidTag, ValueError, IndexError, struct.error):
             self.count(station, 'rx_decrypt_fail')
             return False
@@ -819,7 +937,8 @@ class Link:
         not delay the next beacon or another controller's power-save response.
         """
         stations = list(self.stations.values())
-        start = self.station_cursor
+        if not stations: return
+        start = self.station_cursor % len(stations)   # forgetting a station shortens the list
         self.station_cursor = (start + 1) % len(stations)
         for station in stations[start:] + stations[:start]:
             self.service_ps_poll(station, now)
@@ -866,18 +985,22 @@ class Link:
         with self.state_lock:
             current = validate_state(self.state_path)
             for name, value in (('bssid', frames.mac_text(self.bssid)), ('household', self.household.decode()),
-                                ('network_key', self.key.hex()), ('freq', self.freq)):
+                                ('freq', self.freq)):
                 if current[name] != value:
                     raise ValueError('The saved household changed (%s); restart the bridge' % name)
             saved = netstart.save_pairing(self.state_path, current, [record])
-        aid = next(item['aid'] for item in saved['controllers'] if item['mac'] == record['mac'])
-        mac = frames.mac_bytes(record['mac'])
-        with self.lock:
-            if mac not in self.stations:
-                # Probe it at once so it finds the household; the next policy load applies
-                # any saved automatic-search preference for this MAC.
-                self.stations[mac] = Station(mac, aid)
-                self.station_log(self.stations[mac], event='controller-added', aid=aid)
+            self.state_signature = self.state_file_signature()
+            saved_record = next(item for item in saved['controllers'] if item['mac'] == record['mac'])
+            mac = frames.mac_bytes(record['mac'])
+            with self.lock:
+                station = self.stations.get(mac)
+                if station is None:
+                    # New or forgotten until now. Probe it at once so it finds the household;
+                    # the next policy load applies any saved automatic-search preference.
+                    self.stations[mac] = self.new_station(saved_record)
+                    self.station_log(self.stations[mac], event='controller-added', aid=saved_record['aid'])
+                elif station.key != bytes.fromhex(saved_record['key']):
+                    self.rekey(station, saved_record)
         self.config_signature, self.config_check_at = None, 0.0
 
     def send_netstart(self, payload):
@@ -914,8 +1037,7 @@ class Link:
             self.end_pairing()
             session = None
         if session is None and request is not None and request['id'] != self.pair_finished:
-            state = {'bssid': frames.mac_text(self.bssid), 'household': self.household.decode(),
-                     'network_key': self.key.hex(), 'freq': self.freq}
+            state = {'bssid': frames.mac_text(self.bssid), 'household': self.household.decode(), 'freq': self.freq}
             self.pairing = link_pairing.Session(request, state, self.persist_controller, self.log)
             self.pair_reported, self.next_alive = None, 0.0
             self.log({'event': 'pairing-started', 'pairing': request['id'], 'channel': self.channel,
@@ -1026,6 +1148,8 @@ class Link:
                     next_beacon = self.beacon_deadline(self.last_beacon_at)
                 now = time.monotonic()
             self.reload_reconnect_policy(now)
+            self.reload_controllers(now)
+            self.confirm_keys()
             self.service_pairing(time.monotonic(), next_beacon)
             now = time.monotonic()
             # Harnesses retain in-place reopen. Production must restart through
@@ -1104,7 +1228,7 @@ def main():
 
     state = json.loads(Path(args.state).read_text())
     pn_path = Path(args.state).with_suffix('.radio-pn.json')
-    with PacketNumbers(pn_path, frames.mac_bytes(state['bssid']), bytes.fromhex(state['network_key'])) as numbers:
+    with PacketNumbers(pn_path, frames.mac_bytes(state['bssid'])) as numbers:
         tap_fd = open_tap(args.tap)
         try:
             # Locally administered MAC derived from the bridge's, so it is stable across runs.

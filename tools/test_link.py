@@ -17,13 +17,13 @@ import workspace
 import sonosnet_link as sl
 from sonosnet_link import Link
 
-AID = 1  # legacy state receives the first association ID
+AID = 1  # a controller saved without an AID receives the first one
 
 HERE = Path(__file__).resolve().parent.parent
-STATE = {'bssid': '02:00:00:00:00:01', 'cr100_mac': '02:00:00:00:00:02', 'household': 'Sonos_test',
-         'network_key': '0123456789abcdef0123456789abcdef', 'freq': 2437}
-KEY = bytes.fromhex(STATE['network_key'])
-AP, CR = frames.mac_bytes(STATE['bssid']), frames.mac_bytes(STATE['cr100_mac'])
+STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test', 'freq': 2437,
+         'controllers': [{'mac': '02:00:00:00:00:02', 'key': '0123456789abcdef0123456789abcdef'}]}
+KEY = bytes.fromhex(STATE['controllers'][0]['key'])
+AP, CR = frames.mac_bytes(STATE['bssid']), frames.mac_bytes(STATE['controllers'][0]['mac'])
 
 
 class FakeRadio:

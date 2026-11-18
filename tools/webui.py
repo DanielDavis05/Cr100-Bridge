@@ -9,8 +9,9 @@ SIGHUP to zoneplayers.py, which restarts the virtual players in place. The radio
 costs the CR100 a drop. Controller status comes from the link's log (the 'stations' in
 its stats lines), the DHCP leases, and each CR100's own /status pages.
 
-Paired controllers are listed under "controllers" in the state file; older
-single-controller state using "cr100_mac" remains readable.
+Paired controllers are listed under "controllers" in the state file, each with its own
+link key. Forgetting one marks it "forgotten" there; the running link drops it within a
+second (sonosnet_link.reload_controllers). Restore or pairing again brings it back.
 
 Speaker source: the controller's rooms come from Home Assistant or straight from Sonos
 players (config "backend", see backends.py). Switching keeps the other source's rooms aside
@@ -47,7 +48,8 @@ import room_icons
 from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME, MAX_SLOTS,
                            apply_rooms, reconcile_sonos_rooms, room_key,
                            room_key_ref, update_config_file, write_json)
-from controller_state import controller_records, merge_controller, normalize_mac, normalize_state
+from controller_state import (active_controllers, controller_records, merge_controller, normalize_mac,
+                              normalize_state, set_forgotten)
 from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
                                    visible_components)
 from music_service_registry import provider_settings
@@ -57,6 +59,7 @@ STATIC_DIR = _HERE / 'webui'
 STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
                 '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
                 '.ico': 'image/x-icon'}
+PAIRING_EXPORT_VERSION = 2   # each controller carries its own link key
 CR100_NETWORK = ipaddress.ip_network('192.168.69.0/24')   # sonos0: never serve the controllers' side
 MIN_PASSWORD = 8
 PBKDF2_ROUNDS = 300_000
@@ -669,7 +672,7 @@ class Bridge:
         with self.config_lock, self._pair_lock('Wait for pairing to finish before changing the channel.'):
             state = self.state()
             try:
-                controllers = controller_records(state)
+                controllers = active_controllers(state)
             except (ValueError, TypeError):
                 controllers = []
             if not controllers or state.get('freq') not in FREQ_CHANNEL:
@@ -702,17 +705,11 @@ class Bridge:
     @staticmethod
     def _pairing_credentials(data, *, message, default_freq=None):
         household = data.get('household')
-        raw_key = data.get('network_key')
         freq = data.get('freq', default_freq)
-        try:
-            key_bytes = bytes.fromhex(raw_key) if isinstance(raw_key, str) else b''
-        except ValueError:
-            key_bytes = b''
         if (not isinstance(household, str) or not household.startswith('Sonos_')
-                or len(household.encode('utf-8')) > 32 or len(key_bytes) != 16
-                or type(freq) is not int or freq not in FREQ_CHANNEL):
+                or len(household.encode('utf-8')) > 32 or type(freq) is not int or freq not in FREQ_CHANNEL):
             raise ApiError(400, message)
-        return household, key_bytes.hex(), freq
+        return household, freq
 
     @contextlib.contextmanager
     def _pair_lock(self, busy='Wait for pairing to finish before importing.'):
@@ -729,7 +726,7 @@ class Bridge:
             yield
 
     def export_pairing(self):
-        """Return portable household credentials and controllers for another bridge."""
+        """Return the household and its controllers, with their link keys, for another bridge."""
         state, config = self.state(), self.config()
         try:
             controllers = controller_records(state)
@@ -737,8 +734,7 @@ class Bridge:
             raise ApiError(400, str(error)) from error
         if not controllers:
             raise ApiError(400, 'Pair a controller before exporting.')
-        household, network_key, freq = self._pairing_credentials(
-            state, message='Pairing state is incomplete.')
+        household, freq = self._pairing_credentials(state, message='Pairing state is incomplete.')
         profiles = config.get('controllers')
         if not isinstance(profiles, dict):
             profiles = {}
@@ -750,28 +746,25 @@ class Bridge:
             if isinstance(name, str) and name:
                 entry['name'] = name
             exported.append(entry)
-        return {'version': 1, 'household': household, 'network_key': network_key,
-                'freq': freq, 'controllers': exported}
+        return {'version': PAIRING_EXPORT_VERSION, 'household': household, 'freq': freq, 'controllers': exported}
 
     def import_pairing(self, payload):
         """Import a portable pairing bundle or bridge-state.json, bound to this Pi's radio MAC."""
         data = payload['data'] if isinstance(payload, dict) and 'data' in payload else payload
         if not isinstance(data, dict):
             raise ApiError(400, 'Choose a valid pairing JSON file.')
-        if 'version' in data and (type(data['version']) is not int or data['version'] != 1):
-            raise ApiError(400, 'Unsupported pairing file version.')
+        if 'version' in data and (type(data['version']) is not int or data['version'] != PAIRING_EXPORT_VERSION):
+            raise ApiError(400, 'Unsupported pairing file version. Export it again from an up-to-date bridge.')
         if self.pairing_status().get('running'):
             raise ApiError(409, 'Wait for pairing to finish before importing.')
-        household, network_key, freq = self._pairing_credentials(
-            data,
-            message='Pairing file must include a valid household, 16-byte network key, and radio channel.',
-            default_freq=2437)
+        household, freq = self._pairing_credentials(
+            data, message='Pairing file must include a valid household and radio channel.', default_freq=2437)
         try:
             records = controller_records(data)
         except (ValueError, TypeError) as error:
             raise ApiError(400, str(error)) from error
-        if not records:
-            raise ApiError(400, 'The pairing file contains no controllers.')
+        if not any(not record.get('forgotten') for record in records):
+            raise ApiError(400, 'The pairing file contains no active controllers.')
         names = {}
         for item in data.get('controllers') or []:
             if isinstance(item, dict) and item.get('name') is not None:
@@ -788,20 +781,17 @@ class Bridge:
                 existing_controllers = bool(controller_records(existing))
             except (ValueError, TypeError):
                 existing_controllers = False
-            existing_key = existing.get('network_key')
-            same_household = (existing.get('household') == household and isinstance(existing_key, str)
-                              and existing_key.lower() == network_key and existing_controllers)
+            same_household = existing.get('household') == household and existing_controllers
             if same_household:
                 merged = True
                 new_state = normalize_state({**existing, 'bssid': bssid, 'uuid': uuid, 'freq': freq,
-                                             'household': household, 'network_key': network_key})
+                                             'household': household})
                 for record in records:
                     new_state = merge_controller(new_state, record)
             else:
                 merged = False
                 new_state = normalize_state({'bssid': bssid, 'uuid': uuid, 'freq': freq,
-                                             'household': household, 'network_key': network_key,
-                                             'controllers': records})
+                                             'household': household, 'controllers': records})
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             write_json(self.state_path, new_state, mode=0o600)
             if names:
@@ -831,7 +821,49 @@ class Bridge:
                     ' Restarting the bridge.' if self.managed else '')}
 
     def controller_macs(self, state):
-        return [controller['mac'] for controller in controller_records(state)]
+        """The controllers the bridge serves; forgotten ones are listed separately."""
+        return [controller['mac'] for controller in active_controllers(state)]
+
+    def forgotten_controllers(self, state, names):
+        try: records = controller_records(state)
+        except (ValueError, TypeError): return []
+        return [{'mac': record['mac'], 'name': (names.get(record['mac']) or {}).get('name') or 'Controller'}
+                for record in records if record.get('forgotten')]
+
+    def set_controller_forgotten(self, mac, forgotten):
+        """Forget or restore one controller. The running link applies it within a second.
+
+        A forgotten controller keeps its AID, key and settings, so Restore is exact;
+        pairing it again restores it with a new key.
+        """
+        try: mac = normalize_mac(mac)
+        except ValueError: raise ApiError(400, 'Choose a valid controller.') from None
+        busy = 'Wait for pairing to finish before %s a controller.' % ('forgetting' if forgotten else 'restoring')
+        if self.pairing_status().get('running'): raise ApiError(409, busy)
+        with self.config_lock, self._pair_lock(busy):
+            state = self.state()
+            try:
+                changed = set_forgotten(state, mac, forgotten)
+            except LookupError:
+                raise ApiError(404, 'No such controller.') from None
+            except (ValueError, TypeError) as error:
+                raise ApiError(400, 'Pair another controller before forgetting this one.'
+                               if 'last active' in str(error) else str(error)) from error
+            was = next(record for record in controller_records(state) if record['mac'] == mac).get('forgotten', False)
+            if was == forgotten:
+                return {'mac': mac, 'forgotten': forgotten, 'changed': False,
+                        'message': 'Already forgotten.' if forgotten else 'Already restored.'}
+            write_json(self.state_path, changed, mode=0o600)
+        if forgotten:
+            self.details.pop(mac, None)
+            self.known_ips.pop(mac, None)
+            try: self.updates().cancel_controller(mac, reason='The controller was forgotten.')
+            except Exception as error: self.log({'event': 'forget-update-cancel-failed', 'mac': mac, 'error': repr(error)})
+        self.log({'event': 'controller-forgotten' if forgotten else 'controller-restored', 'mac': mac})
+        return {'mac': mac, 'forgotten': forgotten, 'changed': True,
+                'message': ('Forgotten. The bridge stops answering it within a few seconds. Restore it, '
+                            'or pair it again, to bring it back.') if forgotten else
+                           ('Restored. It reconnects the next time it looks for the bridge; wake it if it is asleep.')}
 
     def link_status(self):
         """The radio link's latest stats line and recent events, from its log."""
@@ -895,7 +927,8 @@ class Bridge:
                                       (not event.get('mac') and (len(macs) == 1 or
                                        event['event'] in ('radio-lost', 'radio-reopened')))][-12:],
                            **details})
-        payload = {'controllers': result, 'household': state.get('household'),
+        payload = {'controllers': result, 'forgotten': self.forgotten_controllers(state, names),
+                   'household': state.get('household'),
                 'speaker_health': self.speaker_health(config, wait=False),
                 'channel': FREQ_CHANNEL.get(state.get('freq')), 'radio_running': link['running'],
                 'multi_controller': True, 'pairing': self.pairing_status()}
@@ -1494,6 +1527,8 @@ def make_handler(bridge, auth, log):
     route('POST', '/api/controllers/pairing/export')(lambda h, b, m: bridge.export_pairing())
     route('POST', '/api/controllers/pairing/import')(lambda h, b, m: bridge.import_pairing(b))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})')(lambda h, b, m: bridge.rename_controller(m.group(1), b.get('name')))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/forget')(lambda h, b, m: bridge.set_controller_forgotten(m.group(1), True))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/restore')(lambda h, b, m: bridge.set_controller_forgotten(m.group(1), False))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/reconnect')(lambda h, b, m: bridge.save_controller_reconnect(m.group(1), b))
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.controller_components(m.group(1)))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.save_controller_components(m.group(1), b))

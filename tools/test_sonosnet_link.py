@@ -85,7 +85,7 @@ class ManagementBackpressure(unittest.TestCase):
             self.assertTrue(any(record['event'] == 'stats' and record.get('tx_busy', 0)
                                 for record in logs))
             busy.gone = True
-            link.send_mgmt(5, frames.mac_bytes(STATE['cr100_mac']), frames.probe_response_body(0, link.household))
+            link.send_mgmt(5, frames.mac_bytes(STATE['controllers'][0]['mac']), frames.probe_response_body(0, link.household))
             self.assertTrue(link.radio_down)
             link.run(seconds=.4)
         self.assertIs(link.radio, fresh)

@@ -39,9 +39,9 @@ class ControllerRegistry:
             state = json.loads(self.state_path.read_text())
         except (OSError, ValueError):
             return {}
-        known = {str(x.get('mac', '')).lower() for x in state.get('controllers', []) if isinstance(x, dict)}
-        if state.get('cr100_mac'):
-            known.add(str(state['cr100_mac']).lower())
+        # Forgotten controllers are not served, even while a lease or neighbour entry remains.
+        known = {str(x.get('mac', '')).lower() for x in state.get('controllers', [])
+                 if isinstance(x, dict) and x.get('forgotten') is not True}
         known = {x for x in known if MAC.fullmatch(x)}
         mapping = {}
         if self.leases_file:

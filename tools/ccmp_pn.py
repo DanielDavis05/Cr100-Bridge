@@ -5,7 +5,11 @@ TX counter from ``initial`` and call ``ensure(next_pn)`` before encrypting each
 frame. Numbers are consumed even when transmission fails; callers serialize
 ensure() with their existing radio lock.
 
-The first use of a key seeds from wall-clock milliseconds unless ``minimum`` is
+The counter belongs to the transmitter (the bridge BSSID), not to a key: every
+controller has its own link key, and one strictly increasing counter shared by all
+of them never repeats a nonce under any key, including keys issued later.
+
+The first use of a BSSID seeds from wall-clock milliseconds unless ``minimum`` is
 provided. This preserves the previous link's counter convention during migration,
 but cannot reconstruct numbers sent before this file existed if the clock has
 already rolled back. Once initialized, the durable high-water mark survives
@@ -41,18 +45,16 @@ def _unique_object(pairs):
 
 
 class PacketNumbers:
-    def __init__(self, path, bssid, key, *, minimum=None, block_size=RESERVATION_SIZE):
+    def __init__(self, path, bssid, *, minimum=None, block_size=RESERVATION_SIZE):
         if not isinstance(bssid, bytes) or len(bssid) != 6:
             raise ValueError('CCMP packet numbers require a six-byte BSSID')
-        if not isinstance(key, bytes) or len(key) != 16:
-            raise ValueError('CCMP packet numbers require a sixteen-byte key')
         if type(block_size) is not int or not 1 <= block_size <= MAX_PN:
             raise ValueError('Invalid CCMP packet-number reservation size')
         if minimum is None: minimum = max(0, int(time.time() * 1000))
         if type(minimum) is not int or not 0 <= minimum <= MAX_PN:
             raise ValueError('CCMP packet-number minimum is outside the 48-bit range')
         self.path = Path(path)
-        self.fingerprint = hashlib.sha256(bssid + key).hexdigest()
+        self.fingerprint = hashlib.sha256(b'cr100-bridge-tx:' + bssid).hexdigest()
         self.block_size = block_size
         self._lock_fd, self._failed = None, False
         try:

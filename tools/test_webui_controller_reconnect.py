@@ -26,8 +26,7 @@ class ReconnectControls(unittest.TestCase):
             'other': {'preserved': True}}))
         self.state_path = self.root / 'state.json'
         self.state_path.write_text(json.dumps({'household': 'Sonos_test', 'freq': 2437,
-            'network_key': '0123456789abcdef0123456789abcdef',
-            'controllers': [{'mac': FIRST, 'aid': 1}, {'mac': SECOND, 'aid': 65}]}))
+            'controllers': [{'mac': FIRST, 'aid': 1, 'key': '01' * 16}, {'mac': SECOND, 'aid': 65, 'key': '02' * 16}]}))
         self.state_path.chmod(0o600)
         self.pairing_before = self.state_path.read_bytes()
         self.bridge = webui.Bridge(self.config_path, self.state_path, None,

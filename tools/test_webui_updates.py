@@ -28,7 +28,7 @@ class FirmwareHttp(unittest.TestCase):
         self.config.write_text(json.dumps({'backend': 'sonos', 'rooms': [],
             'controllers': {CR1: {'name': 'Living controller'}, CR2: {'name': 'Kitchen controller'}}}))
         state = self.root / 'state.json'
-        state.write_text(json.dumps({'controllers': [{'mac': CR1}, {'mac': CR2}]}))
+        state.write_text(json.dumps({'controllers': [{'mac': CR1, 'key': '01' * 16}, {'mac': CR2, 'key': '02' * 16}]}))
         self.bridge = webui.Bridge(self.config, state, None, self.root / 'pid',
             webui.DataFile(self.root / 'webui.json'), log=lambda _: None)
         self.addCleanup(self.bridge.close)

@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 import ccmp
 import frames
 import sonosnet_link as sl
-from test_multi_controller_link import AP, FIRST, KEY, STATE, data, ethernet, null
+from test_multi_controller_link import AP, FIRST, KEYS, STATE, data, ethernet, null
+
+KEY = KEYS[FIRST]   # the first controller's own link key
 
 
 class Radio:

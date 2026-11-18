@@ -45,7 +45,8 @@ class Fixture(unittest.TestCase):
                             'spotify_music_service': {'enabled': True, 'client_id': 'a' * 32,
                                                       'token_file': 'spotify-token.json'},
                             'other': {'kept': True}})
-        write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437, 'cr100_mac': CR, 'bssid': 'dc:a6:32:e7:3b:0e'})
+        write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437, 'bssid': 'dc:a6:32:e7:3b:0e',
+                                        'controllers': [{'mac': CR, 'aid': 1, 'key': '0a' * 16}]})
         self.run_dir = self.dir / 'run'
         self.run_dir.mkdir()
         self.logs = []
@@ -183,7 +184,8 @@ class Controllers(Fixture):
 
     def test_several_controllers_and_rename(self):
         write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437,
-                                        'controllers': [{'mac': CR}, {'mac': '00:0E:58:11:22:33'}]})
+                                        'controllers': [{'mac': CR, 'key': '0a' * 16},
+                                                        {'mac': '00:0E:58:11:22:33', 'key': '0b' * 16}]})
         self.bridge.rename_controller(CR.upper(), 'Kitchen remote')
         names = [c['name'] for c in self.bridge.controllers()['controllers']]
         self.assertEqual(names, ['Kitchen remote', 'Controller 2'])
@@ -194,7 +196,7 @@ class Controllers(Fixture):
         other = '00:0e:58:11:22:33'
         wall = time.time()
         write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437,
-                                        'controllers': [{'mac': CR}, {'mac': other}]})
+                                        'controllers': [{'mac': CR, 'key': '0a' * 16}, {'mac': other, 'key': '0b' * 16}]})
         # An old unaddressed station event cannot be attributed with several
         # controllers; a radio-wide outage belongs to both controllers.
         lines = [{'t': 1, 'event': 'associated'},
@@ -218,7 +220,7 @@ class Controllers(Fixture):
 
     def test_single_controller_list_keeps_legacy_unaddressed_events(self):
         write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437,
-                                        'controllers': [{'mac': CR}]})
+                                        'controllers': [{'mac': CR, 'key': '0a' * 16}]})
         self.link_log(time.time(), last_heard_s=1)
         [controller] = self.bridge.controllers()['controllers']
         self.assertEqual([event['event'] for event in controller['events']],
@@ -231,6 +233,7 @@ class Controllers(Fixture):
         self.assertEqual([webui.signal_bars(r) for r in (5, 15, 63)], [0, 1, 4])
 
     def test_export_pairing_includes_credentials_and_names_without_local_bssid(self):
+        write(self.dir / 'state.json', {'household': HOUSEHOLD, 'freq': 2437, 'bssid': 'dc:a6:32:e7:3b:0e'})
         with self.assertRaises(webui.ApiError) as caught:
             self.bridge.export_pairing()
         self.assertEqual(caught.exception.status, 400)
@@ -242,31 +245,30 @@ class Controllers(Fixture):
         key = '0123456789abcdef0123456789abcdef'
         write(self.dir / 'state.json', {
             'bssid': 'dc:a6:32:e7:3b:0e', 'uuid': 'RINCON_DCA632E73B0E01400',
-            'household': HOUSEHOLD, 'network_key': key, 'freq': 2437, 'cr100_mac': CR,
-            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100}],
+            'household': HOUSEHOLD, 'freq': 2437,
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100, 'key': key}],
         })
         self.bridge.update_config(lambda c: c.update(controllers={
             CR: {'name': 'Living Room', 'visible_components': ['cr100-bridge']},
         }))
         exported = self.bridge.export_pairing()
         self.assertEqual(exported, {
-            'version': 1,
+            'version': 2,
             'household': HOUSEHOLD,
-            'network_key': key,
             'freq': 2437,
-            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100, 'name': 'Living Room'}],
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 7, 'time': 100, 'key': key, 'name': 'Living Room'}],
         })
         self.assertNotIn('bssid', exported)
         self.assertNotIn('uuid', exported)
-        self.assertNotIn('cr100_mac', exported)
+        self.assertNotIn('network_key', exported)
         self.assertNotIn('visible_components', exported['controllers'][0])
 
     def test_import_pairing_binds_local_bssid_preserves_rooms_and_restarts_managed_bridge(self):
         import bridge_service
         key = '0123456789abcdef0123456789abcdef'
         write(self.dir / 'state.json', {
-            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
-            'freq': 2462, 'controllers': [{'mac': CR, 'aid': 1, 'txid': 5}],
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD,
+            'freq': 2462, 'controllers': [{'mac': CR, 'aid': 1, 'txid': 5, 'key': key}],
         })
         self.bridge.rename_controller(CR, 'Den Remote')
         bundle = self.bridge.export_pairing()
@@ -300,28 +302,28 @@ class Controllers(Fixture):
         self.assertEqual(saved_state['bssid'], 'dc:a6:32:aa:bb:cc')
         self.assertEqual(saved_state['uuid'], 'RINCON_DCA632AABBCC01400')
         self.assertEqual(saved_state['household'], HOUSEHOLD)
-        self.assertEqual(saved_state['network_key'], key)
+        self.assertNotIn('network_key', saved_state)
         self.assertEqual(saved_state['freq'], 2462)
-        self.assertEqual(saved_state['controllers'], [{'mac': CR, 'aid': 1, 'txid': 5}])
+        self.assertEqual(saved_state['controllers'], [{'mac': CR, 'aid': 1, 'txid': 5, 'key': key}])
         saved_config = json.loads(target_config.read_text())
         self.assertEqual(saved_config['rooms'], [{'name': 'Garage', 'slot': 0}])
         self.assertEqual(saved_config['other'], {'local': True})
         self.assertEqual(saved_config['controllers'], {CR: {'name': 'Den Remote'}})
         self.assertIn(['systemctl', '--no-block', 'restart', 'cr100-bridge.service'], commands)
 
-    def test_import_pairing_merges_controllers_for_same_household_and_key(self):
+    def test_import_pairing_merges_controllers_for_same_household(self):
         import bridge_service
         key = '0123456789abcdef0123456789abcdef'
         other = '00:0e:58:aa:bb:cc'
         write(self.dir / 'state.json', {
-            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
-            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 4}],
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD,
+            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 4, 'key': key}],
         })
         self.bridge.update_config(lambda c: c.update(controllers={CR: {'name': 'Local Name'}}))
         bundle = {
-            'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
-            'controllers': [{'mac': CR, 'aid': 1, 'txid': 9, 'name': 'Remote Name'},
-                            {'mac': other, 'aid': 2, 'name': 'Patio Remote'}],
+            'version': 2, 'household': HOUSEHOLD, 'freq': 2437,
+            'controllers': [{'mac': CR, 'aid': 1, 'txid': 9, 'key': key, 'name': 'Remote Name'},
+                            {'mac': other, 'aid': 2, 'key': '02' * 16, 'name': 'Patio Remote'}],
         }
         with patch.object(bridge_service, 'radio_mac', return_value='dc:a6:32:e7:3b:0e'):
             result = self.bridge.import_pairing({'data': bundle})
@@ -330,16 +332,16 @@ class Controllers(Fixture):
             # An independent bridge may export a new controller with an AID already in use locally.
             third = '00:0e:58:dd:ee:ff'
             result2 = self.bridge.import_pairing({
-                'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
-                'controllers': [{'mac': third, 'aid': 4, 'name': 'Bedroom'}],
+                'version': 2, 'household': HOUSEHOLD, 'freq': 2437,
+                'controllers': [{'mac': third, 'aid': 4, 'key': '03' * 16, 'name': 'Bedroom'}],
             })
         self.assertTrue(result2['merged'])
         self.assertEqual(result2['controllers'], 3)
         saved_state = json.loads((self.dir / 'state.json').read_text())
         self.assertEqual(saved_state['controllers'], [
-            {'mac': CR, 'aid': 4, 'txid': 9},
-            {'mac': other, 'aid': 1},
-            {'mac': third, 'aid': 2},
+            {'mac': CR, 'aid': 4, 'txid': 9, 'key': key},
+            {'mac': other, 'aid': 1, 'key': '02' * 16},
+            {'mac': third, 'aid': 2, 'key': '03' * 16},
         ])
         self.assertEqual(self.saved()['controllers'], {
             CR: {'name': 'Local Name'},
@@ -351,17 +353,19 @@ class Controllers(Fixture):
         import bridge_service
         key = '0123456789abcdef0123456789abcdef'
         write(self.dir / 'state.json', {
-            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
-            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 1}],
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD,
+            'freq': 2437, 'controllers': [{'mac': CR, 'aid': 1, 'key': key}],
         })
         state_before = (self.dir / 'state.json').read_bytes()
         config_before = self.config.read_bytes()
-        valid = {'version': 1, 'household': HOUSEHOLD, 'network_key': key, 'freq': 2437,
-                 'controllers': [{'mac': CR, 'aid': 1}]}
-        for payload in ('not-a-dict', {'data': 'bad'}, {**valid, 'version': 2}, {**valid, 'version': True},
-                        {**valid, 'household': 'Other_123'}, {**valid, 'network_key': '01'},
+        valid = {'version': 2, 'household': HOUSEHOLD, 'freq': 2437,
+                 'controllers': [{'mac': CR, 'aid': 1, 'key': key}]}
+        for payload in ('not-a-dict', {'data': 'bad'}, {**valid, 'version': 1}, {**valid, 'version': True},
+                        {**valid, 'household': 'Other_123'}, {**valid, 'controllers': [{'mac': CR, 'aid': 1}]},
+                        {**valid, 'controllers': [{'mac': CR, 'key': '01'}]},
+                        {**valid, 'controllers': [{'mac': CR, 'key': key, 'forgotten': True}]},
                         {**valid, 'freq': 2417}, {**valid, 'controllers': []},
-                        {**valid, 'controllers': [{'mac': CR, 'name': 'x' * 31}]}):
+                        {**valid, 'controllers': [{'mac': CR, 'key': key, 'name': 'x' * 31}]}):
             with self.subTest(payload=payload), self.assertRaises(webui.ApiError) as caught:
                 self.bridge.import_pairing({'data': payload} if isinstance(payload, dict) and 'data' not in payload else payload)
             self.assertEqual(caught.exception.status, 400)
@@ -680,8 +684,8 @@ class Http(Fixture):
 
         key = 'fedcba9876543210fedcba9876543210'
         write(self.dir / 'state.json', {
-            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD, 'network_key': key,
-            'freq': 2412, 'controllers': [{'mac': CR, 'aid': 2}],
+            'bssid': 'dc:a6:32:e7:3b:0e', 'household': HOUSEHOLD,
+            'freq': 2412, 'controllers': [{'mac': CR, 'aid': 2, 'key': key}],
         })
         self.bridge.rename_controller(CR, 'Kitchen')
         status, exported = self.call('POST', '/api/controllers/pairing/export', {})
@@ -695,7 +699,7 @@ class Http(Fixture):
         self.assertEqual((imported['household'], imported['channel'], imported['bssid'], imported['controllers']),
                          (HOUSEHOLD, 1, 'dc:a6:32:11:22:33', 1))
         saved = json.loads((self.dir / 'state.json').read_text())
-        self.assertEqual((saved['bssid'], saved['household'], saved['network_key']),
+        self.assertEqual((saved['bssid'], saved['household'], saved['controllers'][0]['key']),
                          ('dc:a6:32:11:22:33', HOUSEHOLD, key))
 
 

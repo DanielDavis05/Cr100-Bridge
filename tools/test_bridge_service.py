@@ -7,8 +7,9 @@ from unittest.mock import Mock, patch
 
 import bridge_service as service
 
-STATE = {'bssid': '02:00:00:00:00:01', 'cr100_mac': '02:00:00:00:00:02',
-         'network_key': '01' * 16, 'household': 'Sonos_test', 'freq': 2437}
+CONTROLLER, CONTROLLER_KEY = '02:00:00:00:00:02', '01' * 16
+STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test', 'freq': 2437,
+         'controllers': [{'mac': CONTROLLER, 'aid': 1, 'key': CONTROLLER_KEY}]}
 
 
 class Process:
@@ -151,13 +152,10 @@ class Services(unittest.TestCase):
         return command
 
     def test_successful_pair_atomically_adds_controller_with_private_permissions(self):
-        changed = {**STATE, 'cr100_mac': '02:00:00:00:00:03', 'txid': 5, 'time': 10}
-        command = self.pair_attempt(changed)
+        added = {'mac': '02:00:00:00:00:03', 'txid': 5, 'time': 10, 'key': '03' * 16}
+        command = self.pair_attempt({**STATE, 'controllers': STATE['controllers'] + [added]})
         saved = json.loads(self.state.read_text())
-        self.assertEqual(saved['cr100_mac'], STATE['cr100_mac'])
-        self.assertEqual(saved['network_key'], STATE['network_key'])
-        self.assertEqual(saved['controllers'], [{'mac': STATE['cr100_mac'], 'aid': 1},
-                         {'mac': changed['cr100_mac'], 'aid': 2, 'txid': 5, 'time': 10}])
+        self.assertEqual(saved['controllers'], [STATE['controllers'][0], {**added, 'aid': 2}])
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.pair_command[self.pair_command.index('--previous-state') + 1], str(self.state))
         command.assert_any_call(['systemctl', '--no-block', 'start', 'cr100-bridge.service'], check=True)
@@ -165,19 +163,20 @@ class Services(unittest.TestCase):
 
     def test_repair_keeps_existing_controller_and_household_metadata(self):
         previous = {**STATE, 'custom': 'household', 'controllers': [
-            {'mac': STATE['cr100_mac'], 'aid': 8, 'time': 1, 'custom': 'controller'},
-            {'mac': '02:00:00:00:00:03', 'aid': 2}]}
+            {'mac': CONTROLLER, 'aid': 8, 'time': 1, 'custom': 'controller', 'key': CONTROLLER_KEY},
+            {'mac': '02:00:00:00:00:03', 'aid': 2, 'key': '03' * 16}]}
         self.state.write_text(json.dumps(previous))
-        self.pair_attempt({**STATE, 'txid': 9, 'time': 20})
+        self.pair_attempt({**STATE, 'controllers': [{'mac': CONTROLLER, 'txid': 9, 'time': 20, 'key': '09' * 16}]})
         saved = json.loads(self.state.read_text())
         self.assertEqual(saved['custom'], 'household')
+        # The re-paired controller keeps its AID; its old key is accepted until the link hears the new one.
         self.assertEqual(saved['controllers'], [
-            {'mac': STATE['cr100_mac'], 'aid': 8, 'time': 20, 'txid': 9, 'custom': 'controller'},
-            {'mac': '02:00:00:00:00:03', 'aid': 2}])
+            {'mac': CONTROLLER, 'aid': 8, 'time': 20, 'txid': 9, 'custom': 'controller', 'key': '09' * 16,
+             'previous_key': CONTROLLER_KEY},
+            {'mac': '02:00:00:00:00:03', 'aid': 2, 'key': '03' * 16}])
 
     def test_pairing_cannot_replace_existing_household_credentials(self):
-        for field, value in (('household', 'Sonos_changed'), ('network_key', '02' * 16),
-                             ('bssid', '02:00:00:00:00:03'), ('freq', 2412)):
+        for field, value in (('household', 'Sonos_changed'), ('bssid', '02:00:00:00:00:03'), ('freq', 2412)):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'cannot change'):
                 self.pair_attempt({**STATE, field: value})
             self.assertEqual(json.loads(self.state.read_text()), STATE)
@@ -186,13 +185,18 @@ class Services(unittest.TestCase):
         self.state.unlink()
         self.pair_attempt(STATE)
         saved = json.loads(self.state.read_text())
-        self.assertEqual(saved['controllers'], [{'mac': STATE['cr100_mac'], 'aid': 1}])
+        self.assertEqual(saved['controllers'], STATE['controllers'])
 
-    def test_validate_state_accepts_multiple_without_legacy_alias(self):
-        state = {key: value for key, value in STATE.items() if key != 'cr100_mac'}
-        state['controllers'] = [{'mac': STATE['cr100_mac'], 'aid': 5}, {'mac': '02:00:00:00:00:03'}]
+    def test_validate_state_accepts_multiple_and_needs_an_active_keyed_controller(self):
+        state = {**STATE, 'controllers': [{'mac': CONTROLLER, 'aid': 5, 'key': CONTROLLER_KEY},
+                                          {'mac': '02:00:00:00:00:03', 'key': '03' * 16}]}
         self.state.write_text(json.dumps(state))
         self.assertEqual([c['aid'] for c in service.validate_state(self.state)['controllers']], [5, 1])
+        for controllers, error in (([{'mac': CONTROLLER}], 'link key'),
+                                   ([{'mac': CONTROLLER, 'key': CONTROLLER_KEY, 'forgotten': True}], 'No paired')):
+            with self.subTest(error=error):
+                self.state.write_text(json.dumps({**STATE, 'controllers': controllers}))
+                with self.assertRaisesRegex(ValueError, error): service.validate_state(self.state)
 
     def test_pairing_retains_channel_and_bssid_from_the_current_household(self):
         previous = {**STATE, 'freq': 2462}
@@ -214,8 +218,8 @@ class Services(unittest.TestCase):
         self.assertEqual(len(self.commands.call_args_list), 1)  # stopped, never restarted without state
 
     def test_invalid_pair_output_cannot_destroy_previous_pairing(self):
-        with self.assertRaisesRegex(ValueError, 'network key'):
-            self.pair_attempt({**STATE, 'network_key': '01'})
+        with self.assertRaisesRegex(ValueError, 'link key'):
+            self.pair_attempt({**STATE, 'controllers': [{'mac': CONTROLLER, 'key': '01'}]})
         self.assertEqual(json.loads(self.state.read_text()), STATE)
 
 

@@ -2,8 +2,9 @@
 """T2: pair a CR100 with the bridge over SonosNet Netstart (802.11 probe IEs).
 
 Acts as the player: broadcasts ALIVE, answers the CR100's QUERY with a RESPONSE
-carrying the bridge household and a 16-byte network key RSA-encrypted to the
-CR100's public key, then saves the result. Frame layout matches the ZP80 in
+carrying the bridge household and a 16-byte link key RSA-encrypted to the
+CR100's public key, then saves the result. Each CR100 gets its own random key, so
+no controller can read or forge another's traffic. Frame layout matches the ZP80 in
 'Physical CR100 Pairing (channel 1).pcap': broadcast probe request, SSID IE
 'Rincon Netstart 1.0', payload split over IE 0x46 chunks, flags byte 2.
 
@@ -107,16 +108,18 @@ def new_household():
 
 
 class Pairer:
-    def __init__(self, uuid, household, network_key, freq, log=print, *,
-                 response_limit=RESPONSE_CACHE_LIMIT, controller_limit=MAX_AID):
-        if len(uuid) != 24 or not 0 < len(household) <= 32 or len(network_key) != 16:
-            raise ValueError('Need a 24-byte UUID, 1..32-byte household and 16-byte key')
+    def __init__(self, uuid, household, freq, log=print, *,
+                 response_limit=RESPONSE_CACHE_LIMIT, controller_limit=MAX_AID, new_key=None):
+        if len(uuid) != 24 or not 0 < len(household) <= 32:
+            raise ValueError('Need a 24-byte UUID and 1..32-byte household')
         if freq not in VALID_FREQS: raise ValueError('CR100 accepts only 2412, 2437 or 2462 MHz')
         if type(response_limit) is not int or response_limit < 1:
             raise ValueError('Response cache limit must be positive')
         if type(controller_limit) is not int or not 1 <= controller_limit <= MAX_AID:
             raise ValueError('Invalid pairing controller limit')
-        self.uuid, self.household, self.network_key, self.freq, self.log = uuid, household, network_key, freq, log
+        self.uuid, self.household, self.freq, self.log = uuid, household, freq, log
+        # One fresh link key per controller, reused for its repeated QUERYs in this window.
+        self.new_key = new_key or (lambda: secrets.token_bytes(16))
         self.response_limit, self.controller_limit = response_limit, controller_limit
         self.responses = OrderedDict()  # bounded (mac, txid) -> cached RESPONSE ciphertext
         self.cache_evictions = self.dropped_controllers = 0
@@ -139,7 +142,10 @@ class Pairer:
                 return []
             key = (src, txid)
             if key not in self.responses:
-                encrypted = rsa_encrypt_key(fields.get(3, b''), self.network_key)
+                record = self.paired_controllers.get(src)
+                link_key = bytes.fromhex(record['key']) if record else self.new_key()
+                if len(link_key) != 16: raise RuntimeError('Link keys are 16 bytes')
+                encrypted = rsa_encrypt_key(fields.get(3, b''), link_key)
                 self.responses[key] = encode(RESPONSE, [(0, self.uuid), (1, txid), (2, self.household),
                     (3, PLAYER_PUBLIC_KEY), (4, encrypted), (5, struct.pack('!I', self.freq)),
                     (6, struct.pack('!I', 1))])
@@ -148,7 +154,8 @@ class Pairer:
                     self.cache_evictions += 1
                 self.log({'event': 'QUERY', 'from': src, 'txid': int.from_bytes(txid, 'big'),
                           'cr100_tag6': int.from_bytes(fields.get(6, b'\0'), 'big'), 'signed': 16 in fields})
-                self.paired = {'cr100_mac': src, 'txid': int.from_bytes(txid, 'big'), 'time': time.time()}
+                self.paired = {'mac': src, 'txid': int.from_bytes(txid, 'big'), 'time': time.time(),
+                               'key': link_key.hex()}
                 self.paired_controllers[src] = self.paired
             self.responses.move_to_end(key)
             return [self.responses[key]]
@@ -204,8 +211,7 @@ def initial_state(args):
     elif args.previous_state:
         raise ValueError('Previous pairing state does not exist')
     requested = {'bssid': normalize_mac(args.mac) if args.mac else None,
-                 'freq': args.freq, 'household': args.household,
-                 'network_key': bytes.fromhex(args.key).hex() if args.key else None}
+                 'freq': args.freq, 'household': args.household}
     if previous:
         for field, value in requested.items():
             if value is not None and value != previous[field]:
@@ -215,15 +221,18 @@ def initial_state(args):
         raise ValueError('--mac is required for the first controller')
     return {'bssid': requested['bssid'], 'uuid': player_uuid(requested['bssid']).decode(),
             'freq': requested['freq'] if requested['freq'] is not None else 2412,   # setup channel 1
-            'household': requested['household'] or new_household().decode(),
-            'network_key': requested['network_key'] or secrets.token_bytes(16).hex()}
+            'household': requested['household'] or new_household().decode(), 'controllers': []}
 
 
 def save_pairing(path, state, controllers):
     """Atomically persist all paired controllers with private file permissions."""
     for controller in controllers:
         state = merge_controller(state, controller)
-    state = normalize_state(state)
+    return write_state(path, normalize_state(state))
+
+
+def write_state(path, state):
+    """Atomically replace the pairing state file (mode 0600: it holds the link keys)."""
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.pair-state-', suffix='.json', dir=path.parent)
     try:
@@ -243,8 +252,8 @@ def run(args):
 
     state_path = Path(args.state)
     mac, freq = state['bssid'], state['freq']
-    network_key, household = bytes.fromhex(state['network_key']), state['household'].encode()
-    pairer = Pairer(player_uuid(mac), household, network_key, freq,
+    household = state['household'].encode()
+    pairer = Pairer(player_uuid(mac), household, freq,
                     log=lambda record: print(json.dumps(record), flush=True))
     sock = conf.L2socket(iface=args.iface)
     # Scapy's native Linux L2Socket sends through outs. Do not let an injection
@@ -327,7 +336,6 @@ def main():
     parser.add_argument('--mac', help='bridge MAC: defaults to existing state; required for first pairing')
     parser.add_argument('--freq', type=int, help='MHz: defaults to existing state, otherwise 2412')
     parser.add_argument('--household', help='defaults to existing state, otherwise a new household')
-    parser.add_argument('--key', help='network key: defaults to existing state, otherwise random')
     parser.add_argument('--state', default='bridge-state.json')
     parser.add_argument('--previous-state', help='read existing household here and write merged state to --state')
     parser.add_argument('--seconds', type=float, default=600)

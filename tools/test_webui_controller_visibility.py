@@ -29,7 +29,7 @@ class Fixture(unittest.TestCase):
             'spotify_music_service': {'controller_menus': {CR1: {'items': ['unchanged']}}},
             'other': {'keep': True}}))
         self.state = self.root / 'state.json'
-        self.state.write_text(json.dumps({'controllers': [{'mac': CR1}, {'mac': CR2}]}))
+        self.state.write_text(json.dumps({'controllers': [{'mac': CR1, 'key': '01' * 16}, {'mac': CR2, 'key': '02' * 16}]}))
         self.bridge = webui.Bridge(self.config, self.state, None, self.root / 'pid',
                                    webui.DataFile(self.root / 'webui.json'), log=lambda _: None)
         self.addCleanup(self.bridge.close)

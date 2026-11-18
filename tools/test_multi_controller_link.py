@@ -10,13 +10,13 @@ import frames
 import sonosnet_link as sl
 
 
-STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test',
-         'network_key': '0123456789abcdef0123456789abcdef', 'freq': 2437,
-         'controllers': [{'mac': '02:00:00:00:00:02', 'aid': 1},
-                         {'mac': '02:00:00:00:00:03', 'aid': 65}]}
+STATE = {'bssid': '02:00:00:00:00:01', 'household': 'Sonos_test', 'freq': 2437,
+         'controllers': [{'mac': '02:00:00:00:00:02', 'aid': 1, 'key': '0123456789abcdef0123456789abcdef'},
+                         {'mac': '02:00:00:00:00:03', 'aid': 65, 'key': 'fedcba9876543210fedcba9876543210'}]}
 AP = frames.mac_bytes(STATE['bssid'])
 FIRST, SECOND = (frames.mac_bytes(record['mac']) for record in STATE['controllers'])
-KEY = bytes.fromhex(STATE['network_key'])
+# Each controller's own link key, by its MAC.
+KEYS = {frames.mac_bytes(record['mac']): bytes.fromhex(record['key']) for record in STATE['controllers']}
 OTHER = frames.mac_bytes('02:00:00:00:00:99')
 
 
@@ -44,13 +44,14 @@ def null(mac, pm=True, receiver=AP, bssid=AP):
     return bytes((0x48, 0x01 | (0x10 if pm else 0))) + b'\0\0' + receiver + mac + bssid + b'\x20\x00'
 
 
-def data(mac, inner, pn, receiver=AP, bssid=AP):
+def data(mac, inner, pn, receiver=AP, bssid=AP, key=None):
     header = b'\x08\x51\0\0' + receiver + mac + bssid + b'\x30\x00'
-    return ccmp.encrypt(header, ccmp.SNAP_PREFIX + b'\x69\x69' + inner, KEY, pn)
+    return ccmp.encrypt(header, ccmp.SNAP_PREFIX + b'\x69\x69' + inner, key or KEYS[mac], pn)
 
 
-def decode(frame):
-    pn, key_id, plaintext = ccmp.decrypt(frame, KEY)
+def decode(frame, key=None):
+    """Decrypt a frame the link sent, with its destination's key unless one is given."""
+    pn, key_id, plaintext = ccmp.decrypt(frame, key or KEYS[frame[4:10]])
     if key_id != 2 or plaintext[:8] != ccmp.SNAP_PREFIX + b'\x69\x69':
         raise AssertionError('Unexpected SonosNet data envelope')
     return frame[4:10], pn, bool(frame[1] & 0x20), plaintext[8:]

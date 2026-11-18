@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from controller_state import controller_records, merge_controller, normalize_mac, normalize_state
+from controller_state import active_controllers, controller_records, merge_controller, normalize_mac, normalize_state
 
 HERE = Path(__file__).resolve().parent
 DATA = Path('/var/lib/cr100-bridge')
@@ -38,9 +38,7 @@ def validate_state(path):
     except (KeyError, ValueError):
         raise ValueError('Invalid bssid') from None
     state = normalize_state(state)
-    if not state['controllers']: raise ValueError('No paired controllers')
-    if len(bytes.fromhex(state['network_key'])) != 16: raise ValueError('Invalid network key')
-    state['network_key'] = bytes.fromhex(state['network_key']).hex()
+    if not active_controllers(state): raise ValueError('No paired controllers')
     if state['freq'] not in (2412, 2437, 2462): raise ValueError('Invalid radio frequency')
     if not state['household'].startswith('Sonos_') or len(state['household']) > 32:
         raise ValueError('Invalid household')
@@ -321,7 +319,7 @@ def pair_in_link(run_dir, seconds=None, clock=time.monotonic, wall=time.time, sl
 
 
 def pair(state_path, run_dir):
-    """Add to the current household; preserve its keys and controllers on failure."""
+    """Add to the current household; preserve its controllers and their keys on failure."""
     import link_pairing
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / 'pair.lock').open('w') as lock:
@@ -356,7 +354,7 @@ def pair(state_path, run_dir):
             if not temporary.exists(): raise RuntimeError('No CR100 responded within three minutes. Try pairing again.')
             paired = validate_state(temporary)
             if previous:
-                for field in ('bssid', 'household', 'network_key', 'freq'):
+                for field in ('bssid', 'household', 'freq'):
                     if paired[field] != previous[field]:
                         raise ValueError('Pairing cannot change existing household ' + field)
                 merged = previous

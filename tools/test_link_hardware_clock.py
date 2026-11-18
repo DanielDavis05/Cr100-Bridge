@@ -171,8 +171,8 @@ class HardwareClockLink(unittest.TestCase):
         self.assertEqual(len(faults), 1)
         self.assertEqual(faults[0]['clock']['last_error'], 'Synthetic sample timeout')
         self.assertEqual(faults[0]['clock']['helper']['last_fault'], 'Synthetic IPC timeout')
-        self.assertNotIn(STATE['network_key'], json.dumps(faults))
-        self.assertNotIn('network_key', json.dumps(faults))
+        self.assertNotIn(STATE['controllers'][0]['key'], json.dumps(faults))
+        self.assertNotIn('key', json.dumps(faults))
         self.assertEqual(link.radio.sent, [])
 
     def test_next_grid_failure_is_logged_before_any_injection(self):

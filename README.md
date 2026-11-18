@@ -194,14 +194,25 @@ sudo cr100-bridge stop
 ```
 
 A failed pairing attempt retains the previous pairing and restarts that bridge.
-Additional controllers share the existing household, channel, and network key;
-paired controllers stay connected while another one pairs. A CR100 pairs only on
-channel 1, so on channel 6 or 11 the bridge visits channel 1 between beacons during
-the pairing window; other controllers respond a little more slowly until it ends.
-If the running bridge doesn't take the request within 20 s, pairing pauses the
-bridge as before. Pairing a known controller
-does not add a duplicate. Older single-controller state files remain supported.
-No default network key, live controller state, HA token, or Spotify credential is shipped.
+Additional controllers share the existing household and channel, but each CR100
+gets its own random link key when it pairs, so one controller cannot read or forge
+another's traffic. Paired controllers stay connected while another one pairs. A
+CR100 pairs only on channel 1, so on channel 6 or 11 the bridge visits channel 1
+between beacons during the pairing window; other controllers respond a little more
+slowly until it ends. If the running bridge doesn't take the request within 20 s,
+pairing pauses the bridge as before. Pairing a known controller does not add a
+duplicate; it gives that controller a new key, and the bridge still accepts its old
+key until it hears the new one, in case the pairing stopped halfway. State files
+from before per-controller keys are not supported: pair each controller again.
+No default link key, live controller state, HA token, or Spotify credential is shipped.
+
+**Forget** on a controller in the Controllers page makes the bridge stop answering
+that CR100 within a few seconds, without restarting the radio or affecting the
+other controllers. Its key no longer gets it any access. The bridge keeps its
+settings, association ID and key, so **Restore** under *Forgotten controllers* lets
+it reconnect as before; pairing it again also restores it, with a new key. The last
+remaining controller cannot be forgotten. Pairing exports include each controller's
+key (format version 2); exports from older bridges cannot be imported.
 
 The radio tracks each controller's association, power saving, buffered traffic,
 and link status independently. The Controllers page shows each controller's own

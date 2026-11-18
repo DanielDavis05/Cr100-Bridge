@@ -64,7 +64,7 @@ class MenuFixture(unittest.TestCase):
         self.config.write_text(json.dumps({'backend': 'sonos', 'controllers': {CR1: {'name': 'Kitchen'}, CR2: {'name': 'Den'}},
             'other_setting': 'preserve', 'spotify_music_service': {'enabled': True, 'client_id': 'a' * 32,
                 'token_file': 'spotify-token.json', 'name': 'Spotify'}}))
-        self.state.write_text(json.dumps({'controllers': [{'mac': CR1}, {'mac': CR2}]}))
+        self.state.write_text(json.dumps({'controllers': [{'mac': CR1, 'key': '01' * 16}, {'mac': CR2, 'key': '02' * 16}]}))
         self.logs, self.exchanges, self.providers = [], [], []
         def factory(*args, **kwargs):
             provider = FakeFolders(); self.providers.append(provider); return provider

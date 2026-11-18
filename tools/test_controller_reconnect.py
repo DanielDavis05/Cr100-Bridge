@@ -59,11 +59,11 @@ class ReconnectPolicy(unittest.TestCase):
         self.assertTrue(station.dozing)
         self.assertFalse(station.auto_reconnect)
         self.assertEqual(station.aid, 65)
-        self.assertEqual(link.key.hex(), STATE['network_key'])
+        self.assertEqual(station.key.hex(), STATE['controllers'][1]['key'])
 
     def test_live_reload_changes_only_policy_and_obeys_one_second_interval(self):
         link = self.paused()
-        station, start, key = link.stations[SECOND], link.start, link.key
+        station, start, key = link.stations[SECOND], link.start, link.stations[SECOND].key
         self.config.write_text(json.dumps({'controllers': {SECOND_MAC: {'auto_reconnect': True}},
                                           'private_setting': 'never-log-this'}))
         link.reload_reconnect_policy(start + .5)
@@ -71,7 +71,7 @@ class ReconnectPolicy(unittest.TestCase):
         link.reload_reconnect_policy(start + 1.01)
         self.assertTrue(station.auto_reconnect)
         self.assertIs(link.stations[SECOND], station)
-        self.assertEqual((link.start, link.key), (start, key))
+        self.assertEqual((link.start, station.key), (start, key))
         self.assertNotIn('never-log-this', json.dumps(self.logs))
 
     def test_malformed_or_unreadable_updates_keep_last_good_policy(self):

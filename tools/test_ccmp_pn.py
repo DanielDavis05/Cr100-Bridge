@@ -11,8 +11,7 @@ from unittest.mock import patch
 import ccmp_pn as pn
 
 BSSID = bytes.fromhex('020000000001')
-KEY = bytes.fromhex('0123456789abcdef0123456789abcdef')
-FINGERPRINT = hashlib.sha256(BSSID + KEY).hexdigest()
+FINGERPRINT = hashlib.sha256(b'cr100-bridge-tx:' + BSSID).hexdigest()
 
 
 class PacketNumberReservations(unittest.TestCase):
@@ -23,7 +22,7 @@ class PacketNumberReservations(unittest.TestCase):
 
     def allocator(self, **kwargs):
         options = {'minimum': 0, 'block_size': 4, **kwargs}
-        return pn.PacketNumbers(self.path, BSSID, KEY, **options)
+        return pn.PacketNumbers(self.path, BSSID, **options)
 
     def state(self): return json.loads(self.path.read_text())
 
@@ -62,13 +61,13 @@ class PacketNumberReservations(unittest.TestCase):
             allocator.ensure(14)
             self.assertEqual(self.state()['high_water'][FINGERPRINT], 16)
 
-    def test_rotating_keys_and_bssids_preserves_previous_reservations(self):
+    def test_changing_bssids_preserves_previous_reservations(self):
         with self.allocator() as allocator: allocator.ensure(1)
-        other_key, other_bssid = bytes([7]) * 16, bytes.fromhex('020000000099')
-        with pn.PacketNumbers(self.path, BSSID, other_key, minimum=10, block_size=4) as allocator:
+        other_bssid, third_bssid = bytes.fromhex('020000000099'), bytes.fromhex('0200000000aa')
+        with pn.PacketNumbers(self.path, other_bssid, minimum=10, block_size=4) as allocator:
             self.assertEqual(allocator.initial, 10)
             allocator.ensure(11)
-        with pn.PacketNumbers(self.path, other_bssid, KEY, minimum=20, block_size=4) as allocator:
+        with pn.PacketNumbers(self.path, third_bssid, minimum=20, block_size=4) as allocator:
             self.assertEqual(allocator.initial, 20)
             allocator.ensure(21)
         before = self.state()['high_water']
@@ -170,8 +169,8 @@ class PacketNumberReservations(unittest.TestCase):
             with self.subTest(minimum=minimum), self.assertRaises(ValueError): self.allocator(minimum=minimum)
         for block_size in (0, -1, True, 1.5):
             with self.subTest(block_size=block_size), self.assertRaises(ValueError): self.allocator(block_size=block_size)
-        for bssid, key in ((b'', KEY), (BSSID, b'')):
-            with self.assertRaises(ValueError): pn.PacketNumbers(self.path, bssid, key)
+        for bssid in (b'', BSSID[:5], 'bssid'):
+            with self.assertRaises(ValueError): pn.PacketNumbers(self.path, bssid)
         allocator = self.allocator()
         self.addCleanup(allocator.close)
         allocator.ensure(1)

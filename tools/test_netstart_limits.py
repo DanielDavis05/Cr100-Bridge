@@ -19,7 +19,7 @@ FIRST, SECOND, THIRD = ('02:00:00:00:00:02', '02:00:00:00:00:03', '02:00:00:00:0
 class PairingLimits(unittest.TestCase):
     def pairer(self, **settings):
         return pair.Pairer(pair.player_uuid(STATE['bssid']), STATE['household'].encode(),
-                           bytes.fromhex(STATE['network_key']), STATE['freq'], log=lambda _: None, **settings)
+                           STATE['freq'], log=lambda _: None, **settings)
 
     def query(self, pairer, txid):
         return pair.encode(pair.QUERY, [(0, pairer.uuid), (1, struct.pack('!I', txid)),
@@ -167,8 +167,9 @@ class PairingLoopDeadlines(unittest.TestCase):
                     patch('builtins.print'):
                 pair.run(args)
             saved = json.loads(state_path.read_text())
-            self.assertEqual(saved['network_key'], STATE['network_key'])
+            self.assertNotIn('network_key', saved)
             self.assertIn(FIRST, {record['mac'] for record in saved['controllers']})
+            self.assertTrue(all(len(bytes.fromhex(record['key'])) == 16 for record in saved['controllers']))
         sock.outs.setblocking.assert_called_once_with(False)
         sock.close.assert_called_once_with()
         sniffer.stop.assert_called_once_with()

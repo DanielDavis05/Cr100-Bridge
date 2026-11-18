@@ -11,6 +11,7 @@ The pairing command (``bridge_service.py pair``) opens a window by writing
 ``pair-request.json`` in the run directory, and reads progress from
 ``pair-status.json``. A new controller is saved to the pairing state and added as a
 station before its RESPONSE is released, so its first association is recognised.
+Each controller's RESPONSE carries its own new link key (netstart_pair.Pairer).
 """
 from __future__ import annotations
 
@@ -80,8 +81,7 @@ class Session:
         self.persist, self.log, self.clock, self.wall = persist, log, clock, wall
         bssid = normalize_mac(state['bssid'])
         self.bssid = bssid
-        self.pairer = netstart.Pairer(netstart.player_uuid(bssid), state['household'].encode(),
-                                      bytes.fromhex(state['network_key']), state['freq'],
+        self.pairer = netstart.Pairer(netstart.player_uuid(bssid), state['household'].encode(), state['freq'],
                                       log=lambda record: log({**record, 'pairing': self.id}))
         self.alive = self.pairer.alive()
         self.persisted = {}       # mac -> record
@@ -112,7 +112,8 @@ class Session:
             with self.persist_lock:
                 if src not in self.persisted:
                     try:
-                        self.persist({'mac': src, 'txid': record['txid'], 'time': round(record['time'], 3)})
+                        self.persist({'mac': src, 'txid': record['txid'], 'time': round(record['time'], 3),
+                                      'key': record['key']})
                     except Exception as error:     # retried on the next QUERY
                         self.errors['persist'] += 1
                         self.log({'event': 'pairing-save-failed', 'mac': src, 'error': str(error)})
