@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from controller_state import active_controllers, controller_records, merge_controller, normalize_mac, normalize_state
+from controller_state import controller_records, merge_controller, normalize_mac, normalize_state
 
 HERE = Path(__file__).resolve().parent
 DATA = Path('/var/lib/cr100-bridge')
@@ -31,18 +31,35 @@ STARTUP_COMMAND_TIMEOUT = 3.0
 
 
 def validate_state(path):
-    """Reject incomplete pairing output before changing a working household."""
+    """Reject incomplete pairing output before changing a working household.
+
+    A household may have no controllers: it is created on first run (ensure_household)
+    and returns to that when every controller is forgotten.
+    """
     state = json.loads(Path(path).read_text())
     try:
         state['bssid'] = normalize_mac(state['bssid'])
     except (KeyError, ValueError):
         raise ValueError('Invalid bssid') from None
     state = normalize_state(state)
-    if not active_controllers(state): raise ValueError('No paired controllers')
     if state['freq'] not in (2412, 2437, 2462): raise ValueError('Invalid radio frequency')
     if not state['household'].startswith('Sonos_') or len(state['household']) > 32:
         raise ValueError('Invalid household')
     return state
+
+
+def ensure_household(state_path, mac=None):
+    """Create the household on first run, so the radio link runs before any pairing.
+
+    Every pairing then happens inside the running link. Nothing can connect until a
+    controller pairs: each one gets its own key then.
+    """
+    if state_path.exists(): return False
+    import netstart_pair
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state = netstart_pair.write_state(state_path, netstart_pair.household_state(mac or radio_mac()))
+    log(event='household-created', household=state['household'], bssid=state['bssid'], freq=state['freq'])
+    return True
 
 
 def check_routes():
@@ -187,6 +204,7 @@ def supervise(state_path, config_path, run_dir, stop=None):
     # Old wall-clock samples must not make a new, failed start look healthy.
     for name in ('link.jsonl', 'link.jsonl.1', 'players.pid'):
         (run_dir / name).unlink(missing_ok=True)
+    ensure_household(state_path)
     state = validate_state(state_path)
     check_routes()
     prepare_radio({2412: 1, 2437: 6, 2462: 11}[state['freq']])

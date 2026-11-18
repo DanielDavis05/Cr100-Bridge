@@ -477,7 +477,6 @@ const EVENT_TEXT = {
   disassoc: 'Disconnected',
   deauth: 'Disconnected',
   'controller-added': 'Paired with the bridge',
-  'controller-restored': 'Restored after being forgotten',
   'controller-rekeyed': 'Paired again with a new key',
   'controller-key-confirmed': 'Using its new key',
   'controller-previous-key': 'Still using its old key; pair it again if this persists',
@@ -486,7 +485,7 @@ const EVENT_TEXT = {
 const EVENT_TONE = {
   associated: 'good', resumed: 'good', 'link-heard': 'good', 'radio-reopened': 'good',
   'link-silent': 'idle', 'cr100-searching': 'wait', 'radio-lost': 'alert', disassoc: 'bad', deauth: 'bad',
-  'controller-added': 'good', 'controller-restored': 'good', 'controller-rekeyed': 'good',
+  'controller-added': 'good', 'controller-rekeyed': 'good',
   'controller-key-confirmed': 'good', 'controller-previous-key': 'wait',
 };
 
@@ -506,7 +505,6 @@ views.controllers = {
     const openLogs = new Set();
     let renaming = false;
     let importing = false;
-    let forgottenOpen = false;   // kept across the 3 s refreshes, like an open event log
 
     const updateDevicesStatus = (data) => {
       const node = $('.smart-device-status', main);
@@ -549,33 +547,9 @@ views.controllers = {
         main.append(el(`<div class="popup" role="status"><h3>Controller speakers need attention</h3><p>${escapeHtml(data.speaker_health.message)}</p><p>A working radio connection does not mean the controller’s speakers are ready.</p></div>`));
       }
       const pairingRunning = Boolean(data.pairing?.running);
-      const lastActive = data.controllers.length <= 1;
-      data.controllers.forEach((c) => main.append(card(c, { pairingRunning, lastActive })));
+      const last = data.controllers.length === 1;
+      data.controllers.forEach((c) => main.append(card(c, { pairingRunning, last })));
       if (!data.controllers.length) main.append(el(`<p class="empty">No controller is paired yet. Pair one below.</p>`));
-      const forgotten = data.forgotten || [];
-      if (forgotten.length) {
-        const section = el(`<details class="panel forgotten-controllers"${forgottenOpen ? ' open' : ''}><summary>${CHEVRON}<span class="strip-title">Forgotten controllers</span><span class="meta">${forgotten.length}</span></summary>
-          <p class="hint">The bridge ignores these. Restore one to let it reconnect with its settings, or pair it again.</p>
-          <div class="settings-list"></div></details>`);
-        for (const f of forgotten) {
-          const row = el(`<div class="setting"><span class="what"><span class="main">${escapeHtml(f.name)}</span>
-            <span class="sub">${escapeHtml(f.mac)}</span></span>
-            <button type="button" class="inline-button quiet restore-controller" ${pairingRunning ? 'disabled' : ''}>Restore</button></div>`);
-          $('.restore-controller', row).addEventListener('click', async (event) => {
-            event.currentTarget.disabled = true;
-            try {
-              const result = await api('POST', `/api/controllers/${f.mac}/restore`, {});
-              toast('Controller restored', result.message);
-            } catch (error) {
-              toast('Not restored', error.message, true);
-            }
-            await refresh();
-          });
-          $('.settings-list', section).append(row);
-        }
-        section.addEventListener('toggle', () => { forgottenOpen = section.open; });
-        main.append(section);
-      }
 
       main.append(el(`<h2 class="group-title">Bridge updates</h2>`), el(`<section class="panel bridge-update-status" role="status">
         <div class="strip-head"><span class="dot idle"></span><span class="bridge-update-message"></span><span class="meta"></span></div>
@@ -592,7 +566,7 @@ views.controllers = {
       main.append(el(`<h2 class="group-title">Pairing</h2>`), el(`<section class="popup pairing">
         <dl class="meta-grid"><div><dt>Household</dt><dd>${escapeHtml(data.household || 'Not paired')}</dd></div>
           <div><dt>Radio channel</dt><dd>${escapeHtml(data.channel ?? 'Unknown')}</dd></div></dl>
-        ${data.controllers.length ? `<div class="pair-row"><p class="hint">Channel 1 is where a CR100 pairs, so pairing on it needs no channel switching. Pick another channel if channel 1 is crowded.</p>
+        ${data.household ? `<div class="pair-row"><p class="hint">Channel 1 is where a CR100 pairs, so pairing on it needs no channel switching. Pick another channel if channel 1 is crowded.</p>
           <div class="radio-actions"><select id="radio-channel" aria-label="Radio channel" ${!pairing.available || pairing.running ? 'disabled' : ''}>${channelChoices}</select>
             <button type="button" class="inline-button quiet" id="radio-channel-save" disabled>Change channel</button></div></div>` : ''}
         <div class="pair-row"><span class="dot ${pairState[0]}"></span><p>${pairState[1]}</p>
@@ -696,7 +670,7 @@ views.controllers = {
       return node;
     };
 
-    const card = (c, { pairingRunning = false, lastActive = false } = {}) => {
+    const card = (c, { pairingRunning = false, last = false } = {}) => {
       const dot = { connected: 'good', dozing: 'idle', searching: 'wait' }[c.status] || 'bad';
       const awake = ['connected', 'dozing'].includes(c.status);
       const paused = c.auto_reconnect === false;
@@ -729,8 +703,8 @@ views.controllers = {
               <span class="sub">Leave on, even while it is switched off. Turn off only to troubleshoot.</span></span>
               <input type="checkbox" class="controller-reconnect" ${paused ? '' : 'checked'}><span class="box">${ICONS.tick}</span></label>
             <div class="setting"><span class="what"><span class="main">Forget this controller</span>
-              <span class="sub">${lastActive ? 'Pair another controller before forgetting this one.' : 'The bridge stops answering it. Restore it, or pair it again, to bring it back.'}</span></span>
-              <button type="button" class="inline-button quiet forget-controller" ${lastActive || pairingRunning ? 'disabled' : ''}>Forget</button></div>
+              <span class="sub">Removes it and its settings from the bridge. Pair it again to bring it back.</span></span>
+              <button type="button" class="inline-button quiet forget-controller" ${pairingRunning ? 'disabled' : ''}>Forget</button></div>
           </div>
         </div></section>`);
       node.dataset.mac = c.mac;
@@ -758,7 +732,10 @@ views.controllers = {
         } finally { input.disabled = false; }
       });
       $('.forget-controller', node).addEventListener('click', async (event) => {
-        if (!confirm(`Forget ${c.name}? The bridge stops answering it within a few seconds; the other controllers are not affected. Its settings are kept so you can restore it, or pair it again.`)) return;
+        const effect = last
+          ? 'This is the last controller: the bridge goes back to having none paired, as when it was installed.'
+          : 'The other controllers are not affected.';
+        if (!confirm(`Forget ${c.name}? The bridge stops answering it within a few seconds and removes its settings. ${effect} To use it again, pair it again.`)) return;
         event.currentTarget.disabled = true;
         try {
           const result = await api('POST', `/api/controllers/${c.mac}/forget`, {});

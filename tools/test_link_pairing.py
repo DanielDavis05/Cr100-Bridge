@@ -55,7 +55,8 @@ def netstart_messages(sent):
     return found
 
 
-class LinkPairing(unittest.TestCase):
+class LinkHarness(unittest.TestCase):
+    """A link on a fake radio with a real state file and run directory; no tests of its own."""
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -64,8 +65,9 @@ class LinkPairing(unittest.TestCase):
         self.addCleanup(tap.close); self.addCleanup(self.tap.close)
         self.tap_fd = tap.fileno()
 
-    def link(self, freq=2437):
+    def link(self, freq=2437, controllers=None):
         state = {**STATE, 'freq': freq}
+        if controllers is not None: state['controllers'] = controllers
         self.state_path = self.folder / 'bridge-state.json'
         self.state_path.write_text(json.dumps(state))
         self.radio, self.logs, self.tunes = Radio(), [], []
@@ -81,6 +83,8 @@ class LinkPairing(unittest.TestCase):
     def status(self):
         return json.loads((self.folder / link_pairing.PAIR_STATUS).read_text())
 
+
+class LinkPairing(LinkHarness):
     def test_channel_1_household_pairs_without_any_channel_change(self):
         link = self.link(freq=2412)
         self.request()
@@ -253,6 +257,41 @@ class LinkPairing(unittest.TestCase):
         self.assertIsNone(link_pairing.read_request(self.folder / 'missing.json'))
 
 
+class EmptyHousehold(LinkHarness):
+    """A household with no controllers: first run, or every controller forgotten."""
+    def frames_by_type(self):
+        return [(frame[0] >> 2 & 3, frame[0] >> 4) for frame in self.radio.sent]
+
+    def test_link_runs_silently_until_a_controller_pairs(self):
+        link = self.link(freq=2412, controllers=[])
+        self.assertEqual(link.stations, {})
+        link.run_main(0.25)
+        self.assertEqual(self.radio.sent, [])                    # no beacons, no probes
+        link.persist_controller({'mac': NEW, 'txid': 1, 'time': 1.0, 'key': KEY})
+        link.run_main(0.6)
+        self.assertIn((0, 8), self.frames_by_type())             # beacons, now that one is paired
+
+    def test_pairing_stays_on_the_setup_channel_when_nothing_is_home(self):
+        link = self.link(freq=2437, controllers=[])
+        self.request()
+        link.service_pairing(time.monotonic(), None)             # no beacon grid needed
+        self.assertEqual(self.tunes, [1])
+        self.assertEqual(netstart_messages(self.radio.sent)[0][0], netstart.ALIVE)
+        settle(link)
+        self.assertEqual(self.tunes, [1])                        # it stays there
+        link.on_frame(query_frame())
+        settle(link)
+        responses = [fields for kind, fields in netstart_messages(self.radio.sent) if kind == netstart.RESPONSE]
+        self.assertEqual(len(responses), link_pairing.RESPONSE_COPIES)
+        self.assertEqual(struct.unpack('!I', responses[0][5])[0], 2437)   # the household's own channel
+        saved = json.loads(self.state_path.read_text())
+        self.assertEqual([(c['mac'], c['aid']) for c in saved['controllers']], [(NEW, 1)])
+        # With a controller to serve, the short lease ends and the radio goes home.
+        time.sleep(link_pairing.MIN_AWAY + 0.005)
+        link.service_pairing(time.monotonic(), None)
+        self.assertEqual(self.tunes, [1, 6])
+
+
 class PairCommand(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -369,9 +408,11 @@ class ChannelSetting(unittest.TestCase):
                 self.bridge.set_channel(payload)
         with self.systemctl(running=True), self.assertRaisesRegex(self.webui.ApiError, 'pairing'):
             self.bridge.set_channel({'channel': 1})
-        self.state.write_text(json.dumps({k: v for k, v in STATE.items() if k != 'controllers'}))
-        with self.systemctl(), self.assertRaisesRegex(self.webui.ApiError, 'Pair a controller'):
+        # No household yet (the bridge has never run): nothing to move.
+        self.state.write_text(json.dumps({k: v for k, v in STATE.items() if k != 'household'}))
+        with self.systemctl(), self.assertRaisesRegex(self.webui.ApiError, 'household'):
             self.bridge.set_channel({'channel': 1})
+        self.state.write_text(json.dumps(STATE))
         self.bridge.managed = False
         with self.assertRaisesRegex(self.webui.ApiError, 'installed bridge'):
             self.bridge.set_channel({'channel': 1})

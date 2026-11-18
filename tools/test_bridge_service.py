@@ -127,6 +127,14 @@ class Services(unittest.TestCase):
         self.assertNotIn('--seconds', started['link'][0].args)
         self.assertTrue(all(p.terminated for group in started.values() for p in group))   # stopped on the way out
 
+    def test_first_run_creates_the_household_and_starts_the_link_with_no_controllers(self):
+        self.state.unlink()
+        with patch.object(service, 'radio_mac', return_value='02:00:00:00:00:01'):
+            started = self.run_bridge(lambda name, n, age: None, 1)
+        self.assertEqual(len(started['link']), 1)
+        self.assertEqual(service.validate_state(self.state)['controllers'], [])
+        self.assertEqual([r['event'] for r in self.logs if r['event'] == 'household-created'], ['household-created'])
+
     def test_tap_timeout_stops_radio_before_starting_dhcp(self):
         link = Process(['link'])
         with patch.object(service, 'check_routes'), patch.object(service, 'prepare_radio'), \
@@ -187,16 +195,40 @@ class Services(unittest.TestCase):
         saved = json.loads(self.state.read_text())
         self.assertEqual(saved['controllers'], STATE['controllers'])
 
-    def test_validate_state_accepts_multiple_and_needs_an_active_keyed_controller(self):
+    def test_validate_state_accepts_multiple_none_and_needs_keys(self):
         state = {**STATE, 'controllers': [{'mac': CONTROLLER, 'aid': 5, 'key': CONTROLLER_KEY},
                                           {'mac': '02:00:00:00:00:03', 'key': '03' * 16}]}
         self.state.write_text(json.dumps(state))
         self.assertEqual([c['aid'] for c in service.validate_state(self.state)['controllers']], [5, 1])
-        for controllers, error in (([{'mac': CONTROLLER}], 'link key'),
-                                   ([{'mac': CONTROLLER, 'key': CONTROLLER_KEY, 'forgotten': True}], 'No paired')):
-            with self.subTest(error=error):
-                self.state.write_text(json.dumps({**STATE, 'controllers': controllers}))
-                with self.assertRaisesRegex(ValueError, error): service.validate_state(self.state)
+        # A household with no controllers (first run, or all forgotten) is valid.
+        self.state.write_text(json.dumps({**STATE, 'controllers': []}))
+        self.assertEqual(service.validate_state(self.state)['controllers'], [])
+        self.state.write_text(json.dumps({**STATE, 'controllers': [{'mac': CONTROLLER}]}))
+        with self.assertRaisesRegex(ValueError, 'link key'): service.validate_state(self.state)
+
+    def test_first_run_creates_a_household_with_no_controllers_once(self):
+        self.state.unlink()
+        with patch.object(service, 'radio_mac', return_value='B8:27:EB:68:01:A0'):
+            self.assertTrue(service.ensure_household(self.state))
+        created = service.validate_state(self.state)
+        self.assertEqual((created['bssid'], created['uuid'], created['freq'], created['controllers']),
+                         ('b8:27:eb:68:01:a0', 'RINCON_B827EB6801A001400', 2412, []))
+        self.assertTrue(created['household'].startswith('Sonos_'))
+        self.assertNotIn('network_key', created)
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
+        before = self.state.read_bytes()
+        with patch.object(service, 'radio_mac', side_effect=AssertionError('not read again')):
+            self.assertFalse(service.ensure_household(self.state))
+        self.assertEqual(self.state.read_bytes(), before)
+
+    def test_pairing_a_household_with_no_controllers_uses_the_running_link(self):
+        self.state.write_text(json.dumps({**STATE, 'controllers': []}))
+        with patch.object(service, 'bridge_active', return_value=True), \
+                patch.object(service, 'pair_in_link', return_value=True) as in_link, \
+                patch.object(service.subprocess, 'run') as command, patch('builtins.print'):
+            service.pair(self.state, self.run)
+        in_link.assert_called_once_with(self.run)
+        command.assert_not_called()   # the bridge is never stopped
 
     def test_pairing_retains_channel_and_bssid_from_the_current_household(self):
         previous = {**STATE, 'freq': 2462}

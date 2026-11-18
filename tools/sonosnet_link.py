@@ -18,9 +18,11 @@ MoreData if more wait; a data or Null frame with PM clear releases its whole que
 Nothing is sent to a dozing CR100 unprompted. Ethernet multicast is replicated to
 associated controllers; Ethernet unicast is routed by destination MAC.
 
-A controller forgotten in the pairing state (controller_state.set_forgotten) is
-dropped within a second, without a restart: the link sends it a deauthentication
-and then ignores it. Restoring it adds it back with the same AID and key.
+A controller removed from the pairing state (forgotten in the web UI) is dropped
+within a second, without a restart: the link sends it a deauthentication and then
+ignores it. The link also runs with no controllers, from the household's first run
+or after every controller is forgotten. It then sends no beacons (pairing does not
+use them), and a pairing window stays on the setup channel, since nothing is home.
 
 Usage: sudo python3 sonosnet_link.py --state bridge-state.json --tap sonos0 --addr 192.168.69.1/24
 """
@@ -52,7 +54,7 @@ from ccmp_pn import PacketNumbers
 import frames
 import link_pairing
 import netstart_pair as netstart
-from controller_state import active_controllers, confirm_key, controller_records, normalize_mac
+from controller_state import confirm_key, controller_records, normalize_mac
 from nexmon_clock import ClockUnavailable, HardwareClock
 
 TUNSETIFF, IFF_TAP, IFF_NO_PI = 0x400454ca, 0x0002, 0x1000
@@ -116,7 +118,7 @@ RADIO_BUSY = {errno.EAGAIN, errno.ENOBUFS, errno.ENOMEM}
 FRAME_ERRORS = {errno.EMSGSIZE, errno.EINVAL}
 RADIO_COMMAND_TIMEOUT = 2.0
 RECONNECT_CONFIG_INTERVAL = 1.0
-CONTROLLER_STATE_INTERVAL = 1.0   # s between checks of the pairing state for forget/restore
+CONTROLLER_STATE_INTERVAL = 1.0   # s between checks of the pairing state for forgotten controllers
 DEAUTH_REASON = 2                 # previous authentication no longer valid
 TAP_BUSY = {errno.EAGAIN, errno.ENOBUFS, errno.ENOMEM}
 SENT, BUSY, FAILED = 'sent', 'busy', 'failed'
@@ -252,8 +254,7 @@ class Link:
         # With an explicit config, fail closed for proactive probes until its
         # first valid policy is loaded. Received traffic remains fully enabled.
         self.stations = {frames.mac_bytes(record['mac']): self.new_station(record, auto_reconnect=self.config_path is None)
-                         for record in active_controllers(state)}
-        if not self.stations: raise ValueError('No paired controllers')
+                         for record in controller_records(state)}
         self.household = state['household'].encode()
         self.freq = state['freq']
         self.channel = {2412: 1, 2437: 6, 2462: 11}[state['freq']]
@@ -320,9 +321,9 @@ class Link:
         return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
 
     def reload_controllers(self, now, force=False):
-        """Apply forgotten, restored and re-keyed controllers from the pairing state.
+        """Apply forgotten, added and re-keyed controllers from the pairing state.
 
-        The web UI forgets or restores a controller by rewriting the state file while no
+        The web UI forgets a controller by rewriting the state file while no
         pairing can run (it holds pair.lock). Hold state_lock across read and apply, so a
         snapshot read before persist_controller saved cannot remove what it just added.
         A state for another household, BSSID or channel is ignored: those restart the link.
@@ -337,8 +338,7 @@ class Link:
                 if (normalize_mac(state.get('bssid')) != frames.mac_text(self.bssid)
                         or state.get('household') != self.household.decode() or state.get('freq') != self.freq):
                     raise ValueError('The saved household changed; restart the bridge')
-                records = {frames.mac_bytes(record['mac']): record for record in active_controllers(state)}
-                if not records: raise ValueError('No paired controllers')
+                records = {frames.mac_bytes(record['mac']): record for record in controller_records(state)}
             except (OSError, ValueError, TypeError, KeyError) as error:
                 if str(error) != self.state_error: self.log({'event': 'controller-state-invalid', 'error': str(error)})
                 self.state_error = str(error)
@@ -356,7 +356,7 @@ class Link:
                     if station is None:
                         # Probe it at once; the next policy load applies its saved preference.
                         self.stations[mac] = self.new_station(record)
-                        self.station_log(self.stations[mac], event='controller-restored', aid=record['aid'])
+                        self.station_log(self.stations[mac], event='controller-added', aid=record['aid'])
                     elif station.key != bytes.fromhex(record['key']):
                         self.rekey(station, record)
         self.config_signature, self.config_check_at = None, 0.0
@@ -995,7 +995,7 @@ class Link:
             with self.lock:
                 station = self.stations.get(mac)
                 if station is None:
-                    # New or forgotten until now. Probe it at once so it finds the household;
+                    # New, or forgotten before. Probe it at once so it finds the household;
                     # the next policy load applies any saved automatic-search preference.
                     self.stations[mac] = self.new_station(saved_record)
                     self.station_log(self.stations[mac], event='controller-added', aid=saved_record['aid'])
@@ -1070,6 +1070,16 @@ class Link:
         if self.channel == link_pairing.SETUP_CHANNEL:
             self.send_pairing_frames(session, now)
             return
+        if not self.stations:
+            # No controller to serve at home and no beacons to send: stay on the setup
+            # channel. Once one pairs, the short lease below expires and visits resume.
+            if self.tuned != link_pairing.SETUP_CHANNEL and not self.tune(link_pairing.SETUP_CHANNEL):
+                session.fail('The radio could not change to the setup channel')
+                self.tune(self.channel)
+                return
+            self.away_until = time.monotonic() + link_pairing.MIN_AWAY
+            self.send_pairing_frames(session, time.monotonic())
+            return
         if self.tuned == self.channel:
             if next_beacon is None or self.last_beacon_at is None: return
             back = next_beacon - max(link_pairing.RETURN_MARGIN, self.tune_cost + link_pairing.RETURN_SLACK)
@@ -1134,6 +1144,10 @@ class Link:
                 next_beacon = None
             elif next_beacon is None:
                 next_beacon = self.beacon_deadline(now)
+            if next_beacon is not None and now >= next_beacon and not self.stations:
+                # Nothing has paired: stay silent. Pairing uses probe frames, not beacons;
+                # keep the grid so beacons start on time once a controller pairs.
+                next_beacon = self.beacon_deadline(time.monotonic())
             if next_beacon is not None and now >= next_beacon:
                 if self.tuned != self.channel:   # a pairing visit overran: beacons come first
                     self.stats['pairing_visit_overruns'] += 1

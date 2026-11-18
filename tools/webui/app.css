@@ -789,9 +789,6 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 .setting .sub { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
 .setting.check { cursor: pointer; }
 
-.forgotten-controllers > summary { display: flex; align-items: center; gap: 8px; }
-.forgotten-controllers > summary .meta { margin-left: auto; }
-.forgotten-controllers .hint { margin: 12px 0; }
 .controller-firmware > summary { display: flex; align-items: center; gap: 8px; padding: 12px 0; }
 .controller-firmware > summary .meta { margin-left: auto; text-align: right; }
 .controller-firmware[open] > summary { padding-bottom: 8px; }

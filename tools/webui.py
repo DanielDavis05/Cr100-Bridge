@@ -10,8 +10,9 @@ costs the CR100 a drop. Controller status comes from the link's log (the 'statio
 its stats lines), the DHCP leases, and each CR100's own /status pages.
 
 Paired controllers are listed under "controllers" in the state file, each with its own
-link key. Forgetting one marks it "forgotten" there; the running link drops it within a
-second (sonosnet_link.reload_controllers). Restore or pairing again brings it back.
+link key. Forgetting one removes it there, with its settings; the running link drops it
+within a second (sonosnet_link.reload_controllers). Pairing it again adds it back as new.
+The household exists from the bridge's first run, so it may have no controllers.
 
 Speaker source: the controller's rooms come from Home Assistant or straight from Sonos
 players (config "backend", see backends.py). Switching keeps the other source's rooms aside
@@ -48,8 +49,8 @@ import room_icons
 from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME, MAX_SLOTS,
                            apply_rooms, reconcile_sonos_rooms, room_key,
                            room_key_ref, update_config_file, write_json)
-from controller_state import (active_controllers, controller_records, merge_controller, normalize_mac,
-                              normalize_state, set_forgotten)
+from controller_state import (controller_records, merge_controller, normalize_mac, normalize_state,
+                              remove_controller)
 from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
                                    visible_components)
 from music_service_registry import provider_settings
@@ -671,12 +672,8 @@ class Bridge:
             raise ApiError(409, 'Wait for pairing to finish before changing the channel.')
         with self.config_lock, self._pair_lock('Wait for pairing to finish before changing the channel.'):
             state = self.state()
-            try:
-                controllers = active_controllers(state)
-            except (ValueError, TypeError):
-                controllers = []
-            if not controllers or state.get('freq') not in FREQ_CHANNEL:
-                raise ApiError(400, 'Pair a controller before changing the channel.')
+            if not state.get('household') or state.get('freq') not in FREQ_CHANNEL:
+                raise ApiError(400, 'The bridge has not created its household yet. Start the bridge first.')
             if state['freq'] == freq:
                 return {'channel': channel, 'changed': False, 'message': 'The bridge is already on channel %d.' % channel}
             previous = FREQ_CHANNEL[state['freq']]
@@ -763,8 +760,8 @@ class Bridge:
             records = controller_records(data)
         except (ValueError, TypeError) as error:
             raise ApiError(400, str(error)) from error
-        if not any(not record.get('forgotten') for record in records):
-            raise ApiError(400, 'The pairing file contains no active controllers.')
+        if not records:
+            raise ApiError(400, 'The pairing file contains no controllers.')
         names = {}
         for item in data.get('controllers') or []:
             if isinstance(item, dict) and item.get('name') is not None:
@@ -821,49 +818,44 @@ class Bridge:
                     ' Restarting the bridge.' if self.managed else '')}
 
     def controller_macs(self, state):
-        """The controllers the bridge serves; forgotten ones are listed separately."""
-        return [controller['mac'] for controller in active_controllers(state)]
+        return [controller['mac'] for controller in controller_records(state)]
 
-    def forgotten_controllers(self, state, names):
-        try: records = controller_records(state)
-        except (ValueError, TypeError): return []
-        return [{'mac': record['mac'], 'name': (names.get(record['mac']) or {}).get('name') or 'Controller'}
-                for record in records if record.get('forgotten')]
+    def forget_controller(self, mac):
+        """Remove one controller and everything kept for it. The running link drops it within a second.
 
-    def set_controller_forgotten(self, mac, forgotten):
-        """Forget or restore one controller. The running link applies it within a second.
-
-        A forgotten controller keeps its AID, key and settings, so Restore is exact;
-        pairing it again restores it with a new key.
+        Its record and key go, with its name, components, reconnect setting, Spotify menu,
+        staged firmware and cached details. Forgetting the last one leaves the household
+        with no controllers, as on first run. Pairing it again adds it as a new controller.
         """
         try: mac = normalize_mac(mac)
         except ValueError: raise ApiError(400, 'Choose a valid controller.') from None
-        busy = 'Wait for pairing to finish before %s a controller.' % ('forgetting' if forgotten else 'restoring')
+        busy = 'Wait for pairing to finish before forgetting a controller.'
         if self.pairing_status().get('running'): raise ApiError(409, busy)
         with self.config_lock, self._pair_lock(busy):
-            state = self.state()
             try:
-                changed = set_forgotten(state, mac, forgotten)
+                changed = remove_controller(self.state(), mac)
             except LookupError:
                 raise ApiError(404, 'No such controller.') from None
             except (ValueError, TypeError) as error:
-                raise ApiError(400, 'Pair another controller before forgetting this one.'
-                               if 'last active' in str(error) else str(error)) from error
-            was = next(record for record in controller_records(state) if record['mac'] == mac).get('forgotten', False)
-            if was == forgotten:
-                return {'mac': mac, 'forgotten': forgotten, 'changed': False,
-                        'message': 'Already forgotten.' if forgotten else 'Already restored.'}
+                raise ApiError(400, str(error)) from error
             write_json(self.state_path, changed, mode=0o600)
-        if forgotten:
-            self.details.pop(mac, None)
-            self.known_ips.pop(mac, None)
-            try: self.updates().cancel_controller(mac, reason='The controller was forgotten.')
-            except Exception as error: self.log({'event': 'forget-update-cancel-failed', 'mac': mac, 'error': repr(error)})
-        self.log({'event': 'controller-forgotten' if forgotten else 'controller-restored', 'mac': mac})
-        return {'mac': mac, 'forgotten': forgotten, 'changed': True,
-                'message': ('Forgotten. The bridge stops answering it within a few seconds. Restore it, '
-                            'or pair it again, to bring it back.') if forgotten else
-                           ('Restored. It reconnects the next time it looks for the bridge; wake it if it is asleep.')}
+
+        def drop_settings(config):
+            if isinstance(config.get('controllers'), dict): config['controllers'].pop(mac, None)
+            menus = provider_settings(config, 'spotify').get('controller_menus')
+            if isinstance(menus, dict): menus.pop(mac, None)
+        try: self.update_config(drop_settings)
+        except Exception as error: self.log({'event': 'forget-settings-failed', 'mac': mac, 'error': repr(error)})
+        self.details.pop(mac, None)
+        self.known_ips.pop(mac, None)
+        try: self.updates().cancel_controller(mac, reason='The controller was forgotten.')
+        except Exception as error: self.log({'event': 'forget-update-cancel-failed', 'mac': mac, 'error': repr(error)})
+        remaining = len(changed['controllers'])
+        self.log({'event': 'controller-forgotten', 'mac': mac, 'remaining': remaining})
+        return {'mac': mac, 'remaining': remaining,
+                'message': ('Forgotten. The bridge stops answering it within a few seconds. Pair it again '
+                            'to bring it back.') if remaining else
+                           ('Forgotten. No controllers are paired now; pair one to use the bridge again.')}
 
     def link_status(self):
         """The radio link's latest stats line and recent events, from its log."""
@@ -927,8 +919,7 @@ class Bridge:
                                       (not event.get('mac') and (len(macs) == 1 or
                                        event['event'] in ('radio-lost', 'radio-reopened')))][-12:],
                            **details})
-        payload = {'controllers': result, 'forgotten': self.forgotten_controllers(state, names),
-                   'household': state.get('household'),
+        payload = {'controllers': result, 'household': state.get('household'),
                 'speaker_health': self.speaker_health(config, wait=False),
                 'channel': FREQ_CHANNEL.get(state.get('freq')), 'radio_running': link['running'],
                 'multi_controller': True, 'pairing': self.pairing_status()}
@@ -1527,8 +1518,7 @@ def make_handler(bridge, auth, log):
     route('POST', '/api/controllers/pairing/export')(lambda h, b, m: bridge.export_pairing())
     route('POST', '/api/controllers/pairing/import')(lambda h, b, m: bridge.import_pairing(b))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})')(lambda h, b, m: bridge.rename_controller(m.group(1), b.get('name')))
-    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/forget')(lambda h, b, m: bridge.set_controller_forgotten(m.group(1), True))
-    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/restore')(lambda h, b, m: bridge.set_controller_forgotten(m.group(1), False))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/forget')(lambda h, b, m: bridge.forget_controller(m.group(1)))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/reconnect')(lambda h, b, m: bridge.save_controller_reconnect(m.group(1), b))
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.controller_components(m.group(1)))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.save_controller_components(m.group(1), b))

@@ -219,9 +219,15 @@ def initial_state(args):
         return previous
     if requested['bssid'] is None:
         raise ValueError('--mac is required for the first controller')
-    return {'bssid': requested['bssid'], 'uuid': player_uuid(requested['bssid']).decode(),
-            'freq': requested['freq'] if requested['freq'] is not None else 2412,   # setup channel 1
-            'household': requested['household'] or new_household().decode(), 'controllers': []}
+    return household_state(requested['bssid'], requested['freq'] if requested['freq'] is not None else 2412,
+                           requested['household'])
+
+
+def household_state(bssid, freq=2412, household=None):
+    """A household with no controllers yet. Channel 1 is the setup channel: pairing needs no visits."""
+    bssid = normalize_mac(bssid)
+    return {'bssid': bssid, 'uuid': player_uuid(bssid).decode(), 'freq': freq,
+            'household': household or new_household().decode(), 'controllers': []}
 
 
 def save_pairing(path, state, controllers):

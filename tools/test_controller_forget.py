@@ -1,4 +1,4 @@
-"""Per-controller link keys, and forgetting or restoring one controller without touching the others."""
+"""Per-controller link keys, and forgetting controllers without touching the others."""
 import json
 from pathlib import Path
 import socket
@@ -10,7 +10,7 @@ import ccmp
 import frames
 import sonosnet_link as sl
 import webui
-from controller_state import set_forgotten
+from controller_state import remove_controller
 from test_multi_controller_link import (AP, FIRST, KEYS, SECOND, STATE, Radio, data, decode, ethernet,
                                         management, null)
 
@@ -57,7 +57,7 @@ class Keys(unittest.TestCase):
 
 
 class StateFile(unittest.TestCase):
-    """The link applies forget, restore and re-pairing from the saved pairing state."""
+    """The link applies forgetting and re-pairing from the saved pairing state."""
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -95,7 +95,7 @@ class StateFile(unittest.TestCase):
     def test_forget_deauthenticates_and_ignores_only_that_controller(self):
         self.link.from_tap(ethernet(FIRST, b'waiting'))
         self.reload()
-        self.write(set_forgotten(STATE, SECOND_MAC, True))
+        self.write(remove_controller(STATE, SECOND_MAC))
         self.link.reload_controllers(self.now + 0.5)   # checked at most once a second
         self.assertIn(SECOND, self.link.stations)
         self.reload()
@@ -118,29 +118,24 @@ class StateFile(unittest.TestCase):
         # Service passes still visit every remaining station.
         for _ in range(3): self.link.service_stations(self.now)
 
-    def test_restore_adds_the_controller_back_with_its_aid_and_key(self):
-        self.write(set_forgotten(STATE, SECOND_MAC, True))
+    def test_forgetting_every_controller_silences_the_link(self):
+        self.write(remove_controller(remove_controller(STATE, FIRST_MAC), SECOND_MAC))
         self.reload()
-        self.write(set_forgotten(self.saved(), SECOND_MAC, False))
-        self.reload()
-        station = self.link.stations[SECOND]
-        self.assertEqual((station.aid, station.key, station.associated), (65, KEYS[SECOND], False))
-        self.assertTrue(station.auto_reconnect)
-        self.assertEqual([record['aid'] for record in self.events('controller-restored')], [65])
-        self.link.on_frame(management(SECOND, 0, ASSOCIATION))
-        self.link.on_frame(data(SECOND, ethernet(AP, b'back', source=SECOND), 1))
-        self.assertEqual(self.tap.recv(4096), ethernet(AP, b'back', source=SECOND))
+        self.assertEqual(self.link.stations, {})
+        self.assertEqual([frame[4:10] for frame in self.radio.sent if frame[0] == 0xc0], [FIRST, SECOND])
+        self.radio.sent.clear()
+        self.link.run_main(0.3)
+        self.assertEqual(self.radio.sent, [])          # no beacons, no probes, nothing
+        self.assertIsNone(self.link.state_error)
 
-    def test_state_for_another_household_or_without_active_controllers_is_ignored(self):
-        for state in ({**STATE, 'household': 'Sonos_other'}, {**STATE, 'freq': 2412},
-                      {**STATE, 'controllers': [{**record, 'forgotten': True} for record in STATE['controllers']]},
-                      {'not': 'a state'}):
+    def test_state_for_another_household_is_ignored(self):
+        for state in ({**STATE, 'household': 'Sonos_other'}, {**STATE, 'freq': 2412}, {'not': 'a state'}):
             with self.subTest(state=state):
                 self.write(state)
                 self.reload()
                 self.assertEqual(set(self.link.stations), {FIRST, SECOND})
         # The same error twice in a row (household, then channel) is logged once.
-        self.assertEqual(len(self.events('controller-state-invalid')), 3)
+        self.assertEqual(len(self.events('controller-state-invalid')), 2)
         self.write(STATE)
         self.reload()
         self.assertIsNone(self.link.state_error)
@@ -173,13 +168,14 @@ class StateFile(unittest.TestCase):
         self.reload()
         self.assertIs(self.link.stations[FIRST], station)
 
-    def test_pairing_a_forgotten_controller_restores_it_with_only_the_new_key(self):
-        self.write(set_forgotten(STATE, SECOND_MAC, True))
+    def test_a_forgotten_controller_paired_again_is_new_with_only_the_new_key(self):
+        self.write(remove_controller(STATE, SECOND_MAC))
         self.reload()
         self.link.persist_controller({'mac': SECOND_MAC, 'txid': 4, 'time': 2.0, 'key': NEW_KEY.hex()})
         station = self.link.stations[SECOND]
-        self.assertEqual((station.aid, station.key, station.previous_key), (65, NEW_KEY, None))
-        self.assertNotIn('forgotten', self.saved()['controllers'][1])
+        self.assertEqual((station.aid, station.key, station.previous_key), (2, NEW_KEY, None))
+        self.assertEqual(self.saved()['controllers'][1],
+                         {'mac': SECOND_MAC, 'aid': 2, 'key': NEW_KEY.hex(), 'txid': 4, 'time': 2.0})
         self.link.on_frame(management(SECOND, 0, ASSOCIATION))
         self.link.on_frame(data(SECOND, ethernet(AP, source=SECOND), 1))   # its forgotten key
         self.assertEqual(station.stats['rx_decrypt_fail'], 1)
@@ -215,40 +211,48 @@ class WebUI(unittest.TestCase):
     def saved(self):
         return json.loads(self.state_path.read_text())
 
-    def test_forget_and_restore_one_controller(self):
-        result = self.bridge.set_controller_forgotten(SECOND_MAC.upper(), True)
-        self.assertEqual((result['changed'], result['forgotten']), (True, True))
-        self.assertEqual(self.saved()['controllers'][1],
-                         {'mac': SECOND_MAC, 'aid': 65, 'key': STATE['controllers'][1]['key'], 'forgotten': True})
+    def test_forget_removes_the_controller_and_everything_kept_for_it(self):
+        self.bridge.update_config(lambda c: c.update(music_services=[{'provider': 'spotify', 'controller_menus': {
+            FIRST_MAC: {'items': []}, SECOND_MAC: {'items': []}}}]))
+        self.bridge.details[SECOND_MAC] = {'firmware': '4.3.2'}
+        result = self.bridge.forget_controller(SECOND_MAC.upper())
+        self.assertEqual(result['remaining'], 1)
+        self.assertEqual(self.saved()['controllers'], [STATE['controllers'][0]])
         self.assertEqual(self.state_path.stat().st_mode & 0o777, 0o600)
         self.updates.cancel_controller.assert_called_once_with(SECOND_MAC, reason='The controller was forgotten.')
+        config = json.loads(self.config_path.read_text())
+        self.assertEqual(config['controllers'], {FIRST_MAC: {'name': 'Kitchen'}})
+        self.assertEqual(config['music_services'][0]['controller_menus'], {FIRST_MAC: {'items': []}})
+        self.assertNotIn(SECOND_MAC, self.bridge.details)
         listing = self.bridge.controllers()
         self.assertEqual([c['mac'] for c in listing['controllers']], [FIRST_MAC])
-        self.assertEqual(listing['forgotten'], [{'mac': SECOND_MAC, 'name': 'Den'}])
-        # A forgotten controller is not served anywhere else in the web UI.
+        self.assertNotIn('forgotten', listing)
         for call in (lambda: self.bridge.rename_controller(SECOND_MAC, 'Other'),
-                     lambda: self.bridge.spotify_controller(SECOND_MAC)):
+                     lambda: self.bridge.spotify_controller(SECOND_MAC),
+                     lambda: self.bridge.forget_controller(SECOND_MAC)):
             with self.assertRaises(webui.ApiError) as caught: call()
             self.assertEqual(caught.exception.status, 404)
-        self.assertFalse(self.bridge.set_controller_forgotten(SECOND_MAC, True)['changed'])
 
-        result = self.bridge.set_controller_forgotten(SECOND_MAC, False)
-        self.assertTrue(result['changed'])
-        self.assertEqual(self.saved()['controllers'], [{**record, 'aid': record['aid']} for record in STATE['controllers']])
-        # Its settings were kept while it was forgotten.
-        config = json.loads(self.config_path.read_text())
-        self.assertEqual(config['controllers'][SECOND_MAC], {'name': 'Den', 'auto_reconnect': False})
-        self.assertEqual(self.bridge.controllers()['forgotten'], [])
+    def test_forgetting_the_last_controller_returns_to_no_controllers(self):
+        self.bridge.forget_controller(FIRST_MAC)
+        result = self.bridge.forget_controller(SECOND_MAC)
+        self.assertEqual(result['remaining'], 0)
+        self.assertIn('No controllers are paired', result['message'])
+        saved = self.saved()
+        self.assertEqual((saved['household'], saved['bssid'], saved['freq'], saved['controllers']),
+                         (STATE['household'], STATE['bssid'], STATE['freq'], []))
+        listing = self.bridge.controllers()
+        self.assertEqual((listing['controllers'], listing['household']), ([], STATE['household']))
+        self.assertEqual(json.loads(self.config_path.read_text())['controllers'], {})
 
-    def test_last_unknown_and_busy_controllers_are_refused_without_changes(self):
-        self.bridge.set_controller_forgotten(FIRST_MAC, True)
+    def test_unknown_and_busy_controllers_are_refused_without_changes(self):
         before = self.state_path.read_bytes()
-        for mac, status, pairing in ((SECOND_MAC, 400, False), ('02:00:00:00:00:99', 404, False),
-                                     ('not-a-mac', 400, False), (SECOND_MAC, 409, True)):
+        for mac, status, pairing in (('02:00:00:00:00:99', 404, False), ('not-a-mac', 400, False),
+                                     (SECOND_MAC, 409, True)):
             with self.subTest(mac=mac, status=status), \
                     patch.object(self.bridge, 'pairing_status', return_value={'running': pairing}), \
                     self.assertRaises(webui.ApiError) as caught:
-                self.bridge.set_controller_forgotten(mac, True)
+                self.bridge.forget_controller(mac)
             self.assertEqual(caught.exception.status, status)
         self.assertEqual(self.state_path.read_bytes(), before)
 
@@ -258,7 +262,7 @@ class WebUI(unittest.TestCase):
         with (self.run_dir / 'pair.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaises(webui.ApiError) as caught:
-                self.bridge.set_controller_forgotten(SECOND_MAC, True)
+                self.bridge.forget_controller(SECOND_MAC)
         self.assertEqual(caught.exception.status, 409)
         self.assertEqual(self.saved(), STATE)
 

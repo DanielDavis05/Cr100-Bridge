@@ -363,7 +363,6 @@ class Controllers(Fixture):
         for payload in ('not-a-dict', {'data': 'bad'}, {**valid, 'version': 1}, {**valid, 'version': True},
                         {**valid, 'household': 'Other_123'}, {**valid, 'controllers': [{'mac': CR, 'aid': 1}]},
                         {**valid, 'controllers': [{'mac': CR, 'key': '01'}]},
-                        {**valid, 'controllers': [{'mac': CR, 'key': key, 'forgotten': True}]},
                         {**valid, 'freq': 2417}, {**valid, 'controllers': []},
                         {**valid, 'controllers': [{'mac': CR, 'key': key, 'name': 'x' * 31}]}):
             with self.subTest(payload=payload), self.assertRaises(webui.ApiError) as caught:
