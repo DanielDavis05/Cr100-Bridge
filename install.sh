@@ -170,16 +170,27 @@ for path in candidates:
 PY
 install -m 755 "$RELEASE/scripts/cr100-bridge" /usr/local/bin/cr100-bridge
 install -m 644 "$RELEASE"/systemd/*.service /etc/systemd/system/
-install -d -m 755 /etc/NetworkManager/conf.d
-cat > /etc/NetworkManager/conf.d/99-cr100-bridge.conf <<'EOF'
-[device-cr100-bridge]
+# Keep NetworkManager off the radio and Sonos interfaces.
+# Reload only its configuration, and only when the drop-in changes: a full `nmcli general reload`
+# also rewrites /etc/resolv.conf from NetworkManager's own DNS list, which wipes a resolver it
+# doesn't own (Tailscale, dhcpcd) and leaves the Pi unable to resolve names until that owner
+# rewrites the file.
+NM_CONF_DIR=/etc/NetworkManager/conf.d
+NM_CONF="$NM_CONF_DIR/99-cr100-bridge.conf"
+NM_WANT='[device-cr100-bridge]
 match-device=interface-name:wlan0;interface-name:mon0;interface-name:sonos0
-managed=0
-EOF
+managed=0'
+install -d -m 755 "$NM_CONF_DIR"
+NM_CHANGED=0
+if [[ ! -f "$NM_CONF" || "$(cat "$NM_CONF")" != "$NM_WANT" ]]; then
+  printf '%s\n' "$NM_WANT" > "$NM_CONF"
+  NM_CHANGED=1
+fi
 if systemctl is-active --quiet NetworkManager; then
-  nmcli general reload
+  if ((NM_CHANGED)); then nmcli general reload conf; fi
   nmcli device set wlan0 managed no
 fi
+# End NetworkManager setup.
 systemctl daemon-reload
 systemctl enable cr100-webui.service cr100-bridge.service
 if [[ -n "$OLD_RELEASE" ]]; then
