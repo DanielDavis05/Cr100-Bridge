@@ -205,6 +205,57 @@ class UIEventsHTTP(unittest.TestCase):
         self.assertEqual(read(), 'unavailable')
         self.assertEqual(self.request('SetString', {'VariableName': 'CR100_SpotifyAutoplay', 'StringValue': 'on'})[0], 500)
 
+    def test_r13_autoplay_now_reports_room_state_without_mutation(self):
+        def read():
+            status, document = self.request('GetString', {'VariableName': 'CR100_SpotifyAutoplayNow'})
+            self.assertEqual(status, 200, document)
+            return ET.fromstring(document).find('.//StringValue').text
+        statuses = {'value': 'armed'}
+        policy = types.SimpleNamespace(status=lambda room: statuses['value'])
+        self.house.music_service = types.SimpleNamespace(services=[types.SimpleNamespace(playback_policy=policy)])
+        self.assertEqual(read(), 'off')                       # simulated room: no backend
+        room = types.SimpleNamespace(key='verified-room')
+        self.player.state.backend = room
+        try:
+            self.assertEqual(read(), 'off')                   # preference is off
+            self.send('on-now', 'spotify.autoplay.set', {'desired': 'true'})
+            before = self.path.read_bytes()
+            self.assertEqual(read(), 'armed')
+            statuses['value'] = 'active'
+            self.assertEqual(read(), 'active')
+            statuses['value'] = None
+            self.assertEqual(read(), 'off')
+            room.spotify_autoplay_status = lambda: 'active'   # bridge-owned queue answers first
+            self.assertEqual(read(), 'active')
+            room.spotify_autoplay_status = lambda: 1 / 0      # a failing reader never breaks the read
+            self.assertEqual(read(), 'off')
+            self.assertEqual(self.path.read_bytes(), before)
+        finally:
+            self.player.state.backend = None
+        self.assertEqual(self.request('SetString', {'VariableName': 'CR100_SpotifyAutoplayNow',
+                                                    'StringValue': 'active'})[0], 500)
+        self.assertEqual(self.calls, [])
+
+    def test_r13_autoplay_marker_is_evented_only_while_it_shows(self):
+        state = self.player.state
+        gateway = types.SimpleNamespace(autoplay_now=lambda player: 'off')
+        original = self.house.ui_events
+        state.backend = types.SimpleNamespace(line_in_source=lambda: None, valid_play_modes=lambda: 'NORMAL',
+                                              settings_values=lambda: {})
+        values = {key: '' for key in zoneplayers.AVT_EVENT_KEYS}
+        state.backend_values = lambda: values
+        try:
+            self.house.ui_events = gateway
+            self.assertNotIn('CR100Autoplay', state.last_change())
+            gateway.autoplay_now = lambda player: 'armed'
+            self.assertIn('<r:CR100Autoplay val="armed" />', state.last_change())
+            gateway.autoplay_now = lambda player: 'active'
+            self.assertIn('<r:CR100Autoplay val="active" />', state.last_change())
+        finally:
+            self.house.ui_events = original
+            state.backend = None
+            del state.backend_values
+
     def test_v3_room_capabilities_use_current_verified_room_not_virtual_model(self):
         def read():
             status, document = self.request('GetString', {'VariableName': 'CR100_RoomCapabilities'})

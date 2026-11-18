@@ -21,6 +21,8 @@ CAPABILITIES_VARIABLE = 'CR100_UICapabilities'
 SESSION_VARIABLE = 'CR100_UISession'
 ROOM_CAPABILITIES_VARIABLE = 'CR100_RoomCapabilities'
 AUTOPLAY_VARIABLE = 'CR100_SpotifyAutoplay'
+# Now Playing icon state for the addressed room: off, armed or active (R13 firmware).
+AUTOPLAY_NOW_VARIABLE = 'CR100_SpotifyAutoplayNow'
 MAX_WIRE_BYTES = 4096
 MAX_PARAMS = 16
 MAX_ACTION_LIST_BYTES = 1024
@@ -306,6 +308,49 @@ class UIEventGateway:
             self._prune()
             return result
 
+    def autoplay_preference(self):
+        """The saved household Spotify Autoplay setting: on, off or unavailable."""
+        if self.autoplay_config_path is None: return 'unavailable'
+        from music_service_registry import provider_settings
+        try:
+            config = json.loads(Path(self.autoplay_config_path).read_text())
+            settings = provider_settings(config, 'spotify')
+            if settings and settings.get('enabled', True) is True:
+                return 'on' if settings.get('autoplay', False) is True else 'off'
+        except (OSError, ValueError, TypeError):
+            pass
+        return 'unavailable'
+
+    def autoplay_policies(self):
+        service = getattr(self.household, 'music_service', None)
+        services = getattr(service, 'services', None)
+        if services is None: services = [service] if service is not None else []
+        return [policy for policy in (getattr(s, 'playback_policy', None) for s in services)
+                if callable(getattr(policy, 'status', None))]
+
+    def autoplay_now(self, player):
+        """Now Playing Autoplay icon state for one virtual player: off, armed or active.
+
+        armed: Spotify is playing (or paused) and Autoplay will continue after it.
+        active: the current track was started by Autoplay. Read-only; never
+        changes playback, configuration or receipts.
+        """
+        state = getattr(player, 'state', None)
+        room = getattr(state, 'backend', None)
+        if room is None or getattr(state, 'informational', False) or self.autoplay_preference() != 'on':
+            return 'off'
+        try:
+            own = getattr(room, 'spotify_autoplay_status', None)
+            if callable(own):                      # bridge-owned queue (non-Sonos speakers)
+                status = own()
+                if status in ('armed', 'active'): return status
+            for policy in self.autoplay_policies():
+                status = policy.status(room)
+                if status in ('armed', 'active'): return status
+        except Exception:
+            pass
+        return 'off'
+
     def native_action(self, player, service, action, args, address):
         if service != 'SystemProperties': return None
         variable = args.get('VariableName', '')
@@ -326,22 +371,14 @@ class UIEventGateway:
             value = ('1' if devices and devices.available() and not player.state.informational else '0') if variable == 'CR100_DevicesAvailable' \
                 else devices.feedback(player, address) if devices else 'deferred'
             return {'StringValue': value}
-        if variable in (ROOM_CAPABILITIES_VARIABLE, AUTOPLAY_VARIABLE):
+        if variable in (ROOM_CAPABILITIES_VARIABLE, AUTOPLAY_VARIABLE, AUTOPLAY_NOW_VARIABLE):
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'Controller settings status is read-only')
             self._identity(address)
             if variable == AUTOPLAY_VARIABLE:
-                value = 'unavailable'
-                if self.autoplay_config_path is not None:
-                    from music_service_registry import provider_settings
-                    try:
-                        config = json.loads(Path(self.autoplay_config_path).read_text())
-                        settings = provider_settings(config, 'spotify')
-                        if settings and settings.get('enabled', True) is True:
-                            value = 'on' if settings.get('autoplay', False) is True else 'off'
-                    except (OSError, ValueError, TypeError):
-                        pass
-                return {'StringValue': value}
+                return {'StringValue': self.autoplay_preference()}
+            if variable == AUTOPLAY_NOW_VARIABLE:
+                return {'StringValue': self.autoplay_now(player)}
             # Native hardware personas are compatibility identities, not proof
             # of capabilities. Read the verified provider for this exact room.
             room = player.state.backend

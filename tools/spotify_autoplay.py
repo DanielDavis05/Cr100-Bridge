@@ -130,6 +130,7 @@ class Run:
     last_duration: int | None = None   # the current row's, kept across the end-of-queue rewind
     loading: bool = False
     prefetch_failed: bool = False
+    recommended: bool = False       # the current track was started by Autoplay, not chosen
     deadline: float | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
     lock: object = field(default_factory=threading.RLock)
@@ -273,6 +274,40 @@ class SpotifyAutoplay:
                 if first and count and first > run.cursor + 1:
                     run.transport.move_next(first, count, run.cursor + 1)
             self._queue_sync(run)
+
+    def status(self, room):
+        """'active' on an Autoplay recommendation, 'armed' when Spotify will continue, else None.
+
+        Read-only: uses the run table and the room's cached transport state.
+        The caller checks the saved preference.
+        """
+        try:
+            key = self._key(room)
+        except BackendError:
+            return None
+        with self.lock:
+            run = self.runs.get(key)
+        if run is not None and not run.cancelled.is_set():
+            return 'active' if run.recommended else 'armed'
+        # A Spotify row in the Sonos queue is adopted as soon as it plays.
+        # External Spotify Connect (x-sonos-vli without a run) is never adopted.
+        avt = getattr(room, 'avt', None) or {}
+        if (avt.get('AVTransportURI') or '').startswith('x-rincon-queue:') \
+                and spotify_track(avt.get('CurrentTrackURI') or ''):
+            return 'armed'
+        return None
+
+    def _announce(self):
+        """Let controllers refresh their Autoplay icon after the setting changes."""
+        try:
+            rooms = list(self.rooms())
+        except Exception:
+            return
+        for _, _, room in rooms:
+            try:
+                room.backend.changed(room.key)
+            except Exception:
+                pass
 
     def claims_action(self, room, service, action, args):
         """Next on an armed run is ours even when the player omits it (last queue row)."""
@@ -419,6 +454,7 @@ class SpotifyAutoplay:
         run.mode, run.identity, run.maximum, run.terminal = 'queue', None, 0, 0
         run.last_position, run.last_index, run.last_queue_length = None, 0, 0
         run.last_duration = None
+        run.recommended = False
         run.transport.play_queue(run.cursor + 1)
         run.started = self.clock()
 
@@ -515,7 +551,14 @@ class SpotifyAutoplay:
             self._play_pending(run)
             return True
         run.candidates.remove(uri)
-        connection.play_track(run.transport.base, uri)
+        # Flag before the speaker reports the new track, so the controller's
+        # event for it already reads the recommendation state.
+        previous, run.recommended = run.recommended, True
+        try:
+            connection.play_track(run.transport.base, uri)
+        except BaseException:
+            run.recommended = previous
+            raise
         # Every existing row is now history; a later Next must not replay the
         # final queue row that Next-on-last-row just left.
         run.cursor = max(run.cursor, pending_cursor)
@@ -634,6 +677,8 @@ class SpotifyAutoplay:
                         self._adopt_queue(room)
                 except Exception:
                     pass
+            if now_enabled != previous_enabled:
+                self._announce()
             previous_enabled = now_enabled
             try:
                 self._retry_adoptions()

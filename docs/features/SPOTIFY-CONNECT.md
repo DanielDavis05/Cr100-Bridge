@@ -374,3 +374,20 @@ especially `native-zeroconf-activation.json`, `native-start-after-activation.jso
 - [librespot Connect transfer implementation](https://github.com/librespot-org/librespot/blob/dev/core/src/spclient.rs)
 - [SpotifyWebApiPython's receiver authorization-code exchange and addUser implementation](https://github.com/thlucas1/SpotifyWebApiPython/blob/master/spotifywebapipython/zeroconfapi/zeroconfconnect.py)
 - [librespot-python session and Login5 implementation](https://github.com/kokarare1212/librespot-python/blob/main/librespot/core.py)
+
+## Now Playing Autoplay icon (R13 firmware)
+
+The bridge reports each room's Autoplay state through the inert read
+`CR100_SpotifyAutoplayNow`: `off`, `armed` (Autoplay on, the current track is
+the listener's own Spotify music) or `active` (the current track was started by
+Autoplay). `SpotifyAutoplay.status()` answers from its run table: a run whose
+current track came from `_recommend()` is `active`; the flag is set before the
+speaker is told to play the recommendation and cleared when an explicit queue
+row takes over. Without a run, a Spotify row in the Sonos queue reads `armed`.
+External Spotify Connect sessions are never adopted and read `off`.
+
+While a room reads `armed` or `active`, its AVTransport event carries
+`r:CR100Autoplay`, so a change always reaches the controller. When the saved
+preference flips, the policy loop asks every room's backend to re-publish. R13
+firmware draws the icon left of Crossfade; older firmware ignores the value.
+

@@ -333,6 +333,66 @@ class PlaybackPolicy(PolicyFixture):
         self.assertEqual(run.cursor, 1)
 
 
+class NowPlayingStatus(PolicyFixture):
+    """The R13 Now Playing icon: armed on chosen Spotify music, active on a recommendation."""
+
+    def test_chosen_track_is_armed_and_recommendation_is_active(self):
+        run = self.start()
+        self.assertEqual(self.policy.status(self.room), 'armed')
+        seen = []
+        original = self.connection.play_track
+        def play_track(base, uri):
+            seen.append(self.policy.status(self.room))   # flagged before the speaker reports it
+            original(base, uri)
+        self.connection.play_track = play_track
+        self.finish(run)
+        self.assertEqual(seen, ['active'])
+        self.assertEqual(self.policy.status(self.room), 'active')
+
+    def test_explicit_queue_after_a_recommendation_is_armed_again(self):
+        run = self.start()
+        self.finish(run)
+        self.assertEqual(self.policy.status(self.room), 'active')
+        self.transport.rows.append(LIBRARY)
+        self.finish(run)
+        self.assertEqual(self.transport.commands[-1], ('play_queue', 1))
+        self.assertEqual(self.policy.status(self.room), 'armed')
+
+    def test_failed_recommendation_start_keeps_the_previous_state(self):
+        run = self.start()
+        def fail(base, uri): raise BackendError('Speaker unavailable')
+        self.connection.play_track = fail
+        self.tick(run, position=99)
+        with self.assertRaises(BackendError):
+            self.policy._recommend(run)
+        self.assertFalse(run.recommended)
+
+    def test_without_a_run_only_a_spotify_queue_row_is_armed(self):
+        self.room.avt = {'AVTransportURI': 'x-rincon-queue:RINCON_BEDROOM#0',
+                         'CurrentTrackURI': 'x-sonos-spotify:' + SEED.replace(':', '%3a') + '?sid=12'}
+        self.assertEqual(self.policy.status(self.room), 'armed')
+        self.room.avt = {'AVTransportURI': 'x-rincon-queue:RINCON_BEDROOM#0', 'CurrentTrackURI': LIBRARY}
+        self.assertIsNone(self.policy.status(self.room))
+        # External Spotify Connect is never adopted, so it shows nothing.
+        self.room.avt = {'AVTransportURI': NATIVE, 'CurrentTrackURI': NATIVE}
+        self.assertIsNone(self.policy.status(self.room))
+        self.room.available = False
+        self.assertIsNone(self.policy.status(self.room))
+
+    def test_cancelled_run_is_not_reported(self):
+        run = self.start()
+        run.cancelled.set()
+        self.assertIsNone(self.policy.status(self.room))
+
+    def test_setting_change_announces_each_room_once(self):
+        self.backend.changed = Mock()
+        self.policy.rooms = lambda: [('udn', 'Bedroom', self.room)]
+        self.policy._announce()
+        self.backend.changed.assert_called_once_with('bedroom')
+        self.policy.rooms = Mock(side_effect=RuntimeError('household closing'))
+        self.policy._announce()   # never raises into the service loop
+
+
 class OwnershipAndCancellation(PolicyFixture):
     def test_finished_shuffled_queue_does_not_replay_its_retained_tail(self):
         self.transport.rows = [SEED, NEXT, LATER]

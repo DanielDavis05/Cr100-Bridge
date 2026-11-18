@@ -518,6 +518,13 @@ class BridgePlayer:
         if self.active: return self.route.track(self.snapshot())
         return None
 
+    def autoplay_status(self):
+        """'active' past the queue on Spotify Autoplay, 'armed' on a Spotify Connect queue, else None."""
+        if not self.active or self.route.name != 'connect': return None
+        if self.route.beyond_queue(self.snapshot()): return 'active'
+        entry = self.queue.current
+        return 'armed' if entry is not None and entry.source == 'spotify' else None
+
     def capabilities(self):
         if not self.active: return frozenset(('play',)) if len(self.queue) else frozenset()
         operations = {'play', 'pause', 'stop', 'seek', 'shuffle', 'repeat'}

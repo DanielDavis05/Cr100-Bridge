@@ -247,6 +247,14 @@ def build_classes(zp):
                 if generation is not None:
                     root.set('xmlns:r', 'urn:schemas-rinconnetworks-com:metadata-1-0/')
                     zp.ET.SubElement(instance, 'r:SleepTimerGeneration', val=str(generation))
+                # Only while Autoplay shows: a change of icon state then alters the
+                # event body, so publish_changed notifies and R13 re-reads its icon.
+                # Without Spotify Autoplay the event is byte-identical to before.
+                gateway = getattr(self.household, 'ui_events', None)
+                autoplay = gateway.autoplay_now(self.player) if gateway is not None and self.backend else 'off'
+                if autoplay != 'off':
+                    root.set('xmlns:r', 'urn:schemas-rinconnetworks-com:metadata-1-0/')
+                    zp.ET.SubElement(instance, 'r:CR100Autoplay', val=autoplay)
             return zp.ET.tostring(root, encoding='unicode')
 
         def event_values(self, service):
@@ -392,6 +400,7 @@ def build_classes(zp):
             if service == 'SystemProperties' and (args.get('VariableName', '').startswith('CR100_UI')
                     or args.get('VariableName', '').startswith('CR100_DevicesFeedback:')
                     or args.get('VariableName') in ('CR100_RoomCapabilities', 'CR100_SpotifyAutoplay',
+                                                    'CR100_SpotifyAutoplayNow',
                                                     'CR100_DevicesAvailable', 'CR100_DevicesFeedback')):
                 from ui_events import UIEventError
                 values = self.validate_action(service, action, args)

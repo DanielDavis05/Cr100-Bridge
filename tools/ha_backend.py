@@ -203,6 +203,11 @@ class HARoom(NativeSettingsRoom):
         bridge = self.bridge
         return bridge if bridge is not None and bridge.active else None
 
+    def spotify_autoplay_status(self):
+        """The bridge-owned queue's Autoplay state; Autoplay is only on its Connect route."""
+        bridge = self.playing_bridge()
+        return bridge.autoplay_status() if bridge is not None else None
+
     # --- state ------------------------------------------------------------------
     @property
     def state(self):

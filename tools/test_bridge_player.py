@@ -324,6 +324,27 @@ class ConnectControl(unittest.TestCase):
             player.play()                                          # ...and its Play adds no restart
             self.assertEqual(len(connect.plays), plays + 1)
 
+    def test_autoplay_status_follows_the_queue_and_tracks_past_it(self):
+        connect, speaker = FakeConnect(), FakeSpeaker()
+        player = service(connect, FakeStreamer(), {'room': URL}, autoplay=lambda: True).player('room', speaker)
+        self.assertIsNone(player.autoplay_status())                     # nothing playing
+        player.replace('spotify:album:%022d' % 1, 'album')
+        speaker.state.update(state='playing', source='SPOTIFY', title='Artist - Track 3')
+        self.assertEqual(player.autoplay_status(), 'armed')
+        later = bridge_player.time.monotonic() + 100
+        with mock.patch.object(bridge_player.time, 'monotonic', return_value=later):
+            speaker.state.update(title='Someone - Related Song', artist='Someone')
+            self.assertEqual(player.autoplay_status(), 'active')
+            speaker.state.update(title='Artist - Track 2', artist='Artist')  # back on the queue
+            self.assertEqual(player.autoplay_status(), 'armed')
+
+    def test_relay_route_never_reports_autoplay(self):
+        speaker = FakeSpeaker()
+        player = service(None, FakeStreamer(), {}, autoplay=lambda: True).player('room', speaker)
+        player.replace('spotify:album:%022d' % 1, 'album')
+        self.assertEqual(player.route.name, 'relay')
+        self.assertIsNone(player.autoplay_status())
+
     def test_late_track_reports_keep_the_clock(self):
         self.speaker.state.update(state='playing', source='SPOTIFY', title='Track 1', duration=180)
         self.assertTrue(self.player.active)
