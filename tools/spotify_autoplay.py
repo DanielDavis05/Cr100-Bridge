@@ -220,6 +220,8 @@ class SpotifyAutoplay:
     def play_provider(self, room, uri, kind):
         if not self.is_enabled():
             return False
+        if not room.available or not room.binding.native_sonos:
+            return False                              # bridge-owned queues play it themselves
         transport = self.transport_factory(room)       # validate route before any mutation
         connection = self._connection()
         connection.prepare()                         # authenticate before clearing old queue

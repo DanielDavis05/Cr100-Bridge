@@ -1684,6 +1684,14 @@ def main():
     configure_sources(house, args.config or Path(args.state).parent / 'bridge-config.json', args.listen_ip)
     from update_service import configure_updates
     configure_updates(house, args.config or Path(args.state).parent / 'bridge-config.json', args.listen_ip)
+    from bridge_runtime import configure as configure_bridge_playback
+    try:
+        bridge_playback = configure_bridge_playback(house, connected.values(),
+                                                    args.config or Path(args.state).parent / 'bridge-config.json',
+                                                    args.listen_ip)
+    except (ValueError, OSError) as error:
+        bridge_playback = None
+        log({'event': 'bridge-playback-unavailable', 'error': str(error)})
     if stub: stub.start()
     house.start(args.listen_ip, iface=args.iface)
     for player in house.players:
@@ -1717,6 +1725,7 @@ def main():
         try: status_path.unlink(missing_ok=True)
         except OSError: pass
         house.close()
+        if bridge_playback: bridge_playback.close()
         if stub: stub.close()
         for backend in connected.values(): backend.close()
     if reload.is_set():

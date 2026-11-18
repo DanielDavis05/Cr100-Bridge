@@ -356,10 +356,10 @@ class OwnershipAndCancellation(PolicyFixture):
         self.assertEqual(self.transport.commands, [('play_queue', 2)])
         self.assertFalse(any(call[0] == 'play_track' for call in self.connection.calls))
 
-    def test_unverified_non_sonos_route_rejected_before_connection(self):
+    def test_unverified_non_sonos_route_declined_before_connection(self):
+        # Non-Sonos rooms play the provider item through their bridge-owned queue.
         self.room.binding = RoomBinding(platform='generic', device_id='bedroom')
-        with self.assertRaises(BackendError):
-            self.policy.play_provider(self.room, SEED, 'music')
+        self.assertFalse(self.policy.play_provider(self.room, SEED, 'music'))
         self.connect_factory.assert_not_called()
         self.assertEqual(self.transport.commands, [])
 

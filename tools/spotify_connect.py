@@ -70,6 +70,22 @@ def _base(value):
         raise SpotifyConnectError('Spotify playback requires a verified local Sonos speaker.') from None
 
 
+def _zeroconf(value):
+    """A speaker's ZeroConf endpoint on a private LAN address (from mDNS or config)."""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        address = ipaddress.ip_address(parsed.hostname or '')
+        port = parsed.port
+        if (parsed.scheme != 'http' or not port or parsed.username or parsed.password
+                or not re.fullmatch(r'(/[A-Za-z0-9._~-]+){0,4}/?', parsed.path or '/')
+                or parsed.query or parsed.fragment or not address.is_private or address.is_loopback
+                or address.is_multicast or address.is_unspecified):
+            raise ValueError
+        return 'http://%s%s' % (parsed.netloc, parsed.path or '/')
+    except (ValueError, TypeError, AttributeError):
+        raise SpotifyConnectError('Spotify playback requires a verified local speaker.') from None
+
+
 def _proto_string(field, value):
     raw = value.encode('utf-8')
     size, prefix = len(raw), bytearray()
@@ -524,6 +540,97 @@ class SpotifyConnect:
             self._request('POST', self._spclient() + '/connect-state/v1/player/command/from/'
                 + self.device_id + '/to/' + receiver, body=body, token=native_token)
             return {'device_id': receiver, 'activated': activated}
+
+    # --- any Spotify Connect (ZeroConf) receiver, for bridge-owned queues ----------
+    def credentials(self):
+        """(canonical account, streaming OAuth token) for the relay audio helper."""
+        with self._lock:
+            self.check_config()
+            try:
+                account, token = self.folders._canonical_account(), self.folders._access_token()
+            except Exception:
+                raise SpotifyConnectError('Spotify playback sign-in failed. Reconnect Spotify playback in bridge setup.') from None
+            if not isinstance(account, str) or not 0 < len(account) <= 256 or not isinstance(token, str) or not token:
+                raise SpotifyConnectError('Spotify playback sign-in failed. Reconnect Spotify playback in bridge setup.')
+            return account, token
+
+    def receiver_info(self, url):
+        info = self._request('GET', _zeroconf(url) + '?action=getInfo')
+        receiver = info.get('deviceID')
+        if not isinstance(receiver, str) or not DEVICE.fullmatch(receiver):
+            raise SpotifyConnectError('This speaker does not provide compatible Spotify playback.')
+        return info
+
+    def _claim(self, url, info):
+        """Make sure the receiver is signed in to the bridge's account."""
+        if info.get('activeUser') == self._account:
+            return False
+        if info.get('tokenType') == 'authorization_code' and isinstance(info.get('clientID'), str) \
+                and CLIENT.fullmatch(info['clientID']) and re.fullmatch(r'[0-9.]{1,24}', str(info.get('version', ''))):
+            exchange = self._request('POST', 'https://accounts.spotify.com/api/token', fields={
+                'audience': info['clientID'], 'client_id': FOLDER_CLIENT_ID,
+                'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                'requested_token_type': 'urn:spotify:params:oauth:authorization_code',
+                'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+                'subject_token': self._oauth_token, 'resource': 'urn:spotify:resources:connect', 'scope': 'streaming'})
+            code = exchange.get('access_token')
+            if not isinstance(code, str) or not code or len(code) > 16384:
+                raise SpotifyConnectError('Spotify could not activate playback on this speaker.')
+            result = self._request('POST', _zeroconf(url), fields={
+                'action': 'addUser', 'version': info['version'], 'tokenType': 'authorization_code', 'clientKey': '',
+                'loginId': self._account, 'userName': self._account, 'blob': code,
+                'deviceName': 'CR100 bridge', 'deviceId': self.device_id})
+            if result.get('status') != 101 or result.get('spotifyError', 0) != 0:
+                raise SpotifyConnectError('Spotify could not activate playback on this speaker.')
+            return True
+        raise SpotifyConnectError('Select this speaker once in the Spotify app with the bridge account, then try again.')
+
+    def play_list(self, url, uris, index=0, position_ms=0, *, shuffle=False, repeat='off', autoplay=False):
+        """Play a finite track list on a ZeroConf receiver; Spotify then owns progression."""
+        uris = [_track(uri) for uri in uris]
+        if not uris or not 0 <= index < len(uris):
+            raise SpotifyConnectError('Nothing to play on this speaker.')
+        with self._lock:
+            self.prepare()
+            native_token = self._token()
+            info = self.receiver_info(url)
+            activated = self._claim(url, info)
+            options = {'license': 'on-demand', 'skip_to': {'track_index': index, 'track_uri': uris[index]},
+                       'player_options_override': {'repeating_context': repeat == 'all',
+                                                   'repeating_track': repeat == 'one',
+                                                   'shuffling_context': bool(shuffle)}}
+            seek = int(max(0, position_ms))
+            options['seek_to'] = seek
+            # An empty context stops after the list. A track context lets Spotify continue
+            # with related music afterwards (measured on SoundTouch and Sonos receivers).
+            context = uris[-1] if autoplay else ''
+            body = {'command': {'endpoint': 'play',
+                'context': {'uri': context, 'url': 'context://' + context if context else '',
+                            'pages': [{'tracks': [{'uri': uri} for uri in uris]}], 'metadata': {}},
+                'play_origin': {'feature_identifier': 'cr100-bridge'}, 'options': options}}
+            if self._closed:
+                raise SpotifyConnectError('Spotify playback has stopped.')
+            endpoint = self._spclient() + '/connect-state/v1/player/command/from/' + self.device_id + '/to/' + info['deviceID']
+            self._request('POST', endpoint, body=body, token=native_token)
+            # A receiver already holding this track (Bose SoundTouch, measured) resumes
+            # it where it last was and ignores play's seek_to; a separate seek is honoured.
+            self._request('POST', endpoint, body={'command': {'endpoint': 'seek_to', 'value': seek}}, token=native_token)
+            return {'device_id': info['deviceID'], 'activated': activated}
+
+    COMMANDS = frozenset(('pause', 'resume', 'skip_next', 'skip_prev', 'seek_to', 'set_shuffling_context',
+                          'set_repeating_context', 'set_repeating_track'))
+
+    def command(self, receiver, endpoint, value=None):
+        """One native transport command to a receiver that is already playing."""
+        if endpoint not in self.COMMANDS or not isinstance(receiver, str) or not DEVICE.fullmatch(receiver):
+            raise SpotifyConnectError('Unsupported Spotify playback command.')
+        command = {'endpoint': endpoint}
+        if value is not None: command['value'] = value
+        with self._lock:
+            self.prepare()
+            native_token = self._token()
+            self._request('POST', self._spclient() + '/connect-state/v1/player/command/from/'
+                          + self.device_id + '/to/' + receiver, body={'command': command}, token=native_token)
 
     def close(self):
         self._closed = True

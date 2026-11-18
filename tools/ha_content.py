@@ -90,6 +90,12 @@ class Content(ContentSource):
 
     def queue(self, entity):
         """The room's queue as Q:0/<n> items (1-based, as the CR100 numbers tracks)."""
+        provider = getattr(self, 'queue_provider', None)
+        entries = provider(entity) if callable(provider) else None
+        if entries is not None:   # a bridge-owned queue (non-Sonos player)
+            return [Node('Q:0/%d' % number, 'Q:0', entry.title, entry.ref, 'track', False, TRACK_CLASS,
+                         uri=entry.ref, artist=entry.artist, album=entry.album, thumbnail=entry.art)
+                    for number, entry in enumerate(entries, 1)]
         if not self.binding(entity).is_sonos:
             raise ContentError(720, 'Native queue browsing is unavailable for this Home Assistant player')
         nodes = self.cached((entity, 'Q:0'), QUEUE_TTL)
@@ -112,6 +118,7 @@ class Content(ContentSource):
     def decorate_queue(self, entity, nodes, start):
         """Recover artwork only for rows being returned, including hover metadata."""
         if not self.queue_art or not nodes or all(node.thumbnail for node in nodes): return nodes
+        if not self.binding(entity).is_sonos: return nodes   # bridge queue rows carry their own art
         # Current-track proxy art changes as playback advances. Keep it out of
         # the cached queue nodes so a later hover cannot inherit another track's
         # image. Native page results have their own URI-validated helper cache.
