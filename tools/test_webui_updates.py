@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import online_updates
 import webui
-from test_online_updates import build_test_package
+from test_online_updates import build_test_cramfs, build_test_descriptor, build_test_movie, build_test_package
 
 
 CR1 = '00:0e:58:01:02:03'
@@ -69,6 +69,44 @@ class FirmwareHttp(unittest.TestCase):
     def upload(self, data=None, path=None, **options):
         return self.call('POST', path or self.path, self.firmware() if data is None else data,
             headers={'Content-Type': 'application/octet-stream', 'X-Firmware-Name': 'misleading-99.9.upd'}, **options)
+
+    def test_web_panel_distinguishes_uploaded_release_from_installed_release(self):
+        marker = 'cfw3:' + 'b2' * 32
+        descriptor, modulus = build_test_descriptor(marker, 'R117')
+        movie = build_test_movie(marker + '\x00' + descriptor)
+        package, _ = build_test_package(rootfs=build_test_cramfs(movie))
+        # The custom fixture does not have a vendor signature.
+        package = package[:-1] + bytes([package[-1] ^ 1])
+        with patch.object(online_updates, '_CFW_MODULUS', modulus):
+            code, upload = self.upload(package)
+            self.assertEqual(code, 200, upload)
+            self.assertEqual(upload['firmware']['cfw_release'], 'R117')
+            self.assertEqual(upload['firmware_identity']['classification'], 'stock')
+            self.bridge.updates().report_release(CR2, descriptor)
+            code, response = self.call('GET', '/api/controllers')
+            self.assertEqual(code, 200, response)
+            identities = {row['mac']: row['firmware_identity'] for row in response['controllers']}
+            self.assertIsNone(identities[CR1]['release'])
+            self.assertEqual(identities[CR2]['release'], 'R117')
+
+    def test_bridge_package_uses_normal_review_and_requires_authenticated_paired_controller(self):
+        path = self.path + '/bridge-package'
+        self.assertEqual(self.call('POST', path, {})[0], 404)
+        firmware = self.root / 'firmware' / 'controller.upd'
+        firmware.parent.mkdir()
+        firmware.write_bytes(self.firmware())
+        self.assertEqual(self.call('POST', path, {}, authenticated=False)[0], 401)
+        self.assertEqual(self.call('POST', path, {}, csrf=False)[0], 403)
+        self.assertEqual(self.call('POST', path.replace(CR1, '00:11:22:33:44:55'), {})[0], 404)
+        self.assertTrue(self.call('GET', '/api/controllers')[1]['controllers'][0]['bridge_firmware_available'])
+        code, reviewed = self.call('POST', path, {})
+        self.assertEqual(code, 200, reviewed)
+        self.assertEqual(reviewed['firmware']['status'], 'staged')
+        self.assertFalse(reviewed['firmware']['armed'])
+        self.assertIsNone(self.bridge.updates().selection(CR1, '24.1-75101'))
+        firmware.write_bytes(b'invalid')
+        self.assertEqual(self.call('POST', path, {})[0], 400)
+        self.assertEqual(self.bridge.updates().status(CR1)['sha256'], reviewed['firmware']['sha256'])
 
     def test_upload_reviews_embedded_version_and_install_defaults_to_manual_prompt(self):
         before = self.config.read_bytes()

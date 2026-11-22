@@ -1,6 +1,7 @@
 """Vendor package verification, isolated controller lifecycle and recovery."""
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+import base64
 import hashlib
 import json
 import multiprocessing
@@ -63,6 +64,15 @@ def build_test_movie(marker):
     return movie[:4] + struct.pack('<I', len(movie)) + movie[8:]
 
 
+def build_test_descriptor(marker, release):
+    def field(data):
+        return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
+    key = _test_key()
+    message = 'cfwrel1:%s:%s' % (release, field(bytes.fromhex(marker.removeprefix('cfw3:'))))
+    signature = key.sign(message.encode('ascii'), padding.PKCS1v15(), hashes.SHA256())
+    return message + ':' + field(signature), key.public_key().public_numbers().n
+
+
 def build_test_package(version=(25, 2, 50130), model=2, rootfs=None):
     """Return (minimal signed fixture bytes, invented public modulus).
 
@@ -86,6 +96,32 @@ def _stage_in_process(config_path, package, modulus, index):
 
 
 class FirmwareValidation(unittest.TestCase):
+    def test_candidate_kind_uses_vendor_signature_and_embedded_custom_build(self):
+        marker = next(build for build, release in updates.KNOWN_CFW_BUILDS.items()
+                      if release == 'R15')
+        package, modulus = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
+        with patch.object(updates, 'VENDOR_MODULUS', modulus):
+            _, official = updates.validate_firmware(package)
+        self.assertEqual(official['firmware_kind'], 'official')
+        self.assertIsNone(official['cfw_release'])
+        with patch.object(updates, 'VENDOR_MODULUS', 3):
+            _, custom = updates.validate_firmware(package, allow_unverified=True)
+        self.assertEqual(custom['firmware_kind'], 'custom')
+        self.assertEqual(custom['cfw_release'], 'R15')
+
+        unknown_build = 'cfw3:' + 'ab' * 32
+        package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(unknown_build)))
+        with patch.object(updates, 'VENDOR_MODULUS', 3):
+            _, future = updates.validate_firmware(package, allow_unverified=True)
+        self.assertEqual(future['firmware_kind'], 'custom')
+        self.assertIsNone(future['cfw_release'])
+
+        package, _ = build_test_package()
+        with patch.object(updates, 'VENDOR_MODULUS', 3):
+            _, unverified = updates.validate_firmware(package, allow_unverified=True)
+        self.assertEqual(unverified['firmware_kind'], 'unverified')
+        self.assertIsNone(unverified['cfw_release'])
+
     def test_build_evidence_is_extracted_only_from_single_canonical_mainui_literal(self):
         marker = 'cfw3:' + 'ab' * 32
         for movie, expected in ((build_test_movie(marker), marker),
@@ -107,6 +143,32 @@ class FirmwareValidation(unittest.TestCase):
         self.assertEqual(info['model'], 2)
         self.assertEqual(info['sha256'], hashlib.sha256(data).hexdigest())
         self.assertTrue(info['signature_valid'])
+
+    def test_future_signed_release_label_requires_exact_canonical_package_marker(self):
+        marker = 'cfw3:' + 'ab' * 32
+        release = 'R123.4-rc2'
+        descriptor, modulus = build_test_descriptor(marker, release)
+        self.assertNotIn(marker, updates.KNOWN_CFW_BUILDS)
+        self.assertIsNone(updates.signed_cfw_identity(descriptor))
+        with patch.object(updates, '_CFW_MODULUS', modulus):
+            self.assertEqual(updates.signed_cfw_identity(descriptor), (marker, release))
+            a, b, c, d = descriptor.split(':')
+            alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+            noncanonical = d[:-1] + alphabet[alphabet.index(d[-1]) + 1]
+            for evidence, expected in (
+                (descriptor, release),
+                (descriptor.replace(release, 'R123.5'), None),
+                (':'.join((a, b, c, noncanonical)), None),
+                (descriptor + '\x00' + descriptor, None),
+                (build_test_descriptor('cfw3:' + 'cd' * 32, release)[0], None),
+            ):
+                with self.subTest(evidence=evidence):
+                    data, _ = build_test_package(rootfs=build_test_cramfs(
+                        build_test_movie(marker + '\x00' + evidence)))
+                    _, meta = updates.validate_firmware(data, allow_unverified=True)
+                    self.assertFalse(meta['signature_valid'])
+                    self.assertEqual(meta['cfw_build_id'], marker)
+                    self.assertEqual(meta['cfw_release'], expected)
 
     def test_corrupt_wrong_model_and_unsigned_packages_are_rejected(self):
         data, modulus = build_test_package()
@@ -157,6 +219,26 @@ class Lifecycle(unittest.TestCase):
 
     def stage(self, **kwargs):
         return self.manager.stage_controller(MAC, self.package, filename='misleading-99.0.upd', **kwargs)
+
+    def test_legacy_receipt_gets_candidate_kind_on_status_and_selection(self):
+        marker = next(build for build, release in updates.KNOWN_CFW_BUILDS.items()
+                      if release == 'R15')
+        package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
+        with patch.object(updates, 'VENDOR_MODULUS', 3):
+            staged = self.manager.stage_controller(MAC, package, arm=False)
+            with self.manager._state() as state:
+                record = state['controllers'][MAC]
+                record.pop('firmware_kind', None)
+                record.pop('cfw_release', None)
+            status = self.manager.status(MAC)
+            self.assertEqual((status['firmware_kind'], status['cfw_release']), ('custom', 'R15'))
+            self.manager.arm_controller(MAC, expected_sha256=staged['sha256'], allow_unverified=True)
+            with self.manager._state() as state:
+                record = state['controllers'][MAC]
+                record.pop('firmware_kind', None)
+                record.pop('cfw_release', None)
+            selection = self.manager.selection(MAC)
+            self.assertEqual((selection['firmware_kind'], selection['cfw_release']), ('custom', 'R15'))
 
     def test_upload_is_staged_without_arming_or_floor_change(self):
         status = self.stage(arm=False, current_version='24.1-75101')
@@ -289,7 +371,8 @@ class Lifecycle(unittest.TestCase):
         self.manager.report_controller(MAC, '25.2-50130')
         self.assertEqual(self.manager.status(MAC)['status'], 'downloading')
 
-        self.manager.report_build(OTHER, marker, '25.2-50130')
+        with self.assertRaises(updates.UpdateError):
+            self.manager.report_build(OTHER, marker, '25.2-50130')
         self.assertEqual(self.manager.status(MAC)['status'], 'downloading')
         result = self.manager.report_build(MAC, marker, '25.2-50130')
         self.assertEqual(result['status'], 'completed')
@@ -303,6 +386,49 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(updates.UpdateError):
             self.manager.report_build(MAC, marker, '25.2-50130')
         self.assertEqual(self.manager.status(MAC)['status'], 'downloading')
+
+    def test_live_cfw_identity_requires_fresh_recognized_report(self):
+        self.assertEqual(self.manager.firmware_identity(MAC)['classification'], 'stock')
+        for marker, release in updates.KNOWN_CFW_BUILDS.items():
+            with self.subTest(release=release):
+                self.manager.report_build(MAC, marker, '25.2-50130')
+                current = self.manager.firmware_identity(MAC)
+                self.assertEqual(current['classification'], 'custom')
+                self.assertEqual(current['release'], release)
+                self.assertEqual(current['build_id'], marker)
+                self.assertEqual(current['observed_at'], self.now)
+                self.assertEqual(current['expires_at'], self.now + updates.LIVE_CFW_TTL)
+        self.assertEqual(self.manager.firmware_identity(OTHER)['classification'], 'stock')
+        # The report survives a bridge restart, while freshness still expires.
+        fresh = updates.UpdateManager(self.directory / 'bridge-config.json', clock=lambda: self.now)
+        self.assertEqual(fresh.firmware_identity(MAC)['classification'], 'custom')
+        self.now += updates.LIVE_CFW_TTL - 1
+        self.manager.report_build(MAC, marker, '25.2-50130')
+        self.now += updates.LIVE_CFW_TTL - 1
+        self.assertEqual(fresh.firmware_identity(MAC)['classification'], 'custom')
+        self.now += 1
+        self.assertEqual(fresh.firmware_identity(MAC)['classification'], 'stock')
+
+    def test_live_cfw_identity_rejects_unrecognized_and_malformed_builds(self):
+        for marker in ('cfw3:' + 'cd' * 32, 'cfw3:' + 'CD' * 32, 'not-cfw', None):
+            with self.subTest(marker=marker), self.assertRaises(updates.UpdateError):
+                self.manager.report_build(MAC, marker, '25.2-50130')
+            self.assertEqual(self.manager.firmware_identity(MAC)['classification'], 'stock')
+
+    def test_staged_build_is_recognized_only_for_its_controller_and_live_report(self):
+        marker = 'cfw3:' + 'ab' * 32
+        package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
+        self.manager.stage_controller(MAC, package, current_version='25.2-50130')
+        self.assertEqual(self.manager.firmware_identity(MAC)['classification'], 'stock')
+        with self.assertRaises(updates.UpdateError):
+            self.manager.report_build(OTHER, marker, '25.2-50130')
+        self.manager.report_build(MAC, marker, '25.2-50130')
+        self.assertEqual(self.manager.firmware_identity(MAC)['classification'], 'custom')
+        # Starting a known stock image clears evidence before its old receipt
+        # could be mistaken for a live install.
+        self.stage(current_version='25.2-50130')
+        self.manager.controller_started(self.manager.selection(MAC)['token'], MAC)
+        self.assertEqual(self.manager.firmware_identity(MAC)['classification'], 'stock')
 
     def test_completed_version_transition_retains_only_a_bounded_player_lease(self):
         self.stage(current_version='24.1-75101')

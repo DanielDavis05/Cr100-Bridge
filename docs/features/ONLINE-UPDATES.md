@@ -14,11 +14,30 @@ native connection error.
 The implementation is present in this checkout. This document does not assert
 that a physical controller has been flashed with custom firmware.
 
+## Guided firmware update
+
+Open **Controllers → Firmware** on the paired controller. The wizard follows the
+controller through **Choose firmware**, **Review firmware**, **Install on CR100**,
+and **Done**. Choose a local `.upd` or select **Use firmware on bridge** when an
+administrator has placed an image at `firmware/controller.upd` beside the bridge
+configuration file. The same release detection and signature review apply to
+both sources. A new image at that path becomes available without a code update.
+For a custom-to-custom upgrade, confirm on the CR100 under **System Settings →
+Online Updates**. A stock controller requires vendor-signed firmware.
+
 ## Upload and install controller firmware
 
 Open **Controllers** in the authenticated web UI. Each paired controller has its
 own Controller firmware section, showing its current version, target version,
 and update status.
+
+For custom firmware, the panel identifies the uploaded release from the controller
+UI inside the package. New releases carry a project-signed label and build ID.
+The running controller reports the same identity to the bridge, so its release
+can appear before any file has been uploaded. Future releases signed with the
+same project key are recognized automatically. Older R14, R15 and R16 images
+use their known build IDs. The Sonos internal version can be identical across
+multiple custom releases.
 
 1. Choose the controller's `.upd` file and select **Upload**. Uploads are limited
    to 16 MiB. The bridge verifies the package and reads its embedded internal

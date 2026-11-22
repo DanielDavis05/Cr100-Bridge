@@ -8,6 +8,7 @@ an installer or treats a successful HTTP download as a completed installation.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import base64
 import fcntl
 import hashlib
 import hmac
@@ -45,6 +46,81 @@ _VERSION = re.compile(r'(\d{1,3})\.(\d{1,3})-(\d{1,10})\Z')
 FORCE_UNAVAILABLE = ('Automatic update prompts are supported only on a controller confirmed to run 4.3. '
                      'Use Settings > Online Updates on 4.3.2 or when its version is unknown.')
 CFW_BUILD_ID = re.compile(r'cfw3:[0-9a-f]{64}\Z')
+# Legacy movies send only this package-specific ID. New movies carry a signed
+# descriptor, so their release labels require no catalog entry.
+KNOWN_CFW_BUILDS = {
+    'cfw3:1f20bfc8b92514e410f3107582817645797e7b8eba704d8f96a3c2fd5b2a2039': 'R14',
+    'cfw3:3812667d3dceee9e392e3e09726f3f181e011a715d3476020a5665d32860f932': 'R15',
+    # The single-package R16 reports one build ID in both UI smoothness modes.
+    'cfw3:7e6879933c4a4ecee735e5f3f6d83201a2403c82b86dbffaa4c7a18a4ece016a': 'R16',
+    # Keep the separately distributed R16 builds recognizable after upgrades.
+    'cfw3:78284516a03ebf26d19bf8a28bcb9bdf38f1cf0d589424e3e309fd3939fcefbc': 'R16',
+    'cfw3:3b74d292a85522d40de16ec641006fbb05384dcced03290ce97ead7ce5c57493': 'R16',
+    'cfw3:666f14b443b71ae9f2d85b4a6c6ddea833954e78a42fbf47ea231e2e567d1756': 'R16',
+    'cfw3:d1087b245c7e53b9f39af0775a05886fdeea4679c841a65cb39a3c568a11e0b8': 'R16',
+    'cfw3:6f0c655528958eac31d0748942c74bb345bdd7be538785f35e88664bbec51eb1': 'R16',
+    'cfw3:d9239cad6f5506a0fc243a7d6079e3761aef65d726bf055cf77f10978fb502cc': 'R16',
+}
+LIVE_CFW_TTL = 240  # The controller reports every 60 seconds while its UI is running.
+CFW_RELEASE_PROPERTY = 'CR100_CFWRelease'
+_CFW_RELEASE = re.compile(
+    r'cfwrel1:(R[1-9][0-9]{0,5}(?:[.-][A-Za-z0-9]+)*):([A-Za-z0-9_-]{43}):([A-Za-z0-9_-]{171})\Z')
+# Public key of the project descriptor signer. This key authenticates a
+# display label and build ID. Vendor UPD verification retains its own key.
+_CFW_MODULUS = int(
+    'df32d6ebbc896a5f04fec9c64be06c36aed3fabf1d0cb3c7ea6d93a06a9eac068a'
+    'a1cf3415bc4585f78a834d0068b3a6155165cfb686e5c6e3de4b7c71bef684b07'
+    '622b1bd084ab16fa32ea2ccbee5015708017fdc0c9712951c1bfc70ddf6631896'
+    'ed6b940ff4a68a0c68d63afaef5eb28948784013f488875f00bc3b9d745d', 16)
+_CFW_EXPONENT = 65537
+_SHA256_DIGEST_INFO = bytes.fromhex('3031300d060960864801650304020105000420')
+
+
+def signed_cfw_identity(descriptor):
+    """Verify a canonical descriptor and return its (build ID, release)."""
+    if not isinstance(descriptor, str) or len(descriptor) > 248:
+        return None
+    match = _CFW_RELEASE.fullmatch(descriptor)
+    if not match or len(match[1]) > 24:
+        return None
+    build, signature = (base64.urlsafe_b64decode(field + '=') for field in match.groups()[1:])
+    if any(base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=') != field
+           for raw, field in ((build, match[2]), (signature, match[3]))):
+        return None
+    number = int.from_bytes(signature, 'big')
+    if not 0 < number < _CFW_MODULUS:
+        return None
+    signed = descriptor.rsplit(':', 1)[0].encode('ascii')
+    info = _SHA256_DIGEST_INFO + hashlib.sha256(signed).digest()
+    expected = b'\0\1' + b'\xff' * (128 - len(info) - 3) + b'\0' + info
+    actual = pow(number, _CFW_EXPONENT, _CFW_MODULUS).to_bytes(128, 'big')
+    if hmac.compare_digest(actual, expected):
+        return 'cfw3:' + build.hex(), match[1]
+    return None
+
+
+def _signed_release(metadata):
+    identity = signed_cfw_identity(metadata.get('cfw_descriptor'))
+    if identity and identity[0] == metadata.get('cfw_build_id'):
+        return identity[1]
+    return None
+
+
+def candidate_firmware(metadata):
+    """Describe the image in a staged UPD, independent of its filename.
+
+    A failed vendor signature alone is not proof that the package is one of our
+    custom releases. The canonical movie marker identifies custom firmware;
+    a signed descriptor or legacy catalog entry supplies the release label.
+    """
+    signature_valid = metadata.get('signature_valid')
+    cfw_build_id = metadata.get('cfw_build_id')
+    if signature_valid is True:
+        return {'firmware_kind': 'official', 'cfw_release': None}
+    if isinstance(cfw_build_id, str) and CFW_BUILD_ID.fullmatch(cfw_build_id):
+        return {'firmware_kind': 'custom',
+                'cfw_release': _signed_release(metadata) or KNOWN_CFW_BUILDS.get(cfw_build_id)}
+    return {'firmware_kind': 'unverified', 'cfw_release': None}
 
 
 def _mainui_from_cramfs(data):
@@ -110,8 +186,8 @@ def _mainui_from_cramfs(data):
     return b''.join(result)
 
 
-def firmware_build_id(rootfs):
-    """Read only the canonical build literal in the package's actual MainUI.
+def firmware_movie_identity(rootfs):
+    """Read the canonical build ID and matching descriptor from the actual MainUI.
 
     Older images and unsupported/malformed filesystems provide no independent
     evidence. They remain installable under the existing validation policy.
@@ -119,13 +195,21 @@ def firmware_build_id(rootfs):
     try:
         movie = _mainui_from_cramfs(rootfs)
         if movie[:3] != b'FWS' or len(movie) < 8 or struct.unpack_from('<I', movie, 4)[0] != len(movie):
-            return None
+            return None, None
         matches = re.findall(rb'\x00(cfw3:[0-9a-f]{64})\x00', movie)
-        if len(matches) == 1 and movie.count(b'cfw3:') == 1:
-            return matches[0].decode('ascii')
+        if len(matches) != 1 or movie.count(b'cfw3:') != 1:
+            return None, None
+        build_id = matches[0].decode('ascii')
+        markers = re.findall(rb'\x00(cfwrel1:[\x21-\x7e]{0,240})\x00', movie)
+        if len(markers) == 1 and movie.count(b'cfwrel1:') == 1:
+            descriptor = markers[0].decode('ascii')
+            identity = signed_cfw_identity(descriptor)
+            if identity and identity[0] == build_id:
+                return build_id, descriptor
+        return build_id, None
     except (OSError, ValueError, KeyError, TypeError, IndexError, struct.error, zlib.error, RecursionError):
         pass
-    return None
+    return None, None
 
 
 def _invalid_json_number(value):
@@ -229,13 +313,15 @@ def validate_firmware(source, *, allow_unverified=False):
         raise UpdateError('Firmware must explicitly support Sonos model 2 (CR100).')
     if sum(r[0] == 4 for r in records) != 1 or not any(r[0] == 6 for r in records):
         raise UpdateError('The CR100 firmware must contain its root filesystem and kernel.')
-    build_id = firmware_build_id(next(r[2] for r in records if r[0] == 4))
-    return data, dict(version=version, model=2, manufacturer=1,
+    build_id, descriptor = firmware_movie_identity(next(r[2] for r in records if r[0] == 4))
+    metadata = dict(version=version, model=2, manufacturer=1,
         submodel_min=compatible[0][0], submodel_max=compatible[0][1],
         size=len(data), sha256=hashlib.sha256(data).hexdigest(),
         signature_valid=signature_valid, signature_warning=signature_warning,
-        cfw_build_id=build_id,
+        cfw_build_id=build_id, cfw_descriptor=descriptor,
         signature='Sonos RSA-1024 PKCS#1 v1.5 MD5')
+    metadata.update(candidate_firmware(metadata))
+    return data, metadata
 
 
 def _atomic_bytes(path, data, mode=0o600):
@@ -285,7 +371,8 @@ class UpdateManager:
                 if self.state_path.stat().st_size > 2 * 1024 * 1024:
                     raise ValueError('Oversized update state')
                 state = json.loads(self.state_path.read_text(), parse_constant=_invalid_json_number)
-                if state.get('schema') != 1 or not isinstance(state.get('controllers'), dict):
+                if (state.get('schema') != 1 or not isinstance(state.get('controllers'), dict)
+                        or not isinstance(state.get('live_firmware', {}), dict)):
                     raise ValueError('Invalid update state')
             except FileNotFoundError:
                 state = dict(schema=1, controllers={})
@@ -308,6 +395,14 @@ class UpdateManager:
         now = self.clock()
         if not isinstance(now, (int, float)) or not math.isfinite(now):
             raise UpdateError('The bridge clock is unavailable.', 503)
+        live = state.get('live_firmware', {})
+        for mac, report in list(live.items()):
+            seen = report.get('observed_at') if isinstance(report, dict) else None
+            build_id = report.get('build_id') if isinstance(report, dict) else None
+            if (not isinstance(mac, str) or not isinstance(seen, (int, float))
+                    or not math.isfinite(seen) or not seen <= now < seen + LIVE_CFW_TTL
+                    or not isinstance(build_id, str) or not CFW_BUILD_ID.fullmatch(build_id)):
+                del live[mac]
         for mac, record in list(state['controllers'].items()):
             if not isinstance(record, dict):
                 del state['controllers'][mac]
@@ -337,6 +432,9 @@ class UpdateManager:
             return dict(mac=mac, status='none', armed=False, force_prompt=False, force_active=False)
         result = {key: value for key, value in record.items()
                   if key not in ('token', 'stored_name', 'package_path')}
+        # Older staged receipts predate the display fields. Derive them from
+        # the validated signature and embedded build marker on every read.
+        result.update(candidate_firmware(record))
         result['armed'] = record.get('status') == 'armed'
         result['force_prompt'] = bool(record.get('force_prompt') and result['armed'])
         result['force_active'] = bool(result['force_prompt'] and not record.get('prompt_acknowledged'))
@@ -348,6 +446,38 @@ class UpdateManager:
             if mac is not None:
                 return self._public(state['controllers'].get(mac), mac)
             return {key: self._public(value) for key, value in state['controllers'].items()}
+
+    def firmware_identity(self, mac):
+        """Current CFW evidence for one controller, independent of update receipts.
+
+        An absent or expired report is treated as stock. This is a deliberate
+        default for this pre-release firmware: the stock and custom movies
+        share a version, and old install receipts do not override the default.
+        """
+        mac = normalize_mac(mac)
+        with self._state() as state:
+            report = state.get('live_firmware', {}).get(mac)
+            if not report:
+                return dict(mac=mac, classification='stock', release=None,
+                            build_id=None, observed_at=None, expires_at=None)
+            build_id = report['build_id']
+            record = state['controllers'].get(mac)
+            signed = signed_cfw_identity(report.get('cfw_descriptor'))
+            release = signed[1] if signed and signed[0] == build_id else None
+            # A legacy unknown ID requires this controller's staged package.
+            if release is None and build_id not in KNOWN_CFW_BUILDS and (
+                    not isinstance(record, dict) or record.get('cfw_build_id') != build_id):
+                return dict(mac=mac, classification='stock', release=None,
+                            build_id=None, observed_at=None, expires_at=None)
+            seen = report['observed_at']
+            return dict(mac=mac, classification='custom', release=release or KNOWN_CFW_BUILDS.get(build_id),
+                        build_id=build_id, observed_at=seen, expires_at=seen + LIVE_CFW_TTL)
+
+    def invalidate_firmware_identity(self, mac):
+        """Drop live CFW evidence when a known stock image starts installation."""
+        mac = normalize_mac(mac)
+        with self._state() as state:
+            state.get('live_firmware', {}).pop(mac, None)
 
     def bridge_status(self):
         """Read the transport's atomic job receipt without exposing bearer data."""
@@ -509,6 +639,7 @@ class UpdateManager:
                 record.pop(field, None)
             record.update(status='armed', allow_unverified=allow_unverified,
                 cfw_build_id=metadata.get('cfw_build_id'),
+                cfw_descriptor=metadata.get('cfw_descriptor'),
                 force_prompt=bool(force_prompt), force_requested=bool(force_prompt),
                 token=secrets.token_urlsafe(32), current_version=current,
                 install_from_version=current, expires_at=now + self.ttl,
@@ -547,7 +678,8 @@ class UpdateManager:
             record = state['controllers'].get(mac)
             if not record or record.get('status') not in ('armed', 'downloading'):
                 return None
-            return dict(record, kind='controller', package_path=str(self._package_path(record['stored_name'])))
+            return dict(record, kind='controller', package_path=str(self._package_path(record['stored_name'])),
+                        **candidate_firmware(record))
 
     def compatibility_selection(self, mac, token=None):
         """Authorize pending virtual-player work after controller-first boot.
@@ -670,6 +802,8 @@ class UpdateManager:
             record.update(status='downloading', force_prompt=False, updated_at=now,
                           download_started_at=record.get('download_started_at', now),
                           expires_at=record.get('download_started_at', now) + DOWNLOAD_TTL)
+            if not record.get('cfw_build_id'):
+                state.get('live_firmware', {}).pop(normalize_mac(mac), None)
             return self._public(record)
 
     def fail_controller(self, token, mac, error):
@@ -705,25 +839,47 @@ class UpdateManager:
             return self._public(record)
 
     def report_build(self, mac, build_id, current_version=None):
-        """Accept an installed movie's package-specific startup evidence.
-
-        A well-formed report is acknowledged even with no pending installation,
-        allowing the movie's once-per-start reporter to stop. Only a matching
-        downloading record may transition to completed.
-        """
-        mac = normalize_mac(mac)
+        """Receive the legacy opaque build heartbeat."""
         if not isinstance(build_id, str) or not CFW_BUILD_ID.fullmatch(build_id):
             raise UpdateError('Invalid controller build evidence.')
+        return self._report_build(mac, build_id, current_version)
+
+    def report_release(self, mac, descriptor, current_version=None):
+        """Receive a project-signed release heartbeat from a paired controller."""
+        identity = signed_cfw_identity(descriptor)
+        if identity is None:
+            raise UpdateError('Invalid controller release descriptor.')
+        return self._report_build(mac, identity[0], current_version, descriptor)
+
+    def _report_build(self, mac, build_id, current_version, descriptor=None):
+        """Record live evidence separately from completion of an exact download."""
+        mac = normalize_mac(mac)
         with self._state() as state:
             record = state['controllers'].get(mac)
+            live = state.setdefault('live_firmware', {})
+            prior = live.get(mac, {})
+            matching_package = record and record.get('cfw_build_id') == build_id
+            if descriptor is None:
+                # Preserve signed evidence received before its compatibility
+                # heartbeat, without extending the lifetime of the signature.
+                signed = signed_cfw_identity(prior.get('cfw_descriptor'))
+                if ((signed and signed[0] == prior.get('build_id') == build_id) or
+                        (matching_package and _signed_release(record))):
+                    return self._public(record, mac)
+            if descriptor is None and build_id not in KNOWN_CFW_BUILDS and not matching_package:
+                raise UpdateError('Unrecognized controller build evidence.', 409)
+            now = self.clock()
+            live[mac] = dict(build_id=build_id, observed_at=now)
+            if descriptor is not None:
+                live[mac]['cfw_descriptor'] = descriptor
             if not record or record.get('status') != 'downloading':
                 return self._public(record, mac)
             current = self._version_or_none(current_version) if current_version else record.get('current_version')
             expected = record.get('cfw_build_id')
             if (not expected or not hmac.compare_digest(expected, build_id)
+                    or (_signed_release(record) and descriptor != record['cfw_descriptor'])
                     or current != record['version']):
                 raise UpdateError('Controller build does not match the downloading firmware.', 409)
-            now = self.clock()
             record.update(status='completed', force_prompt=False, prompt_acknowledged=True,
                           updated_at=now, completed_at=now, last_error='',
                           completion_evidence='installed-movie-build', installed_cfw_build_id=build_id,

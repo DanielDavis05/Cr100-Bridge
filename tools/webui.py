@@ -915,6 +915,8 @@ class Bridge:
                            'last_heard_s': station.get('last_heard_s') if station else None,
                            'visible_components': None if visible_components(config, mac) is None else
                                list((names.get(mac) or {}).get('visible_components', [])),
+                           'bridge_firmware_available': self.bridge_firmware_path().is_file(),
+                           'firmware_identity': self.firmware_identity(mac),
                            'events': [event for event in link['events'] if event.get('mac') == mac or
                                       (not event.get('mac') and (len(macs) == 1 or
                                        event['event'] in ('radio-lost', 'radio-reopened')))][-12:],
@@ -956,12 +958,28 @@ class Bridge:
             self._online_update_management = UpdateManager(self.config_path)
         return self._online_update_management
 
+    def firmware_identity(self, mac):
+        """Fresh CFW evidence, otherwise the pre-release stock default."""
+        try:
+            return self.updates().firmware_identity(mac)
+        except (OSError, ValueError):
+            return {'mac': mac, 'classification': 'stock', 'release': None,
+                    'build_id': None, 'observed_at': None, 'expires_at': None}
+
+    def bridge_firmware_path(self):
+        return self.config_path.parent / 'firmware' / 'controller.upd'
+
     def controller_firmware(self, mac, command=None, payload=None, upload=None, filename=None):
         controller = self.spotify_controller(mac)
         current = (self.details.get(controller['mac']) or {}).get('firmware')
         try:
             manager = self.updates()
-            if command == 'upload':
+            if command == 'bridge-package':
+                upload = self.bridge_firmware_path()
+                if not upload.is_file():
+                    raise ApiError(404, 'No firmware file is available on the bridge. Choose a .upd file.')
+                filename = upload.name
+            if command in ('upload', 'bridge-package'):
                 status = manager.stage_controller(controller['mac'], upload, filename=filename,
                                                   current_version=current, arm=False)
             elif command == 'install':
@@ -978,7 +996,8 @@ class Bridge:
                 status = manager.cancel_controller(controller['mac'])
             else:
                 status = manager.status(controller['mac'])
-            return {'controller': controller, 'current_version': current, 'firmware': status}
+            return {'controller': controller, 'current_version': current, 'firmware': status,
+                    'firmware_identity': self.firmware_identity(controller['mac'])}
         except ValueError as error:
             raise ApiError(getattr(error, 'status', 400), str(error)) from error
 
@@ -1524,6 +1543,7 @@ def make_handler(bridge, auth, log):
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.save_controller_components(m.group(1), b))
     route('GET', '/api/updates')(lambda h, b, m: bridge.update_status())
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/firmware')(lambda h, b, m: bridge.controller_firmware(m.group(1)))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/bridge-package')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'bridge-package'))
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/install')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'install', b))
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/cancel')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'cancel'))
 

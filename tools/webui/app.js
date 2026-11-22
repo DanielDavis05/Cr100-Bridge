@@ -749,7 +749,7 @@ views.controllers = {
       if (!firmwarePanels.has(c.mac)) firmwarePanels.set(c.mac, firmwarePanel(c));
       const firmware = firmwarePanels.get(c.mac);
       $('.controller-body', node).append(firmware.node);
-      firmware.update(c.update, c.firmware);
+      firmware.update(c.update, c.firmware, c.firmware_identity);
       return node;
     };
 
@@ -768,7 +768,7 @@ views.controllers = {
     };
 
     // Upload → Install → Update on the controller → Done, with the current step lit.
-    const FIRMWARE_STEPS = ['Upload a file', 'Install', 'Update on the controller', 'Done'];
+    const FIRMWARE_STEPS = ['Choose firmware', 'Review firmware', 'Install on CR100', 'Done'];
     const firmwareStep = (state) => ({ staged: 1, ready: 1, armed: 2, downloading: 2, installing: 2, started: 2,
       completed: 4, complete: 4 }[state] ?? 0);
 
@@ -777,6 +777,8 @@ views.controllers = {
         <form class="firmware-form">
           <div class="versions"><span class="ver firmware-current"></span><span class="firmware-target-wrap">${ARROW}<span class="ver target firmware-target"></span></span></div>
           <ol class="stepper">${FIRMWARE_STEPS.map((label, i) => `<li><span class="num">${i + 1}</span><span>${label}</span></li>`).join('')}</ol>
+          <p class="firmware-instruction" role="status"></p>
+          <button type="button" class="inline-button quiet firmware-bridge-package" hidden>Use firmware on bridge</button>
           <div class="file-pick"><label><input type="file" class="firmware-file" accept=".upd,application/octet-stream"><span class="inline-button quiet">Choose .upd file</span></label>
             <span class="file-name">No file chosen</span></div>
           <p class="hint firmware-version-warning" role="status" hidden></p>
@@ -795,6 +797,7 @@ views.controllers = {
       const input = $('.firmware-file', node), force = $('.firmware-force', node);
       const proceed = $('.firmware-continue', node);
       let reviewedSha256;
+      const bridgePackage = $('.firmware-bridge-package', node);
       const upload = $('.firmware-upload', node), install = $('.firmware-install', node), cancel = $('.firmware-cancel', node);
       const progress = $('.firmware-progress', node), status = $('.firmware-status', node), error = $('.firmware-error', node);
       const setProgress = (percent) => {
@@ -802,11 +805,13 @@ views.controllers = {
         bar.setAttribute('aria-valuenow', String(percent));
         bar.querySelectorAll('i').forEach((segment, i) => segment.classList.toggle('on', i < Math.round(percent / 10)));
       };
-      let firmware = {}, currentVersion = controller.firmware, busy = false, notice = '', opened = false;
+      let firmware = {}, currentVersion = controller.firmware, currentIdentity = controller.firmware_identity;
+      let busy = false, notice = '', opened = false;
       const endpoint = `/api/controllers/${controller.mac}/firmware`;
-      const update = function (fresh, current) {
+      const update = function (fresh, current, identity) {
         if (fresh) firmware = fresh;
         if (arguments.length > 1) currentVersion = current || '';
+        if (arguments.length > 2) currentIdentity = identity;
         if (reviewedSha256 !== firmware.sha256) { proceed.checked = false; reviewedSha256 = firmware.sha256; }
         const unverified = firmware.signature_valid === false;
         $('.firmware-signature', node).hidden = !unverified;
@@ -821,12 +826,18 @@ views.controllers = {
         const inProgress = ['downloading', 'installing', 'started'].includes(state);
         const terminal = ['none', 'completed', 'complete', 'cancelled', 'expired', 'failed'].includes(state);
         const reportedVersion = currentVersion || '';
+        const installedRelease = currentIdentity?.classification === 'custom'
+          ? (currentIdentity.release || 'Custom firmware') : '';
+        const currentLabel = [installedRelease, reportedVersion].filter(Boolean).join(' · ');
+        const targetLabel = [firmware.cfw_release, firmware.version].filter(Boolean).join(' · ');
         const normalizedVersion = { '4.3': '24.1-75101', '4.3.2': '25.2-50130' }[reportedVersion] || reportedVersion;
         const sameVersion = Boolean(firmware.version) && normalizedVersion === firmware.version;
         const versionWarning = $('.firmware-version-warning', node);
         versionWarning.hidden = !sameVersion;
         versionWarning.textContent = sameVersion
-          ? 'This controller already runs this version. The stock updater may skip it; you can still install.' : '';
+          ? firmware.firmware_kind === 'custom'
+            ? 'Custom releases can share this Sonos version. Check the target release before installing.'
+            : 'This controller already runs this version. The stock updater may skip it; you can still install.' : '';
         const forceAllowed = reportedVersion === '4.3' || /^24\.1-\d+$/.test(reportedVersion);
         const internalVersion = /^(\d+)\.(\d+)-\d+$/.exec(reportedVersion);
         const retirementUI = reportedVersion === '4.3.2' || (internalVersion &&
@@ -834,15 +845,33 @@ views.controllers = {
         if (!forceAllowed) force.checked = false;
 
         // Summary line, versions and the step the update is on.
-        $('.firmware-summary', node).textContent = `${reportedVersion || 'Version not known yet'} · ${labels[state] || state}`;
-        $('.firmware-current', node).textContent = reportedVersion || 'Not known yet';
+        $('.firmware-summary', node).textContent = `${currentLabel || 'Version not known yet'} · ${labels[state] || state}`;
+        $('.firmware-current', node).textContent = currentLabel || 'Not known yet';
         $('.firmware-target-wrap', node).hidden = !firmware.version;
-        $('.firmware-target', node).textContent = firmware.version || '';
+        $('.firmware-target', node).textContent = targetLabel;
         const step = firmwareStep(state), failed = ['failed', 'expired', 'cancelled'].includes(state);
         node.querySelectorAll('.stepper li').forEach((item, i) => {
           item.className = i < step ? 'done' : i === step ? (failed && i === 0 ? 'now bad' : 'now') : '';
           if (i === step) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
         });
+        const choose = step === 0 || step === 4;
+        const review = step === 1;
+        $('.file-pick', node).hidden = !choose;
+        bridgePackage.hidden = !choose || !controller.bridge_firmware_available;
+        bridgePackage.disabled = busy;
+        upload.hidden = !choose;
+        install.hidden = !review;
+        force.closest('label').hidden = !review || !forceAllowed;
+        $('.firmware-signature', node).hidden = !review || !unverified;
+        versionWarning.hidden = !review || !sameVersion;
+        $('.firmware-guidance', node).hidden = choose;
+        $('.firmware-instruction', node).textContent = step === 4
+          ? 'Update complete. You can choose another firmware file.'
+          : choose ? 'Choose a controller firmware file to check its release.'
+          : review ? (firmware.firmware_kind === 'custom' && !installedRelease
+            ? 'First confirm this controller already accepts custom firmware. Stock controllers require vendor-signed updates.'
+            : 'Check the installed and selected releases, then confirm the update for this controller.')
+          : 'Keep the controller docked and follow the update instructions on its screen.';
         // Open the panel by itself once while an update is under way; after that the person decides.
         if (!opened && step > 0 && step < 4) { node.open = true; opened = true; }
 
@@ -876,6 +905,7 @@ views.controllers = {
           const result = await operation();
           firmware = result.firmware;
           currentVersion = result.current_version || '';
+          currentIdentity = result.firmware_identity;
           return true;
         } catch (failure) {
           error.textContent = failure.message;
@@ -884,6 +914,11 @@ views.controllers = {
           busy = false; progress.hidden = true; update();
         }
       };
+      bridgePackage.addEventListener('click', async () => {
+        if (await perform('Checking firmware on the bridge…', () => api('POST', endpoint + '/bridge-package', {}))) {
+          input.value = ''; force.checked = false; update();
+        }
+      });
       input.addEventListener('change', () => { error.textContent = ''; update(); });
       force.addEventListener('change', () => update());
       proceed.addEventListener('change', () => update());
@@ -897,7 +932,7 @@ views.controllers = {
           setProgress(percent);
           status.textContent = percent === 100 ? 'Verifying the firmware signature and version…' : `Uploading firmware… ${percent}%`;
         }));
-        if (ok) { input.value = ''; force.checked = false; notice = `Firmware ${firmware.version} is uploaded. Choose Install to stage it for this controller.`; update(); }
+        if (ok) { input.value = ''; force.checked = false; notice = `Firmware ${firmware.cfw_release || firmware.version} is uploaded. Choose Install to stage it for this controller.`; update(); }
       });
       install.addEventListener('click', () => perform('Preparing the controller update…', () => api('POST', endpoint + '/install', { force: force.checked, sha256: firmware.sha256, allow_unverified: proceed.checked })));
       cancel.addEventListener('click', async () => {
@@ -965,7 +1000,7 @@ views.controllers = {
       for (const controller of data.controllers) controller.update = data.updates
         ? data.updates.controllers?.[controller.mac] || { status: 'none' } : undefined;
       if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
-        for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware);
+        for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware, controller.firmware_identity);
         updateBridgeStatus(data);
         updateDevicesStatus(data);
         return;

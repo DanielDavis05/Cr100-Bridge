@@ -25,7 +25,8 @@ import zoneplayers
 from test_backends import MemoryBackend
 from test_controller_components import SourceAddresses, request, soap, topology_body
 from test_ha_backend import field, wait_for
-from test_online_updates import build_test_package, build_test_cramfs, build_test_movie
+from test_online_updates import (build_test_package, build_test_cramfs, build_test_movie,
+                                 build_test_descriptor)
 from test_zoneplayers import HOUSEHOLD, M_SEARCH, zp
 
 A, B = '00:0e:58:01:02:03', '00:0e:58:04:05:06'
@@ -105,6 +106,43 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(self.manager.authorize_download(selected['token'], A).read_bytes(), self.package)
 
+    def test_native_update_message_names_target_and_custom_release(self):
+        self.stage(current='25.2-50130')
+        self.check(current='25.2-50130')
+        official = self.service.message(A)
+        self.assertEqual(official['MessageHeader'], 'Official controller firmware')
+        self.assertIn('Official Sonos firmware 25.2-50130', official['MessageBody'])
+        self.assertIn('Official Sonos firmware 25.2-50130', official['IntroMessageBody'])
+        self.assertEqual(official['ContinuePrompt'], 'Install official firmware')
+
+        marker = next(build for build, release in online_updates.KNOWN_CFW_BUILDS.items()
+                      if release == 'R15')
+        package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
+        package = package[:-1] + bytes((package[-1] ^ 1,))
+        staged = self.manager.stage_controller(A, package, arm=False,
+            current_version='25.2-50130')
+        self.manager.arm_controller(A, current_version='25.2-50130',
+            expected_sha256=staged['sha256'], allow_unverified=True)
+        self.check(current='25.2-50130')
+        custom = self.service.message(A)
+        self.assertEqual(custom['MessageHeader'], 'Custom controller firmware')
+        self.assertIn('Custom firmware R15 (25.2-50130)', custom['MessageBody'])
+        self.assertIn('requires custom firmware', custom['MessageBody'])
+        self.assertIn('R15', custom['IntroMessageBody'])
+        self.assertEqual(custom['ContinuePrompt'], 'Install custom firmware')
+
+        self.manager.cancel_controller(A)
+        self.check(current='25.2-50130', demonstration=True)
+        bridge = self.service.message(A)
+        self.assertEqual(bridge['MessageHeader'], 'Bridge software update')
+        self.assertIn('controller firmware will stay unchanged', bridge['MessageBody'])
+        self.assertIn('controller firmware stays unchanged', bridge['IntroMessageBody'])
+        for message in (official, custom, bridge):
+            for field in ('MessageHeader', 'IntroMessageHeader', 'ContinuePrompt', 'CancelPrompt'):
+                self.assertLessEqual(len(message[field].encode('utf-8')), 39)
+            for field in ('MessageBody', 'IntroMessageBody'):
+                self.assertLessEqual(len(message[field].encode('utf-8')), 510)
+
     def test_paired_native_build_report_completes_only_its_exact_downloaded_image(self):
         marker = 'cfw3:' + 'ab' * 32
         package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
@@ -119,8 +157,11 @@ class UpdateServiceIntegration(unittest.TestCase):
 
         self.assertEqual(report(IP_A, marker), 200)
         self.assertEqual(self.manager.status(A)['status'], 'armed')
+        self.assertEqual(self.manager.firmware_identity(A)['classification'], 'custom')
+        self.assertEqual(self.manager.firmware_identity(B)['classification'], 'stock')
         self.manager.controller_started(self.manager.selection(A)['token'], A)
-        self.assertEqual(report(IP_B, marker), 200)
+        self.assertEqual(report(IP_B, marker), 500)
+        self.assertEqual(self.manager.firmware_identity(B)['classification'], 'stock')
         self.assertEqual(self.manager.status(A)['status'], 'downloading')
         self.assertEqual(report(UNKNOWN, marker), 500)
         for value, version in (('v3', '25.2-50130'), ('cfw3:' + 'cd' * 32, '25.2-50130'),
@@ -134,6 +175,99 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.assertIsNotNone(inert)
         self.assertEqual(self.service.offers[A]['kind'], 'none')
         self.assertEqual(self.backend.calls, [])
+
+    def test_known_build_report_marks_only_the_reporting_controller_live(self):
+        # The combined R16 controller reports this ID with either UI cadence
+        # and may have been installed before the bridge ever saw an UPD.
+        marker = 'cfw3:7e6879933c4a4ecee735e5f3f6d83201a2403c82b86dbffaa4c7a18a4ece016a'
+        now = [1000.0]
+        self.manager.clock = lambda: now[0]
+        body = ('<VariableName>CR100_CFWBuild</VariableName>'
+                '<StringValue>%s</StringValue>' % marker)
+
+        def report(source):
+            return soap(self.room, source, 'SystemProperties', 'SetString', body,
+                path='/SystemProperties/Control', extra_headers={
+                    'User-Agent': 'Linux UPnP/1.0 Sonos/25.2-50130 (CR100)'})[0]
+
+        self.assertEqual(self.manager.firmware_identity(A)['classification'], 'stock')
+        self.assertEqual(report(IP_A), 200)
+        identity = self.manager.firmware_identity(A)
+        self.assertEqual(identity['classification'], 'custom')
+        self.assertEqual(identity['release'], 'R16')
+        self.assertEqual(self.manager.status(A)['status'], 'none')
+        self.assertEqual(self.manager.firmware_identity(B)['classification'], 'stock')
+        self.assertEqual(report(UNKNOWN), 500)
+        now[0] += online_updates.LIVE_CFW_TTL
+        self.assertEqual(self.manager.firmware_identity(A)['classification'], 'stock')
+
+    def test_staged_r16_package_gets_release_label_when_bridge_is_updated(self):
+        marker = 'cfw3:7e6879933c4a4ecee735e5f3f6d83201a2403c82b86dbffaa4c7a18a4ece016a'
+        package, _ = build_test_package(rootfs=build_test_cramfs(build_test_movie(marker)))
+        package = package[:-1] + bytes((package[-1] ^ 1,))
+        original_catalog = {build: label for build, label in online_updates.KNOWN_CFW_BUILDS.items()
+                            if label != 'R16'}
+        with patch.object(online_updates, 'KNOWN_CFW_BUILDS', original_catalog):
+            staged = self.manager.stage_controller(A, package, arm=False,
+                current_version='25.2-50130')
+            self.assertIsNone(staged['cfw_release'])
+
+        self.assertEqual(self.manager.status(A)['cfw_release'], 'R16')
+        self.manager.arm_controller(A, current_version='25.2-50130',
+            expected_sha256=staged['sha256'], allow_unverified=True)
+        self.check(current='25.2-50130')
+        message = self.service.message(A)
+        self.assertIn('Custom firmware R16 (25.2-50130)', message['MessageBody'])
+
+    def test_future_signed_release_live_and_exact_install_completion(self):
+        marker = 'cfw3:' + 'ab' * 32
+        release = 'R123.4-rc2'
+        signed, modulus = build_test_descriptor(marker, release)
+        stale, _ = build_test_descriptor('cfw3:' + 'cd' * 32, 'R122')
+        self.assertNotIn(marker, online_updates.KNOWN_CFW_BUILDS)
+        now = [1000.0]
+        self.manager.clock = lambda: now[0]
+
+        def report(source, value, property_name=online_updates.CFW_RELEASE_PROPERTY,
+                   version='25.2-50130'):
+            body = ('<VariableName>%s</VariableName><StringValue>%s</StringValue>'
+                    % (property_name, html.escape(value)))
+            return soap(self.room, source, 'SystemProperties', 'SetString', body,
+                path='/SystemProperties/Control', extra_headers={
+                    'User-Agent': 'Linux UPnP/1.0 Sonos/%s (CR100)' % version})[0]
+
+        with patch.object(online_updates, '_CFW_MODULUS', modulus):
+            self.assertEqual(report(UNKNOWN, signed), 500)
+            self.assertEqual(report(IP_A, signed.replace(release, 'R900')), 500)
+            self.assertEqual(self.manager.firmware_identity(A)['classification'], 'stock')
+            self.assertEqual(report(IP_A, signed), 200)
+            self.assertEqual(self.manager.status(A)['status'], 'none')
+            self.assertEqual(self.manager.firmware_identity(B)['classification'], 'stock')
+            reopened = online_updates.UpdateManager(self.config, clock=lambda: now[0])
+            self.assertEqual(reopened.firmware_identity(A)['release'], release)
+            now[0] += online_updates.LIVE_CFW_TTL - 1
+            self.assertEqual(report(IP_A, marker, 'CR100_CFWBuild'), 200)
+            self.assertEqual(reopened.firmware_identity(A)['release'], release)
+            now[0] += 1
+            self.assertEqual(reopened.firmware_identity(A)['classification'], 'stock')
+
+            package, _ = build_test_package(rootfs=build_test_cramfs(
+                build_test_movie(marker + '\0' + signed)))
+            package = package[:-1] + bytes((package[-1] ^ 1,))
+            staged = self.manager.stage_controller(A, package, arm=False, current_version='25.2-50130')
+            self.assertEqual(staged['cfw_release'], release)
+            self.assertEqual(self.manager.firmware_identity(A)['classification'], 'stock')
+            self.manager.arm_controller(A, current_version='25.2-50130',
+                expected_sha256=staged['sha256'], allow_unverified=True)
+            self.manager.controller_started(self.manager.selection(A)['token'], A)
+            self.assertEqual(report(IP_B, signed), 200)
+            self.assertEqual(report(IP_A, marker, 'CR100_CFWBuild'), 200)
+            self.assertEqual(report(IP_A, stale), 500)
+            self.assertEqual(report(IP_A, signed, version='24.1-75101'), 500)
+            self.assertEqual(self.manager.status(A)['status'], 'downloading')
+            self.assertEqual(report(IP_A, signed), 200)
+            self.assertEqual(self.manager.status(A)['completion_evidence'], 'installed-movie-build')
+            self.assertEqual(self.manager.firmware_identity(A)['release'], release)
 
     def test_bridge_manifest_omits_controller_without_an_armed_package(self):
         now = [time.time()]

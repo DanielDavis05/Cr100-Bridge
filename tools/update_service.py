@@ -17,7 +17,8 @@ import threading
 from urllib.parse import unquote, urlsplit
 
 import update_transport
-from online_updates import UpdateError, UpdateManager, version_tuple
+from online_updates import (CFW_RELEASE_PROPERTY, UpdateError, UpdateManager,
+                            candidate_firmware, version_tuple)
 from update_transport import BridgeUpdateCoordinator, UpdateTransport
 
 # Compatibility alias used by update callers.
@@ -354,13 +355,34 @@ class UpdateService:
         if offer['kind'] == 'controller':
             current = self._current_controller(mac)
             older = current and version_tuple(offer['version']) < version_tuple(current)
-            title = 'Controller firmware downgrade' if older else 'Controller firmware update'
+            identity = candidate_firmware(offer)
+            firmware_kind = identity['firmware_kind']
+            if firmware_kind == 'official':
+                title = 'Official firmware downgrade' if older else 'Official controller firmware'
+                target = 'Official Sonos firmware %s' % offer['version']
+                body = 'Install %s on this CR100. Keep it docked until it restarts.' % target
+                intro = '%s is staged for this CR100. Press OK to review the installation.' % target
+                action = 'Install older firmware' if older else 'Install official firmware'
+            elif firmware_kind == 'custom':
+                release = identity['cfw_release']
+                title = 'Custom firmware downgrade' if older else 'Custom controller firmware'
+                target = 'Custom firmware %s (%s)' % (release, offer['version']) if release else (
+                    'Custom firmware (%s; release unknown)' % offer['version'])
+                body = ('Install %s on this CR100. This update requires custom firmware '
+                        'on the controller. Keep it docked until it restarts.') % target
+                intro = '%s is staged for this CR100. Press OK to review.' % target
+                action = 'Install custom firmware'
+            else:
+                title = 'Unverified controller firmware'
+                target = 'Unverified firmware %s' % offer['version']
+                body = ('Install %s on this CR100. The bridge could not identify it as '
+                        'official Sonos firmware or a custom release. Keep it docked until it restarts.') % target
+                intro = '%s is staged for this CR100. Press OK to review the installation.' % target
+                action = 'Install unverified firmware'
             return dict(statusCode='1', MessageHeader=title,
-                MessageBody='Install controller firmware %s. Keep the controller docked until it restarts.' % offer['version'],
-                ContinuePrompt='Install older firmware' if older else 'Install firmware',
+                MessageBody=body, ContinuePrompt=action,
                 CancelPrompt='Keep current firmware', AllowUpdate='true',
-                IntroMessageHeader='Firmware downgrade' if older else 'Controller update',
-                IntroMessageBody='Firmware %s is staged for this controller. Press OK to review the installation.' % offer['version'])
+                IntroMessageHeader=title, IntroMessageBody=intro)
         if offer['kind'] == 'none':
             return dict(statusCode='1', MessageHeader='No update available',
                 MessageBody='No controller firmware is armed for installation.',
@@ -382,16 +404,20 @@ class UpdateService:
                     body = candidate
         return dict(statusCode='1', MessageHeader='Bridge software update',
             MessageBody=body,
-            ContinuePrompt='Update bridge', CancelPrompt='Later', AllowUpdate='true')
+            ContinuePrompt='Update bridge', CancelPrompt='Later', AllowUpdate='true',
+            IntroMessageHeader='Bridge software update',
+            IntroMessageBody='This updates the CR100 Bridge. Your controller firmware stays unchanged. Press OK to review.')
 
     def soap(self, state, service, action, args, address):
         """Return a complete SOAP result before backend/informational guards."""
         mac = self._mac(address)
+        variable = args.get('VariableName')
         if service == 'SystemProperties' and action in ('SetString', 'SetStringX') \
-                and args.get('VariableName') == 'CR100_CFWBuild':
+                and variable in ('CR100_CFWBuild', CFW_RELEASE_PROPERTY):
             if not mac:
                 raise UpdateError('Unknown controller.', 403)
-            self.manager.report_build(mac, args.get('StringValue'), self._current_controller(mac))
+            report = self.manager.report_release if variable == CFW_RELEASE_PROPERTY else self.manager.report_build
+            report(mac, args.get('StringValue'), self._current_controller(mac))
             self.tick()
             return {}, []
         if service == 'ZoneGroupTopology' and action == 'CheckForUpdate':
