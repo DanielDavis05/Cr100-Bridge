@@ -1,4 +1,4 @@
-"""Controller identity and addressed CR100 policy notices.
+"""Controller identity and addressed CR100 notices.
 
 Policies are keyed by stable MAC addresses. Requests are identified by the actual
 socket peer, DHCP leases and current neighbours, never caller-supplied headers.
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import subprocess
@@ -95,6 +96,13 @@ def notice_body(status, message):
     return ET.tostring(root, encoding='utf-8')
 
 
+@dataclass
+class PendingNotice:
+    lock: threading.Lock
+    status: str
+    ready_at: float
+
+
 class ControllerNotices:
     """Send an error/clear pulse only to the requester's AVTransport subscribers.
 
@@ -112,7 +120,7 @@ class ControllerNotices:
     def close(self):
         self.closed.set()
 
-    def __call__(self, address, message):
+    def __call__(self, address, message, *, status='ERROR_BRIDGE_POLICY', cooldown=.75, settle=None):
         try:
             address = str(ipaddress.IPv4Address(address))
         except (TypeError, ValueError):
@@ -120,29 +128,48 @@ class ControllerNotices:
         with self.lock:
             if self.closed.is_set(): return
             now = time.monotonic()
-            if now - self.last.get(address, -1) < .75: return
-            self.last = {ip: stamp for ip, stamp in self.last.items() if now - stamp < 30}
-            self.last[address] = now
+            key = address, status
             previous = self.pending.get(address)
-            pulse = (object(), previous[1] if previous else threading.Lock())
+            # Further volume presses keep the stock overlay open. Extend the
+            # pending delivery without starting another worker.
+            if settle is not None and previous and previous.status == status and previous.ready_at > now:
+                previous.ready_at = now + settle
+                return
+            if now - self.last.get(key, float('-inf')) < cooldown: return
+            self.last = {key: stamp for key, stamp in self.last.items() if now - stamp < 30}
+            self.last[key] = now
+            delay = self.delay if settle is None else settle
+            pulse = PendingNotice(previous.lock if previous else threading.Lock(), status, now + delay)
             self.pending[address] = pulse
-        worker = threading.Thread(target=self._deliver, args=(address, str(message), pulse), daemon=True,
-                                  name='spotify-policy-notice')
+        worker = threading.Thread(target=self._deliver, args=(address, str(message), pulse),
+                                  name='controller-notice', daemon=True)
         worker.start()
 
     def _current(self, address, pulse):
         with self.lock:
             return not self.closed.is_set() and self.pending.get(address) is pulse
 
+    def _wait_until_ready(self, address, pulse):
+        while not self.closed.is_set():
+            with self.lock:
+                if self.pending.get(address) is not pulse: return False
+                now = time.monotonic()
+                remaining = pulse.ready_at - now
+                if remaining <= 0:
+                    self.last[(address, pulse.status)] = now
+                    return True
+            self.closed.wait(remaining)
+        return False
+
     def _deliver(self, address, message, pulse):
         try:
-            if self.closed.wait(self.delay): return
-            error = notice_body('ERROR_BRIDGE_POLICY', message)
+            if not self._wait_until_ready(address, pulse): return
+            error = notice_body(pulse.status, message)
             recipients = []
             # Serialize only this controller's sends, not incoming policy checks.
             # A newer pulse may replace this generation while a send is in flight;
             # its ERROR then follows that send, and this generation cannot clear it.
-            with pulse[1]:
+            with pulse.lock:
                 if not self._current(address, pulse): return
                 for player in self.players:
                     with player.state.lock:
@@ -154,13 +181,14 @@ class ControllerNotices:
                         if not self._current(address, pulse): return
                         player.notify(sid, body_override=error)
                         recipients.append((player, sid))
-            self.log({'event': 'spotify-policy-notice', 'controller_ip': address,
+            event = 'spotify-policy-notice' if pulse.status == 'ERROR_BRIDGE_POLICY' else 'controller-notice'
+            self.log({'event': event, 'status': pulse.status, 'controller_ip': address,
                       'subscriptions': len(recipients)})
             # Back-to-back ERROR/OK updates can be coalesced before the stock
             # Flash UI sees the error. Hold it long enough to render the popup.
             if not recipients or self.closed.wait(self.clear_delay): return
             clear = notice_body('OK', '')
-            with pulse[1]:
+            with pulse.lock:
                 for player, sid in recipients:
                     if not self._current(address, pulse): return
                     player.notify(sid, body_override=clear)

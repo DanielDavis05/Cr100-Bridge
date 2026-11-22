@@ -52,6 +52,8 @@ from alarms import AlarmError
 from backends import LINE_IN_PREFIX, BackendError
 from content import ContentError, ContentSource, Node
 from controller_visibility import BRIDGE_COMPONENT, component_visible, room_component_key, visible_components
+from ha_backend import HomeAssistantDisconnected
+from spotify_controllers import ControllerNotices
 
 _HERE = Path(__file__).resolve().parent
 # The player implementation and protocol fixtures ship with this distribution.
@@ -364,7 +366,7 @@ def build_classes(zp):
                     backend.play_provider(provider_uri, kind)
                     return {}
                 except (ValueError, BackendError) as error:
-                    raise zp.UPnPError(501, 'Action Failed: %s' % error) from error
+                    raise self.speaker_fault(service, action, error) from error
             return None
 
         def browse(self, args):
@@ -394,6 +396,18 @@ def build_classes(zp):
             return {'Result': result, 'NumberReturned': str(returned), 'TotalMatches': str(total),
                     'UpdateID': str(update)}
 
+        def speaker_fault(self, service, action, error, prefix='Action Failed: '):
+            rendering = service in ('RenderingControl', 'GroupRenderingControl')
+            if (isinstance(error, HomeAssistantDisconnected) and (rendering or service in ('AVTransport', 'AudioIn'))
+                    and not action.startswith(('Get', 'List', 'Browse', 'Check', 'Find'))):
+                address = getattr(self.http_source, 'address', None)
+                # The stock volume overlay hides transport errors until it closes.
+                self.household.controller_notices(address, str(error),
+                                                  status='ERROR_HOME_ASSISTANT', cooldown=10,
+                                                  settle=3.0 if rendering else None)
+            code = getattr(error, 'code', 501)
+            return zp.UPnPError(code if isinstance(code, int) else 501, prefix + str(error))
+
         def action(self, service, action, args):
             address = getattr(self.http_source, 'address', None)
             self.household.check_component_action(self.config.udn, address, service, action, args)
@@ -401,7 +415,8 @@ def build_classes(zp):
                     or args.get('VariableName', '').startswith('CR100_DevicesFeedback:')
                     or args.get('VariableName') in ('CR100_RoomCapabilities', 'CR100_SpotifyAutoplay',
                                                     'CR100_SpotifyAutoplayNow',
-                                                    'CR100_DevicesAvailable', 'CR100_DevicesFeedback')):
+                                                    'CR100_DevicesAvailable', 'CR100_DevicesAvailable:climate',
+                                                    'CR100_DevicesFeedback')):
                 from ui_events import UIEventError
                 values = self.validate_action(service, action, args)
                 try:
@@ -434,8 +449,7 @@ def build_classes(zp):
                 from alarms import AlarmError
                 from radiotime import RadioTimeError
                 if not isinstance(error, (BackendError, AlarmError, RadioTimeError, ContentError, ValueError, KeyError)): raise
-                raise zp.UPnPError(getattr(error, 'code', 501) if isinstance(getattr(error, 'code', 501), int) else 501,
-                                   str(error)) from error
+                raise self.speaker_fault(service, action, error, prefix='') from error
             if supplied is not None:
                 self.household.source_action_committed(source_coordinator, service, action, args)
                 if service == 'AVTransport' and action == 'AddURIToQueue':
@@ -463,7 +477,7 @@ def build_classes(zp):
                 try:
                     self.check_backend_action(service, action, args)
                 except BackendError as error:
-                    raise zp.UPnPError(501, 'Action Failed: %s' % error) from error
+                    raise self.speaker_fault(service, action, error) from error
             read_only = action.startswith(('Get', 'List', 'Browse', 'Check', 'Find'))
             policy_room = self.household.playback_room(self, service, action, args)
             policy_owner, intercepted_by, policy_result = None, None, None
@@ -477,7 +491,7 @@ def build_classes(zp):
                     policy_result, intercepted_by = self.household.before_playback_action(
                         policy_room, service, action, args)
                 except (BackendError, ValueError) as error:
-                    raise zp.UPnPError(501, 'Action Failed: %s' % error) from error
+                    raise self.speaker_fault(service, action, error) from error
             if self.backend and not read_only and service != 'SystemProperties':
                 # The real backend owns mutations; never stage them in the
                 # standalone peer, especially when a later call can fail.
@@ -558,7 +572,7 @@ def build_classes(zp):
                     if service == 'AVTransport' and action in QUEUE_ACTIONS:
                         changed = list(changed) + ['ContentDirectory', 'Queue']
             except BackendError as error:
-                raise zp.UPnPError(501, 'Action Failed: %s' % error)
+                raise self.speaker_fault(service, action, error) from error
             self.household.source_action_committed(source_coordinator, service, action, args)
             if not read_only and policy_room is not None:
                 # Owned provider operations already went through play_provider /
@@ -841,15 +855,13 @@ class Household:
         for service in getattr(music_service, 'services', [music_service]):
             if service is not None and hasattr(service, 'component_allowed'):
                 service.component_allowed = self.udn_allowed
-        self.spotify_notices = None
+        self.controller_notices = ControllerNotices(self.players, log)
         notice_services = [service for service in music_service_controllers(music_service)
                            if hasattr(service, 'on_locked')]
-        if notice_services:
-            from spotify_controllers import ControllerNotices
-            self.spotify_notices = ControllerNotices(self.players, log)
-            for service in notice_services:
-                if service.on_locked is None:
-                    service.on_locked = self.spotify_notices
+        self.spotify_notices = self.controller_notices if notice_services else None
+        for service in notice_services:
+            if service.on_locked is None:
+                service.on_locked = self.spotify_notices
         self.by_ref = {p.state.backend.ref: p for p in self.players if p.state.backend}
         self.line_in_content = ContentSource()
         self.line_in_version, self.seen_line_in = 1, None
@@ -1492,8 +1504,7 @@ class Household:
                 policy.close()
             except Exception as error:
                 self.log({'event': 'playback-policy-close-failed', 'error_type': type(error).__name__})
-        if self.spotify_notices:
-            self.spotify_notices.close()
+        self.controller_notices.close()
         if self.ssdp_thread: self.ssdp_thread.join(2)
         if self.identity_thread: self.identity_thread.join(3)
         for player in self.devices():

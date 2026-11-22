@@ -91,6 +91,33 @@ def smart_device_fixture():
     add('light.workshop_bench', 'Workshop Bench', 'on', area='workshop', brightness=255, **dim)
     add('light.workshop_overhead', 'Workshop Overhead', 'off', area='workshop', brightness=128, **dim)
     add('light.landing_lamp', 'Landing Lamp', 'on', area='landing', brightness=64, **dim)
+    add('climate.lantern_thermostat', 'Lantern Thermostat', 'heat',
+        hvac_modes=['off', 'heat', 'cool', 'heat_cool', 'fan_only'], hvac_action='heating',
+        current_temperature=71, current_humidity=45, temperature=72,
+        target_temp_low=68, target_temp_high=72, min_temp=50, max_temp=90,
+        target_temp_step=1, temperature_unit='°F',
+        fan_modes=['auto', 'low', 'medium', 'high', 'on'], fan_mode='auto',
+        supported_features=1 | 2 | 8 | 128 | 256)
+    add('climate.lantern_radiator', 'Lantern Radiator', 'heat',
+        hvac_modes=['off', 'heat'], hvac_action='idle',
+        current_temperature=21.0, temperature=20.5, min_temp=10, max_temp=32,
+        target_temp_step=0.5, temperature_unit='°C',
+        supported_features=1 | 128 | 256)
+    add('climate.workshop_cooler', 'Workshop Cooler', 'cool', area='workshop',
+        hvac_modes=['off', 'cool', 'fan_only'], hvac_action='cooling',
+        current_temperature=75, temperature=72, min_temp=60, max_temp=85,
+        target_temp_step=1, temperature_unit='°F',
+        fan_modes=['auto', 'low', 'high'], fan_mode='auto',
+        supported_features=1 | 8 | 128 | 256)
+    add('climate.landing_hvac', 'Landing HVAC', 'heat_cool', area='landing',
+        hvac_modes=['off', 'heat', 'cool', 'heat_cool', 'auto'], hvac_action='idle',
+        current_temperature=70, current_humidity=40, temperature=70,
+        target_temp_low=68, target_temp_high=74, min_temp=50, max_temp=90,
+        target_temp_step=1, temperature_unit='°F',
+        supported_features=1 | 2 | 128 | 256)
+    add('climate.landing_offline', 'Landing Offline Thermostat', 'unavailable', area='landing',
+        hvac_modes=['off', 'heat'], min_temp=50, max_temp=90,
+        target_temp_step=1, temperature_unit='°F', supported_features=1)
     add('switch.lantern_loudness', 'Lantern Loudness', 'on', platform='sonos', category='config')
     add('switch.lantern_crossfade', 'Lantern Crossfade', 'off', platform='sonos', category='config')
     add('light.lantern_hidden', 'Lantern Hidden', 'on', hidden='user', brightness=255, **dim)
@@ -234,7 +261,7 @@ class FakeHA:
                                                   'error': {'code': 'failed', 'message': 'Speaker offline'}}))
                         continue
                     for entity in targets:
-                        if message['domain'] in ('light', 'switch', 'input_boolean', 'fan', 'scene', 'script'):
+                        if message['domain'] in ('light', 'switch', 'input_boolean', 'fan', 'scene', 'script', 'climate'):
                             await self.apply_device(message['domain'], message['service'], entity, message['service_data'])
                         else:
                             await self.apply(message['service'], entity, message['service_data'])
@@ -298,6 +325,46 @@ class FakeHA:
         elif domain == 'fan' and service == 'set_percentage':
             percentage = max(0, min(100, data['percentage']))
             await self.change(entity, 'on' if percentage else 'off', percentage=percentage)
+        elif domain == 'climate':
+            if service == 'set_hvac_mode':
+                mode = data['hvac_mode']
+                changes = {}
+                if 'hvac_action' in attributes:
+                    cur = attributes.get('current_temperature')
+                    tgt = attributes.get('temperature')
+                    low = attributes.get('target_temp_low')
+                    high = attributes.get('target_temp_high')
+                    if mode == 'off': changes['hvac_action'] = 'off'
+                    elif mode == 'fan_only': changes['hvac_action'] = 'fan'
+                    elif mode == 'dry': changes['hvac_action'] = 'drying'
+                    elif mode == 'heat':
+                        changes['hvac_action'] = 'heating' if (cur is not None and tgt is not None and tgt > cur) else 'idle'
+                    elif mode == 'cool':
+                        changes['hvac_action'] = 'cooling' if (cur is not None and tgt is not None and tgt < cur) else 'idle'
+                    else:
+                        if cur is not None and low is not None and low > cur: changes['hvac_action'] = 'heating'
+                        elif cur is not None and high is not None and high < cur: changes['hvac_action'] = 'cooling'
+                        else: changes['hvac_action'] = 'idle'
+                await self.change(entity, mode, **changes)
+            elif service == 'set_temperature':
+                changes = {k: data[k] for k in ('temperature', 'target_temp_low', 'target_temp_high') if k in data}
+                mode = data.get('hvac_mode') or self.states[entity]['state']
+                if 'hvac_action' in attributes:
+                    cur = attributes.get('current_temperature')
+                    tgt = changes.get('temperature', attributes.get('temperature'))
+                    low = changes.get('target_temp_low', attributes.get('target_temp_low'))
+                    high = changes.get('target_temp_high', attributes.get('target_temp_high'))
+                    if mode == 'heat' and cur is not None and tgt is not None:
+                        changes['hvac_action'] = 'heating' if tgt > cur else 'idle'
+                    elif mode == 'cool' and cur is not None and tgt is not None:
+                        changes['hvac_action'] = 'cooling' if tgt < cur else 'idle'
+                    elif mode in ('heat_cool', 'auto') and cur is not None:
+                        if low is not None and low > cur: changes['hvac_action'] = 'heating'
+                        elif high is not None and high < cur: changes['hvac_action'] = 'cooling'
+                        else: changes['hvac_action'] = 'idle'
+                await self.change(entity, data.get('hvac_mode'), **changes)
+            elif service == 'set_fan_mode':
+                await self.change(entity, None, fan_mode=data['fan_mode'])
 
     async def walk(self, entity, start, end, settle):
         steps, span = max(1, int(settle['steps'])), float(settle['span'])

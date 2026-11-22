@@ -123,6 +123,47 @@ class HABackend(unittest.TestCase):
             self.ha.connected.set()
             house.close()
 
+    def test_disconnected_speaker_controls_send_one_notice_and_resume_after_reconnect(self):
+        notice = self.house.controller_notices
+        notice.clear_delay = 0.05
+        event_path = '/MediaRenderer/AVTransport/Event'
+        self.assertEqual(self.events.subscribe(self.kitchen, event_path), 200)
+        self.events.get()
+        volume = '<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>31</DesiredVolume>'
+
+        def set_volume():
+            return soap(self.kitchen, RC, 'RenderingControl', 'SetVolume', volume)
+
+        self.fake.set_available(False)
+        self.assertTrue(wait_for(lambda: not self.ha.connected.is_set()))
+        for _ in range(2):
+            status, body = set_volume()
+            self.assertEqual(status, 500)
+            self.assertIn(b'Home Assistant is disconnected', body)
+        self.assertNotIn(('volume_set', 'media_player.kitchen'), self.services())
+
+        deadline = time.monotonic() + 5
+        event = ''
+        while 'ERROR_HOME_ASSISTANT' not in event:
+            event = self.events.get(max(0, deadline - time.monotonic()))
+        self.assertIn('Home Assistant is disconnected. Try again when it reconnects.', event)
+        self.assertTrue(wait_for(lambda: not notice.pending))
+        self.assertEqual(sum(log.get('status') == 'ERROR_HOME_ASSISTANT' for log in self.logs), 1)
+
+        self.fake.set_available(True)
+        self.assertTrue(self.ha.connected.wait(8), self.logs)
+        status, body = set_volume()
+        self.assertEqual(status, 200, body)
+        self.assertTrue(wait_for(lambda: ('volume_set', 'media_player.kitchen') in self.services()))
+
+        self.fake.set('media_player.kitchen', 'unavailable')
+        self.assertTrue(wait_for(lambda: not self.kitchen.state.backend.available))
+        self.assertTrue(self.ha.connected.is_set())
+        status, body = set_volume()
+        self.assertEqual(status, 500)
+        self.assertNotIn(b'Home Assistant is disconnected', body)
+        self.assertFalse(notice.pending)
+
     def test_now_playing_from_home_assistant(self):
         status, body = soap(self.kitchen, AVT, 'AVTransport', 'GetPositionInfo', '<InstanceID>0</InstanceID>')
         self.assertEqual(status, 200)

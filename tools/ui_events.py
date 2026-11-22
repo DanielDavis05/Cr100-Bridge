@@ -363,13 +363,16 @@ class UIEventGateway:
                 raise UIEventError('invalid_request', 'Invalid feedback request ID')
             devices = getattr(self.household, 'smart_devices', None)
             return {'StringValue': devices.feedback_for(identity, request_id) if devices else 'deferred'}
-        if variable in ('CR100_DevicesAvailable', 'CR100_DevicesFeedback'):
+        if variable in ('CR100_DevicesAvailable', 'CR100_DevicesAvailable:climate', 'CR100_DevicesFeedback'):
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'Device status is read-only')
             self._identity(address)
             devices = getattr(self.household, 'smart_devices', None)
-            value = ('1' if devices and devices.available() and not player.state.informational else '0') if variable == 'CR100_DevicesAvailable' \
-                else devices.feedback(player, address) if devices else 'deferred'
+            if variable.startswith('CR100_DevicesAvailable'):
+                climate = variable == 'CR100_DevicesAvailable:climate'
+                value = '1' if devices and devices.available(climate=climate, address=address) and not player.state.informational else '0'
+            else:
+                value = devices.feedback(player, address) if devices else 'deferred'
             return {'StringValue': value}
         if variable in (ROOM_CAPABILITIES_VARIABLE, AUTOPLAY_VARIABLE, AUTOPLAY_NOW_VARIABLE):
             if action != 'GetString':
@@ -400,7 +403,7 @@ class UIEventGateway:
             if action != 'GetString':
                 raise UIEventError('invalid_request', 'UI capabilities are read-only')
             data = {'actions': ','.join(sorted(self.handlers))}
-            if getattr(self.household, 'smart_devices', None): data['features'] = 'devices.v1'
+            if getattr(self.household, 'smart_devices', None): data['features'] = 'devices.v1,devices.climate.v1'
             return {'StringValue': response('', True, 'capabilities', 'UI events v1', data)}
         if variable == SESSION_VARIABLE:
             if action != 'GetString':

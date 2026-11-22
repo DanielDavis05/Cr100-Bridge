@@ -1091,6 +1091,150 @@ class SmartDevicesHTTP(unittest.TestCase):
         time.sleep(.1)
         self.assertNotIn('ERROR_DEVICES', first.statuses())
 
+    def test_r14_controller_receives_no_climate_rows_until_r15_climate_capability_signal(self):
+        features = decoded(self.prop('CR100_UICapabilities'))['data']['features'].split(',')
+        self.assertIn('devices.v1', features)
+        self.assertIn('devices.climate.v1', features)
+        # R14 capability query: no climate rows or folders are exposed.
+        self.assertEqual(self.prop('CR100_DevicesAvailable'), '1')
+        r14_root, _ = self.browse()
+        self.assertFalse(any(row.startswith('SD:t:') for row in r14_root))
+        status, _ = self.soap(CD, 'ContentDirectory', 'Browse', {
+            'ObjectID': 'SD:t:climate.lantern_thermostat', 'BrowseFlag': 'BrowseDirectChildren',
+            'Filter': '*', 'StartingIndex': 0, 'RequestedCount': 50, 'SortCriteria': ''})
+        self.assertEqual(status, 500)
+        # R15 capability query: climate rows and folders become browsable for that controller.
+        self.assertEqual(self.prop('CR100_DevicesAvailable:climate'), '1')
+        r15_root, _ = self.browse()
+        self.assertIn('SD:t:climate.lantern_thermostat', r15_root)
+        self.assertIn('SD:t:climate.lantern_radiator', r15_root)
+        landing, _ = self.browse('SD:a:landing')
+        self.assertIn('SD:t:climate.landing_hvac', landing)
+        self.assertIn('SD:t:climate.landing_offline', landing)
+        self.assertIn('Unavailable', landing['SD:t:climate.landing_offline']['title'])
+        # Downgrading back to R14 on the same IP hides climate rows again.
+        self.assertEqual(self.prop('CR100_DevicesAvailable'), '1')
+        after_downgrade, _ = self.browse()
+        self.assertFalse(any(row.startswith('SD:t:') for row in after_downgrade))
+
+    def test_climate_modes_setpoints_deadband_clamp_fan_and_new_view_token(self):
+        self.assertEqual(self.prop('CR100_DevicesAvailable:climate'), '1')
+        folder = 'SD:t:climate.lantern_thermostat'
+        rows, _ = self.browse(folder)
+        self.assertEqual(list(rows), [f'{folder}:mode', f'{folder}:single', f'{folder}:fan', f'{folder}:now'])
+        heat_token = rows[f'{folder}:mode']['view']
+        # Adjust single setpoint in heat mode.
+        req = self.send('devices.climate.setpoint', {
+            **self.token(rows, f'{folder}:single'), 'target': 'single', 'value': '700'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.result(req)['status'], 'ok')
+        self.assertEqual(self.fake.service_requests[-1],
+                         ('climate', 'set_temperature', ['climate.lantern_thermostat'], {'temperature': 70}))
+        rows_after_sp, _ = self.browse(folder)
+        self.assertEqual(rows_after_sp[f'{folder}:single']['view'], heat_token)
+        self.assertEqual(rows_after_sp[f'{folder}:single']['title'], 'Heat to: 70°')
+        # Wrong target for current mode is rejected with list_changed.
+        bad = self.send('devices.climate.setpoint', {
+            **self.token(rows_after_sp, f'{folder}:single'), 'target': 'low', 'value': '680'})
+        self.assertEqual(self.result(bad)['code'], 'list_changed')
+        # Mode change heat -> cool -> heat_cool -> off produces a new view token each time.
+        req = self.send('devices.climate.mode', {**self.token(rows_after_sp, f'{folder}:mode'), 'mode': 'cool'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.result(req)['status'], 'ok')
+        cool_rows, _ = self.browse(folder)
+        cool_token = cool_rows[f'{folder}:mode']['view']
+        self.assertNotEqual(cool_token, heat_token)
+        self.assertEqual(cool_rows[f'{folder}:single']['title'], 'Cool to: 70°')
+        req = self.send('devices.climate.mode', {**self.token(cool_rows, f'{folder}:mode'), 'mode': 'heat_cool'})
+        self.assertTrue(self.finished(req))
+        hc_rows, _ = self.browse(folder)
+        hc_token = hc_rows[f'{folder}:mode']['view']
+        self.assertNotEqual(hc_token, cool_token)
+        self.assertEqual(list(hc_rows), [f'{folder}:mode', f'{folder}:low', f'{folder}:high', f'{folder}:fan', f'{folder}:now'])
+        # Deadband clamp in heat_cool: high is 72°F (720), min gap is 2°F (20).
+        # Requesting low=71°F (710) clamps low to 70°F (700) and sends both low and high.
+        req = self.send('devices.climate.setpoint', {
+            **self.token(hc_rows, f'{folder}:low'), 'target': 'low', 'value': '710'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.fake.service_requests[-1], (
+            'climate', 'set_temperature', ['climate.lantern_thermostat'],
+            {'target_temp_low': 70, 'target_temp_high': 72}))
+        # Requesting high=71°F (710) when low is 70°F clamps high to 72°F (720).
+        hc_rows, _ = self.browse(folder)
+        req = self.send('devices.climate.setpoint', {
+            **self.token(hc_rows, f'{folder}:high'), 'target': 'high', 'value': '710'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.fake.service_requests[-1], (
+            'climate', 'set_temperature', ['climate.lantern_thermostat'],
+            {'target_temp_low': 70, 'target_temp_high': 72}))
+        # Fan mode change.
+        req = self.send('devices.climate.fan', {**self.token(hc_rows, f'{folder}:fan'), 'fan': 'medium'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.fake.service_requests[-1],
+                         ('climate', 'set_fan_mode', ['climate.lantern_thermostat'], {'fan_mode': 'medium'}))
+        # Switch to off: setpoint rows disappear.
+        hc_rows, _ = self.browse(folder)
+        req = self.send('devices.climate.mode', {**self.token(hc_rows, f'{folder}:mode'), 'mode': 'off'})
+        self.assertTrue(self.finished(req))
+        off_rows, _ = self.browse(folder)
+        self.assertNotEqual(off_rows[f'{folder}:mode']['view'], hc_token)
+        self.assertEqual(list(off_rows), [f'{folder}:mode', f'{folder}:fan', f'{folder}:now'])
+        # Celsius half-degree radiator valve (step 0.5°C, min 10°C, max 32°C).
+        rad_folder = 'SD:t:climate.lantern_radiator'
+        rad_rows, _ = self.browse(rad_folder)
+        req = self.send('devices.climate.setpoint', {
+            **self.token(rad_rows, f'{rad_folder}:single'), 'target': 'single', 'value': '213'})
+        self.assertTrue(self.finished(req))
+        self.assertEqual(self.fake.service_requests[-1],
+                         ('climate', 'set_temperature', ['climate.lantern_radiator'], {'temperature': 21.5}))
+        # Unavailable thermostat rejects actions with 'unavailable'.
+        unavail_rows, _ = self.browse('SD:t:climate.landing_offline')
+        req = self.send('devices.climate.mode', {
+            **self.token(unavail_rows, 'SD:t:climate.landing_offline:mode'), 'mode': 'heat'})
+        self.assertEqual(self.result(req)['code'], 'unavailable')
+
+    def test_climate_queued_setpoints_coalesce_and_use_longer_budget(self):
+        self.assertEqual(self.prop('CR100_DevicesAvailable:climate'), '1')
+        folder = 'SD:t:climate.landing_hvac'
+        rows, _ = self.browse(folder)
+        entered, release = threading.Event(), threading.Event()
+        actual = self.hub.client.call_service
+        calls = []
+        def blocked(domain, service, targets, data=None, **kwargs):
+            calls.append((domain, service, targets, data, kwargs.get('timeout')))
+            if len(calls) == 1:
+                entered.set()
+                self.assertTrue(release.wait(10))
+            return actual(domain, service, targets, data, **kwargs)
+        with patch.object(self.hub.client, 'call_service', side_effect=blocked):
+            try:
+                root, _ = self.browse()
+                first = self.send('devices.power', {**self.token(root, 'switch.lantern_plug'), 'desired': 'off'})
+                self.assertTrue(entered.wait(3))
+                sp1 = self.send('devices.climate.setpoint', {
+                    **self.token(rows, f'{folder}:low'), 'target': 'low', 'value': '660'})
+                sp2 = self.send('devices.climate.setpoint', {
+                    **self.token(rows, f'{folder}:high'), 'target': 'high', 'value': '750'})
+                sp3 = self.send('devices.climate.setpoint', {
+                    **self.token(rows, f'{folder}:low'), 'target': 'low', 'value': '690'})
+                # Simulate 12 seconds elapsed (> 10s ACTION_TIMEOUT, < 25s CLIMATE_ACTION_TIMEOUT).
+                with self.service.condition:
+                    job = next(j for j in self.service.pending if j.context.request_id == sp3)
+                    job.started = self.service.clock() - 12.0
+            finally:
+                release.set()
+            self.assertTrue(self.finished(first))
+            self.assertTrue(self.finished(sp1))
+            self.assertTrue(self.finished(sp2))
+            self.assertTrue(self.finished(sp3))
+        self.assertEqual(self.result(sp3)['status'], 'ok')
+        climate_calls = [c for c in calls if c[0] == 'climate']
+        self.assertEqual(len(climate_calls), 1)
+        self.assertEqual(climate_calls[0][:4], (
+            'climate', 'set_temperature', ['climate.landing_hvac'],
+            {'target_temp_low': 69, 'target_temp_high': 75}))
+        self.assertGreater(climate_calls[0][4], 10.0)
+
 
 class NativeArea(unittest.TestCase):
     def test_native_sonos_room_uses_shared_ha_registry_identifiers(self):

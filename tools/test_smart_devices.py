@@ -523,5 +523,126 @@ class Catalogue(unittest.TestCase):
         self.assertEqual(row.upnp_class, 'object.item.sdUnavailable.inert.none')
         self.assertEqual(row.title, 'Home Assistant unavailable')
 
+    def add_climate(self, entity_id='climate.hallway', name='Galley Hallway', area='galley',
+                    state='heat', **attrs):
+        defaults = {
+            'hvac_modes': ['off', 'heat', 'cool', 'heat_cool', 'fan_only', 'dry'],
+            'hvac_action': 'heating',
+            'current_temperature': 71,
+            'current_humidity': 45,
+            'temperature': 68,
+            'target_temp_low': 68,
+            'target_temp_high': 74,
+            'min_temp': 50,
+            'max_temp': 90,
+            'target_temp_step': 1,
+            'temperature_unit': '°F',
+            'supported_features': 1 | 2 | 128 | 256,
+        }
+        defaults.update(attrs)
+        self.snapshot['entities'].append({'entity_id': entity_id, 'area_id': area, 'platform': 'fixture'})
+        self.states[entity_id] = {'entity_id': entity_id, 'state': state,
+                                  'attributes': {'friendly_name': name, **defaults}}
+
+    def test_climate_thermostat_area_row_icons_and_never_joins_all_lights(self):
+        self.add_climate()
+        model = self.model()
+        all_lights = self.row('SD:all:galley')
+        self.assertNotIn('climate.hallway', all_lights.targets)
+        row = self.row('SD:t:climate.hallway')
+        self.assertEqual(row.name, 'Hallway')
+        self.assertEqual(row.title, 'Hallway: 71° -> 68°')
+        self.assertEqual(row.upnp_class, 'object.item.sdHeat.climate.none')
+        self.assertIn('SD:t:climate.hallway', model.containers([self.room]))
+        # Icon follows hvac_action first, falling back to hvac_mode when absent.
+        for action, expected in [('cooling', 'sdCool'), ('idle', 'sdIdle'), ('off', 'sdClimateOff'), ('fan', 'sdFan')]:
+            self.states['climate.hallway']['attributes']['hvac_action'] = action
+            self.assertEqual(self.row('SD:t:climate.hallway').upnp_class, f'object.item.{expected}.climate.none')
+        self.states['climate.hallway']['attributes'].pop('hvac_action')
+        for mode, expected in [('heat', 'sdHeat'), ('cool', 'sdCool'), ('heat_cool', 'sdHeatCool'),
+                               ('auto', 'sdHeatCool'), ('fan_only', 'sdFan'), ('dry', 'sdIdle'), ('off', 'sdClimateOff')]:
+            self.states['climate.hallway']['state'] = mode
+            self.assertEqual(self.row('SD:t:climate.hallway').upnp_class, f'object.item.{expected}.climate.none')
+
+    def test_climate_modes_heat_only_cool_only_heat_cool_auto_and_fan_mode(self):
+        # Heat-only radiator valve in Celsius with 0.5 steps.
+        self.add_climate('climate.radiator', 'Galley Radiator', state='heat',
+                         hvac_modes=['off', 'heat'], hvac_action='idle',
+                         current_temperature=21.0, current_humidity=None, temperature=20.5,
+                         min_temp=10, max_temp=32, target_temp_step=0.5, temperature_unit='°C',
+                         supported_features=1 | 128 | 256)
+        # Cool-only unit with fan modes.
+        self.add_climate('climate.cooler', 'Galley Cooler', state='cool',
+                         hvac_modes=['off', 'cool', 'fan_only'], hvac_action='cooling',
+                         current_temperature=75, current_humidity=50, temperature=72,
+                         min_temp=60, max_temp=85, target_temp_step=1, temperature_unit='°F',
+                         fan_modes=['auto', 'low', 'high'], fan_mode='low',
+                         supported_features=1 | 8 | 128 | 256)
+        # Device offering both heat_cool ("Heat/Cool") and auto ("Auto").
+        self.add_climate('climate.dual', 'Galley Dual', state='heat_cool',
+                         hvac_modes=['off', 'heat', 'cool', 'heat_cool', 'auto'], hvac_action='idle',
+                         current_temperature=70, current_humidity=40,
+                         target_temp_low=68, target_temp_high=74,
+                         supported_features=1 | 2 | 128 | 256)
+        model = self.model()
+        rad_rows = model.rows('SD:t:climate.radiator', [self.room])
+        self.assertEqual([r.name for r in rad_rows], ['Mode', 'Heat to', 'Now'])
+        self.assertEqual(rad_rows[0].upnp_class, 'object.item.sdHeat.hvacMode.heat:off,heat')
+        self.assertEqual(rad_rows[1].title, 'Heat to: 20.5°')
+        self.assertEqual(rad_rows[1].upnp_class, 'object.item.sdHeat.setpoint.205:100:320:5:C')
+        self.assertEqual(rad_rows[2].title, 'Now: 21° · Idle')
+
+        cool_rows = model.rows('SD:t:climate.cooler', [self.room])
+        self.assertEqual([r.name for r in cool_rows], ['Mode', 'Cool to', 'Fan', 'Now'])
+        self.assertEqual(cool_rows[1].title, 'Cool to: 72°')
+        self.assertEqual(cool_rows[1].upnp_class, 'object.item.sdCool.setpoint.720:600:850:10:F')
+        self.assertEqual(cool_rows[2].title, 'Fan: Low')
+        self.assertEqual(cool_rows[2].upnp_class, 'object.item.sdFan.fanMode.low:auto,low,high')
+        self.assertEqual(cool_rows[3].title, 'Now: 75° · Cooling · 50%')
+
+        dual_rows = model.rows('SD:t:climate.dual', [self.room])
+        self.assertEqual([r.name for r in dual_rows], ['Mode', 'Heat to', 'Cool to', 'Now'])
+        self.assertEqual(dual_rows[0].title, 'Mode: Heat/Cool')
+        self.assertEqual(dual_rows[0].upnp_class, 'object.item.sdHeatCool.hvacMode.heat_cool:off,heat,cool,heat_cool,auto')
+        self.assertEqual(dual_rows[1].row_id, 'SD:t:climate.dual:low')
+        self.assertEqual(dual_rows[2].row_id, 'SD:t:climate.dual:high')
+        self.assertEqual(self.row('SD:t:climate.dual').title, 'Dual: 70° -> 68°-74°')
+
+        self.states['climate.dual']['state'] = 'auto'
+        auto_rows = self.model().rows('SD:t:climate.dual', [self.room])
+        self.assertEqual(auto_rows[0].title, 'Mode: Auto')
+        self.states['climate.dual']['state'] = 'off'
+        off_rows = self.model().rows('SD:t:climate.dual', [self.room])
+        self.assertEqual([r.name for r in off_rows], ['Mode', 'Now'])
+
+    def test_climate_mode_change_changes_folder_signature_while_setpoint_and_unavailable_retain_it(self):
+        self.add_climate()
+        first = self.model()
+        folder = 'SD:t:climate.hallway'
+        sig_heat = first.structural_signature(first.rows(folder, [self.room]))
+        area_sig = first.structural_signature(first.rows('SD:', [self.room]))
+        # Setpoint and sensor updates retain the folder signature.
+        self.states['climate.hallway']['attributes']['temperature'] = 70
+        self.states['climate.hallway']['attributes']['current_temperature'] = 72
+        second = self.model(previous=first)
+        self.assertEqual(second.structural_signature(second.rows(folder, [self.room])), sig_heat)
+        saved_state = copy.deepcopy(self.states['climate.hallway'])
+        # Unavailable with cleared attributes retains structure from previous catalogue.
+        self.states['climate.hallway'] = {'entity_id': 'climate.hallway', 'state': 'unavailable', 'attributes': {}}
+        unavail = self.model(previous=second)
+        self.assertEqual(unavail.structural_signature(unavail.rows(folder, [self.room])), sig_heat)
+        self.assertFalse(next(r for r in unavail.rows('SD:', [self.room]) if r.row_id == folder).available)
+        # Mode change produces a new structural signature for the folder, but not the area list.
+        self.states['climate.hallway'] = saved_state
+        self.states['climate.hallway']['state'] = 'cool'
+        cool_model = self.model(previous=second)
+        self.assertNotEqual(cool_model.structural_signature(cool_model.rows(folder, [self.room])), sig_heat)
+        self.assertEqual(cool_model.structural_signature(cool_model.rows('SD:', [self.room])), area_sig)
+        # Non-climate controller view hides climate rows and rejects SD:t:<entity>.
+        self.assertNotIn('SD:t:climate.hallway', [r.row_id for r in cool_model.rows('SD:', [self.room], climate=False)])
+        self.assertNotIn(folder, cool_model.containers([self.room], climate=False))
+        with self.assertRaises(KeyError):
+            cool_model.rows(folder, [self.room], climate=False)
+
 
 if __name__ == '__main__': unittest.main()

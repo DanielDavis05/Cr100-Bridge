@@ -12,7 +12,7 @@ rooms {"entity": "media_player.kitchen"} (or {"backend": "ha", "id": ...}).
 from __future__ import annotations
 
 import datetime
-from backends import ArtStore, Backend, BackendError, NativeSettingsRoom, track_revision
+from backends import ArtStore, Backend, BackendError, NativeSettingsRoom, UnsupportedOperation, track_revision
 from ha_content import Content
 from ha_linein import SonosLineIn, source_uuid
 from room_capabilities import RoomBinding
@@ -30,6 +30,11 @@ BRIDGE_QUEUE_OPERATIONS = ('queue_browse', 'queue_remove', 'queue_clear', 'queue
 BRIDGE_TRANSPORT = ('play', 'pause', 'stop', 'seek', 'next', 'previous', 'shuffle', 'repeat')
 
 TRANSPORT = {'playing': 'PLAYING', 'paused': 'PAUSED_PLAYBACK', 'buffering': 'TRANSITIONING'}
+
+
+class HomeAssistantDisconnected(BackendError):
+    def __init__(self):
+        super().__init__('Home Assistant is disconnected. Try again when it reconnects.')
 
 
 class HABackend(Backend):
@@ -219,14 +224,26 @@ class HARoom(NativeSettingsRoom):
 
     @property
     def available(self):
-        connected = getattr(self.ha, 'connected', None)
-        return (connected is None or connected.is_set()) and self.state.get('state') not in (None, 'unavailable', 'unknown')
+        return self.connected and self.state.get('state') not in (None, 'unavailable', 'unknown')
 
     @property
     def reachable(self):
         """Connected and the entity exists, even if HA cannot describe its state."""
+        return self.connected and self.state.get('state') not in (None, 'unavailable')
+
+    @property
+    def connected(self):
         connected = getattr(self.ha, 'connected', None)
-        return (connected is None or connected.is_set()) and self.state.get('state') not in (None, 'unavailable')
+        return connected is None or connected.is_set()
+
+    def require(self, operation):
+        # The usual capability check reports even supported controls as
+        # unavailable when the HA session drops.
+        try:
+            super().require(operation)
+        except UnsupportedOperation:
+            if not self.connected: raise HomeAssistantDisconnected() from None
+            raise
 
     def features(self):
         try: return max(0, int(self.attributes.get('supported_features') or 0))
@@ -376,15 +393,18 @@ class HARoom(NativeSettingsRoom):
 
     # --- Home Assistant calls -----------------------------------------------------
     def ha_call(self, service, data=None, feature=None):
+        if not self.connected: raise HomeAssistantDisconnected()
         if not self.available: raise BackendError('Home Assistant player is unavailable')
         if feature and not self.features() & feature: raise BackendError('%s not supported' % service)
         try:
             self.ha.call_service('media_player', service, self.entity_id, data)
         except Exception as error:
             self.log({'event': 'ha-call-failed', 'entity': self.entity_id, 'service': service, 'error': str(error)})
+            if not self.connected: raise HomeAssistantDisconnected() from error
             raise BackendError(str(error)) from error
 
     def sonos_call(self, service, data=None, response=False):
+        if not self.connected: raise HomeAssistantDisconnected()
         if not self.available: raise BackendError('Home Assistant player is unavailable')
         if not self.backend.binding(self.entity_id).is_sonos:
             raise BackendError('Sonos queue operations are unavailable for this Home Assistant player')
@@ -393,6 +413,7 @@ class HARoom(NativeSettingsRoom):
         except Exception as error:
             self.log({'event': 'ha-call-failed', 'entity': self.entity_id, 'service': 'sonos.' + service,
                       'error': str(error)})
+            if not self.connected: raise HomeAssistantDisconnected() from error
             raise BackendError(str(error)) from error
 
     def queue_length(self):

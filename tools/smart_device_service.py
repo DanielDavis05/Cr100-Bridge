@@ -16,7 +16,9 @@ import xml.etree.ElementTree as ET
 
 from content import ContentSource, Node, PAGE_LIMIT
 from ha_client import HARequestUncertain
-from smart_devices import SmartCatalogue, area_container, room_container
+from smart_devices import (CLIMATE_TARGET_RANGE, CLIMATE_TARGET_TEMP,
+                           SmartCatalogue, area_container, room_container,
+                           snap_tenths)
 from ui_events import UIEventError, UIResult
 
 EXTERNAL_INTERVAL = 2.0
@@ -24,7 +26,11 @@ CONFIRM_TIMEOUT = 3.0
 MAX_VIEWS = 512
 MAX_PENDING = 64
 ACTION_TIMEOUT = 10.0
+CLIMATE_ACTION_TIMEOUT = 25.0
 UNCERTAIN_LIMIT = 30.0
+CLIMATE_UNCERTAIN_LIMIT = 60.0
+CLIMATE_MIN_GAP_F = 20
+CLIMATE_MIN_GAP_C = 10
 # A controller turning a level slider sends a value every second or so, and
 # the light keeps changing for a while after each one. Every list publish makes
 # the controller run a blocking Browse, so while a level gesture is in progress
@@ -37,7 +43,7 @@ LEVEL_HOLD_MAX = 8.0    # never hold a list update longer than this after a gest
 # state (or the request fails), the bridge lists its targets in that state, so a
 # second press made before the light settles reads the new state and a stale
 # event mid-transition never flips the row back.
-DOMAINS = {'light', 'switch', 'input_boolean', 'fan', 'scene', 'script'}
+DOMAINS = {'light', 'switch', 'input_boolean', 'fan', 'scene', 'script', 'climate'}
 
 
 @dataclass
@@ -64,6 +70,8 @@ class Job:
     started: float
     held: tuple = ()
     power: tuple = ()
+    setpoints: dict = field(default_factory=dict)
+    setpoint_order: tuple = ()
 
 
 class SmartDeviceService:
@@ -78,6 +86,7 @@ class SmartDeviceService:
         self.pending, self.confirmations = [], []
         self.feedback_modes = OrderedDict()
         self.state_versions = {}
+        self.controller_climate = {}
         # (expanded targets, HA result acknowledgement, connection generation, deadline)
         self.uncertain = []
         self.snapshot, self.snapshot_revision = hub.snapshot(), hub.revision
@@ -96,13 +105,22 @@ class SmartDeviceService:
         self.client.listeners.append(self._state_listener)
         self.hub.listeners.append(self._hub_listener)
         self.content = ContentSource()
-        for action in ('power', 'level', 'activate'):
+        for action in ('power', 'level', 'activate', 'climate.mode', 'climate.setpoint', 'climate.fan'):
             household.ui_events.register('devices.' + action, self.action, scope='room', mutates=True)
         self.thread = threading.Thread(target=self.run, name='smart-devices', daemon=True)
         self.thread.start()
 
-    def available(self):
-        return self.enabled and self.client.connected.is_set() and bool(self.catalogue.entities)
+    def _climate_for(self, address):
+        return bool(self.controller_climate.get(address, False))
+
+    def available(self, *, climate=True, address=None):
+        if address is not None:
+            with self.condition:
+                if self.controller_climate.get(address) != bool(climate):
+                    self.controller_climate[address] = bool(climate)
+                    self.refresh_all = True
+                    self.condition.notify()
+        return self.enabled and self.client.connected.is_set() and self.catalogue.has_entities(climate=climate)
 
     def _rooms(self, udn, address):
         # The bridge's topology, rather than controller-supplied members, is
@@ -138,10 +156,11 @@ class SmartDeviceService:
 
     def _view(self, state, container):
         address = getattr(state.http_source, 'address', None)
+        climate = self._climate_for(address)
         rooms = self._rooms(state.config.udn, address)
         key = (state.config.udn, address, self._room_signature(rooms), container)
         view = self.views.get(key)
-        try: rows = tuple(self.catalogue.rows(container, rooms))
+        try: rows = tuple(self.catalogue.rows(container, rooms, climate=climate))
         except KeyError:
             if self.enabled and self.client.connected.is_set(): raise
             rows = ()
@@ -244,6 +263,7 @@ class SmartDeviceService:
         self._index()
         for key, view in list(self.views.items()):
             rooms = self._rooms(view.udn, view.address)
+            climate = self._climate_for(view.address)
             if self._room_signature(rooms) != self._room_signature(view.rooms):
                 # Membership changes revoke every issued context, even when a
                 # particular area's row set happens to stay identical.
@@ -251,7 +271,7 @@ class SmartDeviceService:
                 self.views.pop(key, None)
                 self._publish(view.udn, view.container, bypass=True)
                 continue
-            try: rows = tuple(self.catalogue.rows(view.container, rooms))
+            try: rows = tuple(self.catalogue.rows(view.container, rooms, climate=climate))
             except KeyError: rows = ()
             row_availability = tuple((r.row_id, r.available) for r in rows) != \
                 tuple((r.row_id, r.available) for r in view.rows)
@@ -313,9 +333,11 @@ class SmartDeviceService:
             with self._batched(): self._refresh()
             object_id = args['ObjectID']
             flag = args.get('BrowseFlag', 'BrowseDirectChildren')
+            address = getattr(state.http_source, 'address', None)
+            climate = self._climate_for(address)
             if flag == 'BrowseMetadata' and not object_id.startswith('SD:'):
                 candidates = [v for v in reversed(self.views.values()) if v.udn == state.config.udn
-                              and v.address == getattr(state.http_source, 'address', None)
+                              and v.address == address
                               and any(r.row_id == object_id for r in v.rows)]
                 if not candidates: raise self.household.zp.UPnPError(701, 'No such device row')
                 view = candidates[0]
@@ -323,11 +345,11 @@ class SmartDeviceService:
             else:
                 if self.enabled and self.client.connected.is_set() \
                         and object_id not in self.catalogue.containers(self._rooms(state.config.udn,
-                            getattr(state.http_source, 'address', None))):
+                            address), climate=climate):
                     # Synthetic All Lights ids are leaves and may be requested
                     # as metadata just like the raw entity ids.
                     candidates = [v for v in reversed(self.views.values()) if v.udn == state.config.udn
-                                  and v.address == getattr(state.http_source, 'address', None)
+                                  and v.address == address
                                   and any(r.row_id == object_id for r in v.rows)]
                     if flag != 'BrowseMetadata' or not candidates:
                         raise self.household.zp.UPnPError(701, 'No such device container')
@@ -366,7 +388,7 @@ class SmartDeviceService:
     def _container_metadata(self, view):
         for parent in reversed(self.views.values()):
             if parent.udn != view.udn or parent.address != view.address: continue
-            row = next((r for r in parent.rows if r.folder and r.row_id == view.container), None)
+            row = next((r for r in parent.rows if (r.folder or r.level_kind == 'climate') and r.row_id == view.container), None)
             if row: return row.name, parent.container
         container = view.container
         if container == 'SD:': return 'Devices', '0'
@@ -382,6 +404,11 @@ class SmartDeviceService:
             area_id = unquote(area_id)
             if kind: return ('Scenes' if kind == 'scenes' else 'Individual Lights'), area_container(area_id)
             return self.catalogue.areas.get(area_id, {}).get('name') or area_id, 'SD:other'
+        if container.startswith('SD:t:'):
+            entity_id = container[len('SD:t:'):]
+            entity = self.catalogue.entities.get(entity_id, {})
+            area_id = entity.get('area_id')
+            return entity.get('name') or entity_id, area_container(area_id) if area_id else 'SD:'
         return 'Devices', '0'
 
     def handles_metadata(self, object_id):
@@ -421,6 +448,69 @@ class SmartDeviceService:
         context.player.notify(sids[-1], body('ERROR_DEVICES', str(error)))
         context.player.notify(sids[-1], body('OK', ''))
 
+    @staticmethod
+    def _timeout_for(action):
+        return CLIMATE_ACTION_TIMEOUT if action.startswith('devices.climate.') else ACTION_TIMEOUT
+
+    @staticmethod
+    def _uncertain_limit_for(action):
+        return CLIMATE_UNCERTAIN_LIMIT if action.startswith('devices.climate.') else UNCERTAIN_LIMIT
+
+    @staticmethod
+    def _parse_tenths(value):
+        if not isinstance(value, str) or not value.isascii() or not value:
+            return None
+        digits = value[1:] if value.startswith('-') else value
+        if not digits.isdigit() or len(digits) > 5:
+            return None
+        return int(value)
+
+    @staticmethod
+    def _valid_setpoint_targets(entity):
+        if not entity or entity.get('domain') != 'climate':
+            return ()
+        hvac_mode = entity.get('hvac_mode')
+        if hvac_mode in ('heat', 'cool'):
+            return ('single',)
+        if hvac_mode == 'heat_cool' or (hvac_mode == 'auto' and (
+                entity.get('features', 0) & CLIMATE_TARGET_RANGE
+                or (entity.get('target_low') is not None and entity.get('target_high') is not None))):
+            return ('low', 'high')
+        if hvac_mode == 'auto' and (
+                entity.get('features', 0) & CLIMATE_TARGET_TEMP or entity.get('target_temp') is not None):
+            return ('single',)
+        return ()
+
+    def _resolve_setpoints(self, entity, setpoints, target_order):
+        min_t, max_t, step_t, unit = entity['min_tenths'], entity['max_tenths'], entity['step_tenths'], entity['unit']
+        snapped = {k: snap_tenths(v, min_t, max_t, step_t) for k, v in setpoints.items()}
+        if 'single' in snapped:
+            val = snapped['single']
+            return {'temperature': val / 10 if val % 10 else val // 10}
+        if entity.get('min_gap') is not None:
+            gap = entity['min_gap']
+        else:
+            cfg_key = 'climate_min_gap_c' if unit == 'C' else 'climate_min_gap_f'
+            cfg_val = self.config.get(cfg_key)
+            if isinstance(cfg_val, (int, float)) and not isinstance(cfg_val, bool) and cfg_val > 0:
+                gap = max(step_t, round(float(cfg_val) * 10))
+            else:
+                gap = max(step_t, CLIMATE_MIN_GAP_C if unit == 'C' else CLIMATE_MIN_GAP_F)
+        default_temp = snap_tenths(200 if unit == 'C' else 680, min_t, max_t, step_t)
+        low = entity['target_low'] if entity['target_low'] is not None else default_temp
+        high = entity['target_high'] if entity['target_high'] is not None else snap_tenths(low + gap, min_t, max_t, step_t)
+        for target in (target_order or tuple(snapped)):
+            if target == 'low' and 'low' in snapped:
+                high = max(min_t + gap, min(max_t, high))
+                low = max(min_t, min(snapped['low'], high - gap))
+            elif target == 'high' and 'high' in snapped:
+                low = max(min_t, min(max_t - gap, low))
+                high = min(max_t, max(snapped['high'], low + gap))
+        return {
+            'target_temp_low': low / 10 if low % 10 else low // 10,
+            'target_temp_high': high / 10 if high % 10 else high // 10,
+        }
+
     def _validate(self, context, params):
         if self.closed or not self.enabled or not self.client.connected.is_set():
             raise UIEventError('unavailable', 'Home Assistant unavailable')
@@ -431,23 +521,57 @@ class SmartDeviceService:
         rooms = self._rooms(context.room_udn, context.controller_ip)
         if self._room_signature(rooms) != self._room_signature(view.rooms):
             raise UIEventError('list_changed', 'List changed. Select again.')
+        action = context.action[len('devices.'):]
+        required_map = {
+            'power': {'desired'},
+            'level': {'value'},
+            'activate': set(),
+            'climate.mode': {'mode'},
+            'climate.fan': {'fan'},
+            'climate.setpoint': {'target', 'value'},
+        }
+        if action not in required_map:
+            raise UIEventError('unsupported_action', 'Unsupported device action')
+        allowed = {'view', 'id', 'feedback'} | required_map[action]
+        if set(params) - {'feedback'} != allowed - {'feedback'} or params.get('feedback', 'auto') not in ('auto', 'notify', 'deferred'):
+            raise UIEventError('invalid_parameters', 'Invalid device action')
         row = next((row for row in view.rows if row.row_id == params.get('id')), None)
         if row is None or row.folder:
             raise UIEventError('list_changed', 'List changed. Select again.')
         if not row.available: raise UIEventError('unavailable', 'Device unavailable')
-        action = context.action.rsplit('.', 1)[-1]
-        allowed = {'view', 'id', 'feedback'} | ({'desired'} if action == 'power' else {'value'} if action == 'level' else set())
-        if set(params) - {'feedback'} != allowed - {'feedback'} or params.get('feedback', 'auto') not in ('auto', 'notify', 'deferred'):
-            raise UIEventError('invalid_parameters', 'Invalid device action')
         if action == 'power':
-            if row.domain in ('scene', 'script') or params['desired'] not in ('on', 'off'):
+            if row.domain in ('scene', 'script', 'climate') or params['desired'] not in ('on', 'off'):
                 raise UIEventError('unsupported_action', 'Device cannot switch power')
         elif action == 'level':
             value = params['value']
-            if not row.level_kind or not value.isascii() or not value.isdigit() or len(value) > 3 or not 0 <= int(value) <= 100:
+            if row.domain == 'climate' or not row.level_kind or not value.isascii() or not value.isdigit() or len(value) > 3 or not 0 <= int(value) <= 100:
                 raise UIEventError('unsupported_action', 'Device has no level control')
-        elif action != 'activate' or row.domain not in ('scene', 'script'):
-            raise UIEventError('unsupported_action', 'Device cannot be started')
+        elif action == 'activate':
+            if row.domain not in ('scene', 'script'):
+                raise UIEventError('unsupported_action', 'Device cannot be started')
+        elif action == 'climate.mode':
+            if row.domain != 'climate' or row.level_kind != 'hvacMode':
+                raise UIEventError('unsupported_action', 'Device cannot change mode')
+            entity = self.catalogue.entities.get(row.targets[0]) if row.targets else None
+            if not entity or params['mode'] not in entity.get('hvac_modes', ()):
+                raise UIEventError('unsupported_action', 'Unsupported climate mode')
+        elif action == 'climate.fan':
+            if row.domain != 'climate' or row.level_kind != 'fanMode':
+                raise UIEventError('unsupported_action', 'Device has no fan mode')
+            entity = self.catalogue.entities.get(row.targets[0]) if row.targets else None
+            if not entity or params['fan'] not in entity.get('fan_modes', ()):
+                raise UIEventError('unsupported_action', 'Unsupported fan mode')
+        elif action == 'climate.setpoint':
+            if row.domain != 'climate':
+                raise UIEventError('unsupported_action', 'Device has no setpoint control')
+            if self._parse_tenths(params['value']) is None or params['target'] not in ('single', 'low', 'high'):
+                raise UIEventError('unsupported_action', 'Invalid setpoint value')
+            entity = self.catalogue.entities.get(row.targets[0]) if row.targets else None
+            valid_targets = self._valid_setpoint_targets(entity)
+            if (row.level_kind != 'setpoint' or not entity
+                    or params['target'] not in valid_targets
+                    or row.row_id != f'SD:t:{entity["entity_id"]}:{params["target"]}'):
+                raise UIEventError('list_changed', 'List changed. Select again.')
         # An unanswered call blocks its targets only while its answer can still
         # arrive: until HA answers, the connection is replaced, or a time limit.
         now, generation = self.clock(), self.client.connection_generation
@@ -487,8 +611,33 @@ class SmartDeviceService:
                     raise UIEventError('busy', 'Device busy. Try again.')
                 if context.action == 'devices.level': self._hold_level(self._expanded_targets(row, row.targets))
                 job = Job(context, dict(params), tuple(row.targets), feedback, started)
+                if context.action == 'devices.climate.setpoint':
+                    job.setpoints = {params['target']: int(params['value'])}
+                    job.setpoint_order = (params['target'],)
                 superseded = []
-                if context.action != 'devices.activate':
+                if context.action == 'devices.climate.setpoint':
+                    for old in self.pending:
+                        if old.context.action == 'devices.climate.setpoint' and old.targets == job.targets:
+                            merged = dict(old.setpoints)
+                            merged.update(job.setpoints)
+                            order = tuple(t for t in old.setpoint_order if t not in job.setpoints) + job.setpoint_order
+                            job.setpoints, job.setpoint_order = merged, order
+                            old.targets = ()
+                            superseded.append(old)
+                    for old in superseded: self.pending.remove(old)
+                elif context.action == 'devices.climate.mode':
+                    for old in self.pending:
+                        if old.context.action in ('devices.climate.mode', 'devices.climate.setpoint') and old.targets == job.targets:
+                            old.targets = ()
+                            superseded.append(old)
+                    for old in superseded: self.pending.remove(old)
+                elif context.action == 'devices.climate.fan':
+                    for old in self.pending:
+                        if old.context.action == 'devices.climate.fan' and old.targets == job.targets:
+                            old.targets = ()
+                            superseded.append(old)
+                    for old in superseded: self.pending.remove(old)
+                elif context.action != 'devices.activate':
                     for old in self.pending:
                         if old.context.action == 'devices.activate': continue
                         old.targets = tuple(target for target in old.targets if target not in job.targets)
@@ -557,7 +706,8 @@ class SmartDeviceService:
         try:
             with self.condition:
                 row = self._validate(job.context, job.params)
-                remaining_budget = ACTION_TIMEOUT - (self.clock() - job.started)
+                budget = self._timeout_for(job.context.action)
+                remaining_budget = budget - (self.clock() - job.started)
                 if remaining_budget <= 0:
                     raise UIEventError('busy', 'Device busy. Try again.')
                 # Another queued intent may have replaced only overlapping
@@ -565,16 +715,26 @@ class SmartDeviceService:
                 targets = tuple(t for t in row.targets if t in job.targets)
                 versions = tuple(self.state_versions.get(t, 0) for t in targets)
                 affected = self._expanded_targets(row, targets)
-                for target in affected: self.own_until[target] = self.clock() + 10 + CONFIRM_TIMEOUT
+                for target in affected: self.own_until[target] = self.clock() + budget + CONFIRM_TIMEOUT
                 if job.context.action == 'devices.level':
                     job.held = tuple(affected)
                     self._hold_level(affected, busy=True)
+                climate_entity = self.catalogue.entities.get(targets[0]) if targets and row.domain == 'climate' else None
                 generation = self.client.connection_generation
             if not targets: return self._finish(job, outcome='superseded')
-            action = job.context.action.rsplit('.', 1)[-1]
+            action = job.context.action[len('devices.'):]
             data = {}
             if action == 'power': service = 'turn_' + job.params['desired']
             elif action == 'activate': service = 'turn_on'
+            elif action == 'climate.mode':
+                service, data = 'set_hvac_mode', {'hvac_mode': job.params['mode']}
+            elif action == 'climate.fan':
+                service, data = 'set_fan_mode', {'fan_mode': job.params['fan']}
+            elif action == 'climate.setpoint':
+                service = 'set_temperature'
+                data = self._resolve_setpoints(climate_entity,
+                    job.setpoints or {job.params['target']: int(job.params['value'])},
+                    job.setpoint_order or (job.params['target'],))
             elif row.domain == 'fan': service, data = 'set_percentage', {'percentage': int(job.params['value'])}
             elif int(job.params['value']) == 0: service = 'turn_off'
             else: service, data = 'turn_on', {'brightness_pct': int(job.params['value'])}
@@ -586,13 +746,16 @@ class SmartDeviceService:
                 if job.context.action == 'devices.level': self._hold_level(affected, busy=False)
                 if all(self.state_versions.get(t, 0) == version for t, version in zip(targets, versions)):
                     self.confirmations.append((self.clock() + CONFIRM_TIMEOUT, targets, versions))
+                    if action == 'climate.setpoint':
+                        self._affected(targets)
                 self.condition.notify()
             self._finish(job)
         except UIEventError as error:
             self._finish(job, error)
         except HARequestUncertain as error:
             with self.condition:
-                self.uncertain.append((affected, error.acknowledged, generation, self.clock() + UNCERTAIN_LIMIT))
+                limit = self._uncertain_limit_for(job.context.action)
+                self.uncertain.append((affected, error.acknowledged, generation, self.clock() + limit))
             message = 'Light not responding' if row and row.domain == 'light' else 'Device not responding'
             self._finish(job, UIEventError('device_failed', message))
         except Exception:

@@ -120,6 +120,26 @@ class SmartFixture(unittest.TestCase):
         with self.assertRaises(HAError): self.ha.call_service('light', 'turn_off', 'light.lantern_ceiling')
         self.assertEqual(self.fake.states, before)
 
+    def test_climate_mode_temperature_and_fan_services(self):
+        entity = 'climate.lantern_thermostat'
+        self.ha.call_service('climate', 'set_hvac_mode', entity, {'hvac_mode': 'cool'})
+        self.assertTrue(wait_for(lambda: self.ha.state(entity)['state'] == 'cool'))
+        self.assertEqual(self.ha.state(entity)['attributes']['hvac_action'], 'idle')
+        self.ha.call_service('climate', 'set_temperature', entity, {'temperature': 69})
+        self.assertTrue(wait_for(lambda: self.ha.state(entity)['attributes']['temperature'] == 69))
+        self.assertEqual(self.ha.state(entity)['attributes']['hvac_action'], 'cooling')
+        self.ha.call_service('climate', 'set_hvac_mode', entity, {'hvac_mode': 'heat_cool'})
+        self.assertTrue(wait_for(lambda: self.ha.state(entity)['state'] == 'heat_cool'))
+        self.ha.call_service('climate', 'set_temperature', entity,
+                             {'target_temp_low': 68, 'target_temp_high': 74})
+        self.assertTrue(wait_for(lambda: self.ha.state(entity)['attributes']['target_temp_high'] == 74))
+        self.ha.call_service('climate', 'set_fan_mode', entity, {'fan_mode': 'high'})
+        self.assertTrue(wait_for(lambda: self.ha.state(entity)['attributes']['fan_mode'] == 'high'))
+        rad = 'climate.lantern_radiator'
+        self.ha.call_service('climate', 'set_temperature', rad, {'temperature': 22.5})
+        self.assertTrue(wait_for(lambda: self.ha.state(rad)['attributes']['temperature'] == 22.5))
+        self.assertEqual(self.ha.state(rad)['attributes']['hvac_action'], 'heating')
+
 
 class Lifecycle(unittest.TestCase):
     def test_shared_hub_fetches_each_registry_once_and_line_in_uses_snapshot(self):
