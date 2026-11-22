@@ -368,9 +368,10 @@ class UpdateService:
                 title = 'Custom firmware downgrade' if older else 'Custom controller firmware'
                 target = 'Custom firmware %s (%s)' % (release, offer['version']) if release else (
                     'Custom firmware (%s; release unknown)' % offer['version'])
-                body = ('Install %s on this CR100. This update requires custom firmware '
-                        'on the controller. Keep it docked until it restarts.') % target
-                intro = '%s is staged for this CR100. Press OK to review.' % target
+                body = ('Install %s on this CR100. If it still runs stock firmware, use the '
+                        "bridge's one-time Install custom firmware setup instead of installing here.") % target
+                intro = ('%s is staged for this CR100. First installation from stock needs '
+                         'one-time setup in the bridge. Press OK to review.') % target
                 action = 'Install custom firmware'
             else:
                 title = 'Unverified controller firmware'

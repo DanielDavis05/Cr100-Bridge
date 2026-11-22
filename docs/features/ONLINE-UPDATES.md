@@ -14,57 +14,35 @@ native connection error.
 The implementation is present in this checkout. This document does not assert
 that a physical controller has been flashed with custom firmware.
 
-## Guided firmware update
+## Upload and offer controller firmware
 
-Open **Controllers → Firmware** on the paired controller. The wizard follows the
-controller through **Choose firmware**, **Review firmware**, **Install on CR100**,
-and **Done**. Choose a local `.upd` or select **Use firmware on bridge** when an
-administrator has placed an image at `firmware/controller.upd` beside the bridge
-configuration file. The same release detection and signature review apply to
-both sources. A new image at that path becomes available without a code update.
-For a custom-to-custom upgrade, confirm on the CR100 under **System Settings →
-Online Updates**. A stock controller requires vendor-signed firmware.
+Open **Controllers** in the authenticated web UI. Each paired controller has one
+**Firmware** row showing what the controller runs and any update under way.
 
-## Upload and install controller firmware
-
-Open **Controllers** in the authenticated web UI. Each paired controller has its
-own Controller firmware section, showing its current version, target version,
-and update status.
-
-For custom firmware, the panel identifies the uploaded release from the controller
-UI inside the package. New releases carry a project-signed label and build ID.
-The running controller reports the same identity to the bridge, so its release
-can appear before any file has been uploaded. Future releases signed with the
-same project key are recognized automatically. Older R14, R15 and R16 images
-use their known build IDs. The Sonos internal version can be identical across
-multiple custom releases.
-
-1. Choose the controller's `.upd` file and select **Upload**. Uploads are limited
-   to 16 MiB. The bridge verifies the package and reads its embedded internal
-   version; the filename does not determine the target. A successful upload is
-   ready for review and does not offer an install to the controller yet.
-2. Review the target. **Force update prompt** defaults off and is available only
-   for a controller known to run firmware 4.3 (`24.1-*`). Firmware 4.3.2 and
-   controllers whose version is unknown use the manual path.
-3. If the vendor signature cannot be verified, review the warning and check
-   **Continue anyway — I trust this firmware** to enable **Install**. Select
-   **Install** to arm the selected package. With the checkbox off,
-   open **System Settings → Online Updates** on that controller. On supported
-   firmware 4.3, with it on, the controller can show its native update-required
-   prompt when it refreshes
-   discovery or reconnects. It still asks the user to confirm installation.
-4. Keep the controller docked and follow the native confirmation. The controller
-   downloads the unchanged firmware and invokes its own installer.
+1. Select **Upload .upd** and choose the controller's `.upd` file, or select
+   **Use firmware on bridge** when an administrator has placed an image at
+   `firmware/controller.upd` beside the bridge configuration file. A new image at
+   that path becomes available without a code update. Uploads are limited to
+   16 MiB. The bridge verifies the package and reads its embedded internal
+   version; the filename does not determine the target.
+2. A verified package is offered to that controller immediately. If the vendor
+   signature cannot be verified, or the package is custom firmware for a
+   controller that still looks stock, the browser asks once before offering it.
+   Declining discards the upload.
+3. On the CR100, open **System Settings → Online Updates**, then keep the
+   controller docked and follow the native confirmation. The controller
+   downloads the unchanged firmware and invokes its own installer. A stock
+   controller requires vendor-signed firmware; for a first custom install use
+   **Install custom firmware** in the same row (see
+   [STOCK-BOOTSTRAP.md](STOCK-BOOTSTRAP.md)).
 
 The web UI reports upload progress and validation errors inline and refreshes
-pending-update status. A new upload and a web cancellation reset the force
-checkbox to off. Install carries the reviewed package's SHA-256 identity; if
-another administrator replaces the upload before Install, the stale request is
-rejected and the new package must be reviewed.
+pending-update status. The offer carries the uploaded package's SHA-256
+identity; if another administrator replaces the upload in between, the stale
+request is rejected.
 
-**Cancel staged update** removes the active selection for that controller and
-releases any temporary update prompt. It is available before the download
-starts. It does not stop a controller after its installer has begun.
+**Cancel update** removes the offer for that controller. It is available before
+the download starts. It does not stop a controller after its installer has begun.
 
 An interrupted firmware HTTP delivery marks that selection failed and reports
 the error inline; upload the firmware again to retry. A late failure from an old
@@ -72,7 +50,9 @@ transfer cannot fail a replacement package staged for the same controller.
 
 ## Optional force prompt and returning to normal control
 
-Force update prompt defaults off and requires known firmware 4.3 (`24.1-*`).
+The web UI never requests a force prompt; it is available through the API only
+(`force: true` on `/api/controllers/<mac>/firmware/install`). It requires known
+firmware 4.3 (`24.1-*`).
 It is disabled for 4.3.2 (`25.2-*`), later versions, other unsupported versions,
 and unknown firmware. The API also rejects those forced requests without
 raising a compatibility requirement. Manual installation remains available.
@@ -198,9 +178,11 @@ selected path:
 
 | Path | Introduction/confirmation | Choices |
 | --- | --- | --- |
-| Controller upgrade | Controller update introduction; target firmware and docking instruction | Install firmware / Keep current firmware |
-| Controller downgrade | Firmware downgrade introduction; selected older target and docking instruction | Install older firmware / Keep current firmware |
-| Bridge demonstration | Bridge software update; controller firmware remains unchanged | Update bridge / Later |
+| Official controller firmware | Identifies a vendor-signed Sonos image, its internal version and the CR100 as the target | Install official firmware / Keep current firmware |
+| Custom controller firmware | Shows the known release (for example R15) alongside the internal version; explains that the first installation from stock needs the bridge's one-time **Install custom firmware** setup | Install custom firmware / Keep current firmware |
+| Unverified controller firmware | States that the bridge cannot identify the package as official or a custom release | Install unverified firmware / Keep current firmware |
+| Controller downgrade | Names the firmware origin and older target in the introduction and confirmation | Install older firmware or the origin-specific choice / Keep current firmware |
+| Bridge update | Identifies the CR100 Bridge as the target and says the controller firmware stays unchanged | Update bridge / Later |
 | Cancelled/expired selection | The staged update is no longer available | Back to settings only |
 | Selected version already installed | Controller update introduction; target firmware and docking instruction | Install firmware / Keep current firmware |
 | Another bridge update is active | Another controller is updating the bridge | Back to settings only |
@@ -211,6 +193,15 @@ continues to supply checking, progress phases, caution, error, and completion
 wording. Both intro header and body must be present for the optional intro.
 Headers/choice labels have 40-byte text bounds and bodies 511-byte bounds after
 the terminating NUL is reserved; visible wrapping still needs to fit the screen.
+
+The bridge reads the package itself. A verified Sonos signature identifies official
+firmware. For a self-describing custom release, the bridge verifies the project's
+signature on its release label and checks that its build ID matches the one in
+the packaged controller UI. A future build signed with the same project key can
+therefore display its release during upload and installation on the same bridge.
+Earlier custom packages use their known build IDs for a release label. The stock controller's normal updater cannot install a development-
+signed custom package on its own. Its first custom installation uses the bridge's
+guided one-time setup; later custom releases can use Online Updates.
 
 The service deliberately advertises hostname-based `UpdateURL` values. The
 stock application skips `GetOnlineUpdateMessage` for certain literal numeric

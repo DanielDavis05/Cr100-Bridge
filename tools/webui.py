@@ -23,8 +23,10 @@ Usage: sudo python3 webui.py --config bridge-config.json --state bridge-state.js
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import fcntl
+from functools import lru_cache
 import hashlib
 import hmac
 import html
@@ -36,6 +38,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -71,6 +74,32 @@ LOGIN_FAILURES = 5
 MAX_LOGIN_CLIENTS = 1024
 BODY_LIMIT = 64 * 1024
 FIRMWARE_BODY_LIMIT = 16 * 1024 * 1024
+
+
+@lru_cache(maxsize=32)
+def _candidate_metadata(path, file_revision, expected_sha=None):
+    """Read display metadata for a stable package without authorizing an update."""
+    from online_updates import UpdateError, validate_firmware
+    try:
+        _, metadata = validate_firmware(path, allow_unverified=True)
+    except (OSError, UpdateError):
+        return {}
+    if expected_sha is not None and metadata['sha256'] != expected_sha:
+        return {}
+    return {key: metadata[key] for key in ('version', 'firmware_kind', 'cfw_release', 'cfw_build_id')}
+
+
+def _candidate_file(path, expected_sha=None):
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= FIRMWARE_BODY_LIMIT:
+            return None
+        revision = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return info.st_size, _candidate_metadata(path, revision, expected_sha)
+    except OSError:
+        return None
+
+
 LINK_FRESH = 30                # s: a stats line older than this means the radio link is not running
 CONNECTED_WITHIN = 20          # s since the CR100 was last heard
 AWAY_AFTER = 120               # s searching or silent: asleep (standby) or out of range
@@ -204,6 +233,9 @@ class Bridge:
         self._radio_management = None
         self._alarm_management = None
         self._online_update_management = None
+        self._stock_bootstrap_management = None
+        self.default_cfw_path = _HERE / 'stock_bootstrap_assets' / 'default-cfw.upd'
+        self.default_cfw_name = 'cr100-custom-4.3.2-r15.upd'
         self.stop = threading.Event()
         self.managed = managed
 
@@ -290,6 +322,9 @@ class Bridge:
 
     def close(self):
         self.stop.set()
+        if self._stock_bootstrap_management is not None:
+            close = getattr(self._stock_bootstrap_management, 'close', None)
+            if callable(close): close()
         if self._alarm_management is not None:
             self._alarm_management.close()
             self._alarm_management = None
@@ -966,6 +1001,14 @@ class Bridge:
             return {'mac': mac, 'classification': 'stock', 'release': None,
                     'build_id': None, 'observed_at': None, 'expires_at': None}
 
+    def default_cfw(self):
+        """Describe the locally bundled candidate."""
+        candidate = _candidate_file(self.default_cfw_path)
+        if candidate is None:
+            return {'available': False}
+        size, metadata = candidate
+        return {'available': True, 'filename': self.default_cfw_name, 'bytes': size, **metadata}
+
     def bridge_firmware_path(self):
         return self.config_path.parent / 'firmware' / 'controller.upd'
 
@@ -998,6 +1041,55 @@ class Bridge:
                 status = manager.status(controller['mac'])
             return {'controller': controller, 'current_version': current, 'firmware': status,
                     'firmware_identity': self.firmware_identity(controller['mac'])}
+        except ValueError as error:
+            raise ApiError(getattr(error, 'status', 400), str(error)) from error
+
+    def bootstrap_manager(self):
+        if self._stock_bootstrap_management is None:
+            from stock_bootstrap import BootstrapManager
+            self._stock_bootstrap_management = BootstrapManager(
+                config_path=self.config_path, state_path=self.state_path,
+                run_dir=self.run_dir or self.config_path.parent,
+                players_pid_path=self.players_pid,
+                storage_dir=self.config_path.parent / 'stock-bootstrap')
+        return self._stock_bootstrap_management
+
+    def stock_bootstrap(self, mac, command=None, payload=None, upload=None, filename=None, key_path=None):
+        """Run the separate stock-controller bootstrap, never Online Updates."""
+        controller = self.spotify_controller(mac)
+        target = controller['mac']
+        try:
+            manager = self.bootstrap_manager()
+            if command == 'stage':
+                snapshot = manager.stage(target, upload, filename, key_path=key_path)
+            elif command == 'stage-default':
+                package = self.default_cfw()
+                if not package['available']:
+                    raise ApiError(404, 'No bundled custom firmware is available. Choose a .upd file instead.')
+                snapshot = manager.stage(target, self.default_cfw_path, package['filename'])
+            elif command == 'start':
+                if self.firmware_identity(target)['classification'] == 'custom':
+                    raise ApiError(409, 'This controller reports custom firmware. Use Online Updates for a later release.')
+                snapshot = manager.start(target)
+            elif command == 'confirm-screen':
+                snapshot = manager.confirm_screen(target)
+            elif command == 'confirm-flash':
+                expected = (payload or {}).get('sha256')
+                if not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected):
+                    raise ApiError(400, 'Confirm the displayed firmware SHA-256 before flashing.')
+                snapshot = manager.confirm_flash(target, expected)
+            elif command == 'cancel':
+                snapshot = manager.cancel(target)
+            else:
+                snapshot = manager.status(target)
+            if snapshot.get('sha256'):
+                path = self.config_path.parent / 'stock-bootstrap' / target.replace(':', '') / 'candidate.upd'
+                candidate = _candidate_file(path, snapshot['sha256'])
+                if candidate:
+                    snapshot = {**snapshot, **candidate[1]}
+            return {'controller': controller, 'bootstrap': snapshot,
+                    'firmware_identity': self.firmware_identity(target),
+                    'default_cfw': self.default_cfw()}
         except ValueError as error:
             raise ApiError(getattr(error, 'status', 400), str(error)) from error
 
@@ -1546,6 +1638,16 @@ def make_handler(bridge, auth, log):
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/bridge-package')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'bridge-package'))
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/install')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'install', b))
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/cancel')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'cancel'))
+    route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap')(lambda h, b, m: bridge.stock_bootstrap(m.group(1)))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap/stage-default')(
+        lambda h, b, m: bridge.stock_bootstrap(m.group(1), 'stage-default'))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap/start')(lambda h, b, m: bridge.stock_bootstrap(m.group(1), 'start'))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap/confirm-screen')(
+        lambda h, b, m: bridge.stock_bootstrap(m.group(1), 'confirm-screen'))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap/confirm-flash')(
+        lambda h, b, m: bridge.stock_bootstrap(m.group(1), 'confirm-flash', b))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap/cancel')(
+        lambda h, b, m: bridge.stock_bootstrap(m.group(1), 'cancel'))
 
     @route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware', binary=True)
     def upload_firmware(handler, body, match):
@@ -1560,6 +1662,37 @@ def make_handler(bridge, auth, log):
             path = Path(directory) / 'upload.upd'
             handler.read_firmware(path)
             return bridge.controller_firmware(mac, 'upload', upload=path, filename=filename)
+
+    @route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/bootstrap', binary=True)
+    def upload_bootstrap(handler, body, match):
+        mac = bridge.spotify_controller(match.group(1))['mac']
+        filename = urllib.parse.unquote(handler.headers.get('X-Firmware-Name', 'firmware.upd'))
+        if len(filename) > 255 or any(ord(character) < 32 for character in filename):
+            raise ApiError(400, 'Choose a firmware filename up to 255 characters.')
+        filename = filename.replace('\\', '/').rsplit('/', 1)[-1]
+        if not filename.lower().endswith('.upd'):
+            raise ApiError(400, 'Choose a .upd controller firmware file.')
+        encoded_key = handler.headers.get('X-Public-Key')
+        key_bytes = None
+        if encoded_key is not None:
+            if len(encoded_key) > 8192:
+                raise ApiError(413, 'Public key upload is too large.')
+            try:
+                key_bytes = base64.b64decode(encoded_key, validate=True)
+            except (ValueError, base64.binascii.Error):
+                raise ApiError(400, 'The public key upload was not valid base64.') from None
+            if not 0 < len(key_bytes) <= 4096:
+                raise ApiError(400, 'Choose a nonempty public key file up to 4 KiB.')
+        with tempfile.TemporaryDirectory(prefix='cr100-bootstrap-') as directory:
+            package_path = Path(directory) / 'upload.upd'
+            handler.read_firmware(package_path)
+            key_path = None
+            if key_bytes is not None:
+                key_path = Path(directory) / 'upload.pub'
+                key_path.write_bytes(key_bytes)
+                key_path.chmod(0o600)
+            return bridge.stock_bootstrap(mac, 'stage', upload=package_path,
+                                          filename=filename, key_path=key_path)
     route('GET', '/api/spotify')(lambda h, b, m: bridge.spotify())
     route('GET', '/api/radio')(lambda h, b, m: bridge.radio_request())
     route('PUT', '/api/radio')(lambda h, b, m: bridge.radio_request('settings', b))
@@ -1774,6 +1907,8 @@ def main():
     data = DataFile(args.data or args.config.resolve().parent / 'webui.json')
     bridge = Bridge(args.config, args.state, args.run_dir, args.players_pid, data, log, managed=args.managed)
     auth = Auth(data)
+    # Restore any interrupted bootstrap room view before controllers use the bridge.
+    bridge.bootstrap_manager()
     bridge.start()
     server = listen(args.port, make_handler(bridge, auth, log))
     log({'event': 'webui-start', 'port': args.port, 'address': server.server_address[0],

@@ -33,10 +33,10 @@ Work down this list. Each item rules out a layer.
      reconnect probes to it, and on unpatched firmware those probes delayed beacons
      and knocked the working controller off. The installed Nexmon patch sends
      probes without ACK retries and stamps beacons in hardware, which fixed this in
-     testing. If it comes back, use **Pause reconnect attempts** on the absent
-     controller's card (Controllers page) or
-     `sudo cr100-bridge controller-search <mac> pause`. Pausing keeps the pairing
-     and applies without a radio restart. Resume before using that controller again.
+     testing. If it comes back, run
+     `sudo cr100-bridge controller-search <mac> pause` for the absent controller.
+     Pausing keeps the pairing and applies without a radio restart. Run
+     `controller-search <mac> resume` before using that controller again.
    - **Firmware power saving.** The radio service turns the firmware's MPC
      setting off at startup and after every firmware reload, separately from
      Linux `power_save`. `status.py` and the radio service log show whether it is

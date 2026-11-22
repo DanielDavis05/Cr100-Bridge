@@ -94,30 +94,33 @@ function downloadJson(filename, value) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function openModal(overlay, trigger, initialFocus) {
+function openModal(overlay, trigger, initialFocus, onClose) {
   const close = ({ restoreFocus = true } = {}) => {
     overlay.remove();
     document.removeEventListener('keydown', onKey, true);
+    overlay.removeEventListener('click', onClick);
+    onClose?.();
     if (restoreFocus && trigger.isConnected) trigger.focus();
   };
   const onKey = (event) => {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       const controls = [...overlay.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
-        .filter((item) => !item.disabled && item.tabIndex >= 0);
+        .filter((item) => !item.disabled && item.tabIndex >= 0 && !item.closest('[hidden]') && item.getClientRects().length);
       if (!controls.length) { event.preventDefault(); return; }
       const at = controls.indexOf(document.activeElement);
       if (event.shiftKey && at <= 0) { event.preventDefault(); controls[controls.length - 1].focus(); }
       else if (!event.shiftKey && (at === -1 || at === controls.length - 1)) { event.preventDefault(); controls[0].focus(); }
     }
   };
-  overlay.addEventListener('click', (event) => {
+  const onClick = (event) => {
     if (event.target === overlay || event.target.closest('[data-close]')) close();
-  });
+  };
+  overlay.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey, true);
   document.body.append(overlay);
   initialFocus?.focus();
-  return { close };
+  return { close, overlay };
 }
 
 function ago(seconds) {
@@ -169,6 +172,42 @@ function uploadControllerFirmware(mac, file, onProgress) {
     request.setRequestHeader('X-Bridge', '1');
     request.setRequestHeader('Content-Type', 'application/octet-stream');
     request.setRequestHeader('X-Firmware-Name', encodeURIComponent(file.name));
+    request.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+    });
+    request.addEventListener('load', () => {
+      let data;
+      try { data = JSON.parse(request.responseText); } catch { data = {}; }
+      if (request.status === 401) {
+        showGate(false);
+        reject(new ApiError('Sign in again to continue.'));
+      } else if (request.status < 200 || request.status >= 300) {
+        reject(new ApiError(data.error || `The bridge answered ${request.status}.`));
+      } else resolve(data);
+    });
+    request.addEventListener('error', () => reject(new ApiError('Cannot reach the bridge. Upload the firmware again when it reconnects.')));
+    request.addEventListener('timeout', () => reject(new ApiError('The upload timed out. Upload the firmware again.')));
+    request.timeout = 120000;
+    request.send(file);
+  });
+}
+
+async function uploadStockBootstrap(mac, file, publicKey, onProgress) {
+  let encodedKey;
+  if (publicKey) {
+    if (publicKey.size > 4096 || publicKey.size === 0) throw new ApiError('The public key must be 1–4096 bytes.');
+    const bytes = new Uint8Array(await publicKey.arrayBuffer());
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    encodedKey = btoa(binary);
+  }
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/controllers/${mac}/bootstrap`);
+    request.setRequestHeader('X-Bridge', '1');
+    request.setRequestHeader('Content-Type', 'application/octet-stream');
+    request.setRequestHeader('X-Firmware-Name', encodeURIComponent(file.name));
+    if (encodedKey) request.setRequestHeader('X-Public-Key', encodedKey);
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
     });
@@ -502,6 +541,7 @@ views.controllers = {
   title: 'Controllers',
   async open(main) {
     const firmwarePanels = new Map();
+    const bootstrapPanels = new Map();
     const openLogs = new Set();
     let renaming = false;
     let importing = false;
@@ -553,6 +593,7 @@ views.controllers = {
 
       main.append(el(`<h2 class="group-title">Bridge updates</h2>`), el(`<section class="panel bridge-update-status" role="status">
         <div class="strip-head"><span class="dot idle"></span><span class="bridge-update-message"></span><span class="meta"></span></div>
+        <p class="hint">Updates the bridge software on the Pi. Controller firmware stays unchanged.</p>
         <p class="updates-refresh-error error"></p></section>`));
       updateBridgeStatus(data);
 
@@ -673,14 +714,13 @@ views.controllers = {
     const card = (c, { pairingRunning = false, last = false } = {}) => {
       const dot = { connected: 'good', dozing: 'idle', searching: 'wait' }[c.status] || 'bad';
       const awake = ['connected', 'dozing'].includes(c.status);
-      const paused = c.auto_reconnect === false;
       const signal = c.signal != null && awake
         ? levelBar(c.signal, 4, `Signal ${c.signal} of 4`)
         : '<span class="value muted">Asleep</span>';
       const node = el(`<section class="controller">
         <div class="line">
           <div class="tile">${ICONS.controller}<span class="name">${escapeHtml(c.name)}</span></div>
-          <div class="row"><div class="what"><div class="main"><span class="dot ${dot}"></span>${escapeHtml(c.status_label)}${paused ? '<span class="chip warn">Reconnect off</span>' : ''}</div>
+          <div class="row"><div class="what"><div class="main"><span class="dot ${dot}"></span>${escapeHtml(c.status_label)}</div>
             <div class="sub">Heard ${escapeHtml(ago(c.last_heard_s))}</div></div>
             <div class="tools"><button type="button" class="mini rename-controller" title="Rename" aria-label="Rename ${escapeHtml(c.name)}">${ICONS.pencil}</button></div></div>
         </div>
@@ -699,9 +739,6 @@ views.controllers = {
             <div class="setting"><span class="what"><span class="main">Components</span>
               <span class="sub">${c.visible_components == null ? 'Uses the household selection' : `${c.visible_components.length} chosen for this controller`}</span></span>
               <button type="button" class="inline-button quiet choose-components">Choose</button></div>
-            <label class="setting check"><span class="what"><span class="main">Reconnect automatically</span>
-              <span class="sub">Leave on, even while it is switched off. Turn off only to troubleshoot.</span></span>
-              <input type="checkbox" class="controller-reconnect" ${paused ? '' : 'checked'}><span class="box">${ICONS.tick}</span></label>
             <div class="setting"><span class="what"><span class="main">Forget this controller</span>
               <span class="sub">Removes it and its settings from the bridge. Pair it again to bring it back.</span></span>
               <button type="button" class="inline-button quiet forget-controller" ${pairingRunning ? 'disabled' : ''}>Forget</button></div>
@@ -719,18 +756,6 @@ views.controllers = {
         catch (error) { toast('Components unavailable', error.message, true); }
         finally { trigger.disabled = false; }
       });
-      $('.controller-reconnect', node).addEventListener('change', async (event) => {
-        const input = event.currentTarget;
-        input.disabled = true;
-        try {
-          const result = await api('PUT', `/api/controllers/${c.mac}/reconnect`, { enabled: input.checked });
-          toast(result.auto_reconnect ? 'Reconnecting automatically' : 'Reconnect turned off', result.message);
-          await refresh();
-        } catch (error) {
-          input.checked = !input.checked;
-          toast('Reconnect setting not saved', error.message, true);
-        } finally { input.disabled = false; }
-      });
       $('.forget-controller', node).addEventListener('click', async (event) => {
         const effect = last
           ? 'This is the last controller: the bridge goes back to having none paired, as when it was installed.'
@@ -740,15 +765,20 @@ views.controllers = {
         try {
           const result = await api('POST', `/api/controllers/${c.mac}/forget`, {});
           firmwarePanels.delete(c.mac);
+          bootstrapPanels.delete(c.mac);
           toast('Controller forgotten', result.message);
         } catch (error) {
           toast('Not forgotten', error.message, true);
         }
         await refresh();
       });
-      if (!firmwarePanels.has(c.mac)) firmwarePanels.set(c.mac, firmwarePanel(c));
+      // One Firmware row: upload an update, or start the guided custom install on a stock CR100.
+      if (!bootstrapPanels.has(c.mac)) bootstrapPanels.set(c.mac, bootstrapPanel(c));
+      const bootstrap = bootstrapPanels.get(c.mac);
+      if (!firmwarePanels.has(c.mac)) firmwarePanels.set(c.mac, firmwarePanel(c, bootstrap));
       const firmware = firmwarePanels.get(c.mac);
-      $('.controller-body', node).append(firmware.node);
+      $('.forget-controller', node).closest('.setting').before(firmware.node);
+      bootstrap.update(c.bootstrap, c.bootstrap_error, c.firmware_identity, c.default_cfw);
       firmware.update(c.update, c.firmware, c.firmware_identity);
       return node;
     };
@@ -767,38 +797,26 @@ views.controllers = {
       });
     };
 
-    // Upload → Install → Update on the controller → Done, with the current step lit.
-    const FIRMWARE_STEPS = ['Choose firmware', 'Review firmware', 'Install on CR100', 'Done'];
-    const firmwareStep = (state) => ({ staged: 1, ready: 1, armed: 2, downloading: 2, installing: 2, started: 2,
-      completed: 4, complete: 4 }[state] ?? 0);
-
-    const firmwarePanel = (controller) => {
-      const node = el(`<details class="controller-firmware"><summary>${CHEVRON}<span class="strip-title">Firmware</span><span class="meta firmware-summary"></span></summary>
-        <form class="firmware-form">
-          <div class="versions"><span class="ver firmware-current"></span><span class="firmware-target-wrap">${ARROW}<span class="ver target firmware-target"></span></span></div>
-          <ol class="stepper">${FIRMWARE_STEPS.map((label, i) => `<li><span class="num">${i + 1}</span><span>${label}</span></li>`).join('')}</ol>
-          <p class="firmware-instruction" role="status"></p>
-          <button type="button" class="inline-button quiet firmware-bridge-package" hidden>Use firmware on bridge</button>
-          <div class="file-pick"><label><input type="file" class="firmware-file" accept=".upd,application/octet-stream"><span class="inline-button quiet">Choose .upd file</span></label>
-            <span class="file-name">No file chosen</span></div>
-          <p class="hint firmware-version-warning" role="status" hidden></p>
-          <div class="firmware-signature" hidden><p class="hint firmware-signature-warning" role="alert"></p>
-            <label class="check"><input type="checkbox" class="firmware-continue"><span class="box">${ICONS.tick}</span><span>Continue anyway — I trust this firmware</span></label></div>
-          <label class="check"><input type="checkbox" class="firmware-force"><span class="box">${ICONS.tick}</span><span>Prompt the controller to update</span></label>
-          <p class="hint firmware-guidance"></p>
-          <div class="firmware-actions"><button type="submit" class="inline-button quiet firmware-upload" disabled>Upload</button>
-            <button type="button" class="inline-button firmware-install" disabled>Install</button>
-            <button type="button" class="inline-button quiet firmware-cancel" disabled>Cancel staged update</button></div>
+    // Choosing a .upd file uploads it and offers it to the controller in one go; the CR100
+    // asks for confirmation itself in Online Updates. Unsigned firmware asks here first.
+    const FIRMWARE_ACTIVE = ['armed', 'downloading', 'installing', 'started'];
+    const firmwarePanel = (controller, bootstrap) => {
+      const node = el(`<div class="firmware-entry">
+        <div class="setting"><span class="what"><span class="main">Firmware</span><span class="sub firmware-summary"></span></span>
+          <span class="firmware-tools">
+            <button type="button" class="inline-button quiet firmware-bridge-package" hidden>Use firmware on bridge</button>
+            <span class="file-pick"><label><input type="file" class="firmware-file" accept=".upd,application/octet-stream" aria-label="Upload a controller firmware .upd file"><span class="inline-button quiet">Upload .upd</span></label></span>
+          </span></div>
+        <div class="firmware-state" hidden>
           <div class="firmware-progress" hidden><span class="level" role="progressbar" aria-label="Firmware upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">${'<i></i>'.repeat(10)}</span></div>
           <p class="firmware-status" role="status" aria-live="polite"></p>
           <p class="firmware-error error" role="alert"></p>
-        </form></details>`);
-      const form = $('form', node);
-      const input = $('.firmware-file', node), force = $('.firmware-force', node);
-      const proceed = $('.firmware-continue', node);
-      let reviewedSha256;
-      const bridgePackage = $('.firmware-bridge-package', node);
-      const upload = $('.firmware-upload', node), install = $('.firmware-install', node), cancel = $('.firmware-cancel', node);
+          <div class="firmware-actions"><button type="button" class="inline-button firmware-offer" hidden>Offer to controller</button>
+            <button type="button" class="inline-button quiet firmware-cancel" hidden>Cancel update</button></div>
+        </div></div>`);
+      $('.firmware-tools', node).append(bootstrap.node);
+      const input = $('.firmware-file', node), bridgePackage = $('.firmware-bridge-package', node);
+      const offerButton = $('.firmware-offer', node), cancel = $('.firmware-cancel', node);
       const progress = $('.firmware-progress', node), status = $('.firmware-status', node), error = $('.firmware-error', node);
       const setProgress = (percent) => {
         const bar = $('.level', progress);
@@ -806,139 +824,393 @@ views.controllers = {
         bar.querySelectorAll('i').forEach((segment, i) => segment.classList.toggle('on', i < Math.round(percent / 10)));
       };
       let firmware = {}, currentVersion = controller.firmware, currentIdentity = controller.firmware_identity;
-      let busy = false, notice = '', opened = false;
+      let busy = false, notice = '', failure = '';
       const endpoint = `/api/controllers/${controller.mac}/firmware`;
+      const kindOf = (f) => ['official', 'custom', 'unverified'].includes(f.firmware_kind) ? f.firmware_kind :
+        f.signature_valid === true ? 'official' : f.cfw_build_id ? 'custom' : f.signature_valid === false ? 'unverified' : null;
+      const labelOf = (f) => {
+        const kind = kindOf(f);
+        if (kind === 'custom') return `${f.cfw_release || 'Custom firmware'} (${f.version})`;
+        if (kind === 'official') return `Sonos ${f.version}`;
+        if (kind === 'unverified') return `Unsigned firmware ${f.version}`;
+        return f.version || 'The firmware';
+      };
       const update = function (fresh, current, identity) {
         if (fresh) firmware = fresh;
         if (arguments.length > 1) currentVersion = current || '';
         if (arguments.length > 2) currentIdentity = identity;
-        if (reviewedSha256 !== firmware.sha256) { proceed.checked = false; reviewedSha256 = firmware.sha256; }
-        const unverified = firmware.signature_valid === false;
-        $('.firmware-signature', node).hidden = !unverified;
-        $('.firmware-signature-warning', node).textContent = firmware.signature_warning || '';
-        proceed.disabled = busy || Boolean(firmware.armed);
         const state = firmware.status || 'none';
-        const labels = { none: 'No update staged', staged: 'Uploaded, ready to install', ready: 'Uploaded, ready to install',
-          armed: 'Ready on the controller', downloading: 'Downloading to the controller',
-          installing: 'Installing on the controller', started: 'Installing on the controller',
-          completed: 'Updated', complete: 'Updated',
-          failed: 'Update failed', expired: 'Staged update expired', cancelled: 'Staged update cancelled' };
-        const inProgress = ['downloading', 'installing', 'started'].includes(state);
-        const terminal = ['none', 'completed', 'complete', 'cancelled', 'expired', 'failed'].includes(state);
-        const reportedVersion = currentVersion || '';
-        const installedRelease = currentIdentity?.classification === 'custom'
-          ? (currentIdentity.release || 'Custom firmware') : '';
-        const currentLabel = [installedRelease, reportedVersion].filter(Boolean).join(' · ');
-        const targetLabel = [firmware.cfw_release, firmware.version].filter(Boolean).join(' · ');
-        const normalizedVersion = { '4.3': '24.1-75101', '4.3.2': '25.2-50130' }[reportedVersion] || reportedVersion;
-        const sameVersion = Boolean(firmware.version) && normalizedVersion === firmware.version;
-        const versionWarning = $('.firmware-version-warning', node);
-        versionWarning.hidden = !sameVersion;
-        versionWarning.textContent = sameVersion
-          ? firmware.firmware_kind === 'custom'
-            ? 'Custom releases can share this Sonos version. Check the target release before installing.'
-            : 'This controller already runs this version. The stock updater may skip it; you can still install.' : '';
-        const forceAllowed = reportedVersion === '4.3' || /^24\.1-\d+$/.test(reportedVersion);
-        const internalVersion = /^(\d+)\.(\d+)-\d+$/.exec(reportedVersion);
-        const retirementUI = reportedVersion === '4.3.2' || (internalVersion &&
-          (Number(internalVersion[1]) > 25 || (Number(internalVersion[1]) === 25 && Number(internalVersion[2]) >= 2)));
-        if (!forceAllowed) force.checked = false;
+        const label = labelOf(firmware);
+        const active = FIRMWARE_ACTIVE.includes(state);
+        const inProgress = active && state !== 'armed';
 
-        // Summary line, versions and the step the update is on.
-        $('.firmware-summary', node).textContent = `${currentLabel || 'Version not known yet'} · ${labels[state] || state}`;
-        $('.firmware-current', node).textContent = currentLabel || 'Not known yet';
-        $('.firmware-target-wrap', node).hidden = !firmware.version;
-        $('.firmware-target', node).textContent = targetLabel;
-        const step = firmwareStep(state), failed = ['failed', 'expired', 'cancelled'].includes(state);
-        node.querySelectorAll('.stepper li').forEach((item, i) => {
-          item.className = i < step ? 'done' : i === step ? (failed && i === 0 ? 'now bad' : 'now') : '';
-          if (i === step) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
-        });
-        const choose = step === 0 || step === 4;
-        const review = step === 1;
-        $('.file-pick', node).hidden = !choose;
-        bridgePackage.hidden = !choose || !controller.bridge_firmware_available;
-        bridgePackage.disabled = busy;
-        upload.hidden = !choose;
-        install.hidden = !review;
-        force.closest('label').hidden = !review || !forceAllowed;
-        $('.firmware-signature', node).hidden = !review || !unverified;
-        versionWarning.hidden = !review || !sameVersion;
-        $('.firmware-guidance', node).hidden = choose;
-        $('.firmware-instruction', node).textContent = step === 4
-          ? 'Update complete. You can choose another firmware file.'
-          : choose ? 'Choose a controller firmware file to check its release.'
-          : review ? (firmware.firmware_kind === 'custom' && !installedRelease
-            ? 'First confirm this controller already accepts custom firmware. Stock controllers require vendor-signed updates.'
-            : 'Check the installed and selected releases, then confirm the update for this controller.')
-          : 'Keep the controller docked and follow the update instructions on its screen.';
-        // Open the panel by itself once while an update is under way; after that the person decides.
-        if (!opened && step > 0 && step < 4) { node.open = true; opened = true; }
+        // What the CR100 runs now, then whatever is under way.
+        const installed = currentIdentity?.classification === 'custom' ? currentIdentity.release || 'Custom firmware'
+          : currentIdentity?.classification === 'stock' ? 'Stock assumed' : '';
+        const underWay = { armed: 'Update offered', downloading: 'Downloading update', installing: 'Installing update',
+          started: 'Installing update', staged: 'Update uploaded', ready: 'Update uploaded' }[state] || bootstrap.summary();
+        $('.firmware-summary', node).textContent =
+          [currentVersion || 'Version not known yet', installed, underWay].filter(Boolean).join(' · ');
 
-        if (!busy) {
-          const forceActive = firmware.force_active ?? firmware.force_prompt;
-          status.textContent = firmware.armed ? (forceActive && forceAllowed
-            ? 'Ready. The controller will show an update prompt when it reconnects.'
-            : firmware.force_requested
-              ? 'The update prompt is no longer active. Open Online Updates on the controller to retry.'
-              : 'Ready. Open System Settings → Online Updates on the controller to install.')
-            : firmware.last_error || notice;
-        }
-        $('.file-name', node).textContent = input.files.length ? input.files[0].name : 'No file chosen';
+        const normalized = { '4.3': '24.1-75101', '4.3.2': '25.2-50130' }[currentVersion] || currentVersion;
+        const sameVersion = Boolean(firmware.version) && normalized === firmware.version;
+        const message = {
+          staged: `${label} is uploaded but not offered to the controller yet.`,
+          ready: `${label} is uploaded but not offered to the controller yet.`,
+          armed: `${label} is ready. On the CR100, open System Settings → Online Updates to install it.${sameVersion
+            ? ' The controller already runs this version, so its updater may skip it.' : ''}`,
+          downloading: `Installing ${label}. Keep the controller docked and follow its screen.`,
+          installing: `Installing ${label}. Keep the controller docked and follow its screen.`,
+          started: `Installing ${label}. Keep the controller docked and follow its screen.`,
+          completed: `Updated to ${label}.`, complete: `Updated to ${label}.`,
+          failed: 'The update did not finish. Upload the firmware again to retry.',
+          expired: `The offer for ${label} expired. Upload it again to retry.`,
+        }[state] || '';
+        if (!busy) status.textContent = notice || message;
+        error.textContent = failure || (state === 'failed' ? firmware.last_error || '' : '');
+
         input.disabled = busy || inProgress;
-        force.disabled = busy || inProgress || firmware.armed || !forceAllowed;
-        upload.disabled = busy || inProgress || !input.files.length;
-        install.disabled = busy || inProgress || terminal || Boolean(firmware.armed) || !firmware.version || (unverified && !proceed.checked);
-        cancel.disabled = busy || inProgress || terminal;
-        cancel.hidden = terminal;
-        $('.firmware-guidance', node).textContent = retirementUI
-          ? 'Firmware 4.3.2 must use System Settings → Online Updates; its compatibility notice hides the update prompt.'
-          : !forceAllowed
-            ? 'Update prompts need firmware 4.3. Install from Online Updates on the controller.'
-            : force.checked
-              ? 'The controller asks to update when it reconnects. Its own firmware checks still apply.'
-              : 'Install from Online Updates on the controller.';
+        bridgePackage.hidden = !controller.bridge_firmware_available;
+        bridgePackage.disabled = busy || inProgress;
+        offerButton.hidden = !['staged', 'ready'].includes(state);
+        offerButton.disabled = busy;
+        cancel.hidden = !['staged', 'ready', 'armed'].includes(state);
+        cancel.disabled = busy;
+        cancel.textContent = state === 'armed' ? 'Cancel update' : 'Discard';
+        bootstrap.node.hidden = bootstrap.hidden() || (active && bootstrap.idle());
+        $('.firmware-state', node).hidden = !(busy || status.textContent || error.textContent);
       };
       const perform = async (message, operation) => {
-        busy = true; notice = ''; error.textContent = ''; status.textContent = message; update();
+        busy = true; notice = ''; failure = ''; status.textContent = message; update();
         try {
           const result = await operation();
           firmware = result.firmware;
           currentVersion = result.current_version || '';
           currentIdentity = result.firmware_identity;
           return true;
-        } catch (failure) {
-          error.textContent = failure.message;
+        } catch (problem) {
+          failure = problem.message;
           return false;
         } finally {
           busy = false; progress.hidden = true; update();
         }
       };
+      // Offer what was just uploaded. Unsigned firmware, or custom firmware for a CR100 that
+      // still looks stock, asks first; declining discards the upload.
+      const offer = async () => {
+        const reasons = [];
+        if (firmware.signature_valid === false) reasons.push(firmware.signature_warning ||
+          'The bridge cannot verify this file as Sonos firmware or a known custom release.');
+        if (kindOf(firmware) === 'custom' && currentIdentity?.classification === 'stock') reasons.push(
+          'This CR100 looks like stock firmware, which only accepts Sonos-signed updates. For a first custom install, use Install custom firmware instead.');
+        if (reasons.length && !confirm(`${reasons.join('\n\n')}\n\nOffer ${labelOf(firmware)} to ${controller.name} anyway?`)) {
+          if (await perform('Discarding the upload…', () => api('POST', endpoint + '/cancel', {}))) {
+            notice = 'Not offered. The upload was discarded.'; update();
+          }
+          return;
+        }
+        await perform('Offering the update to the controller…', () => api('POST', endpoint + '/install',
+          { force: false, sha256: firmware.sha256, allow_unverified: firmware.signature_valid === false }));
+      };
+      input.addEventListener('change', async () => {
+        const file = input.files[0];
+        input.value = '';
+        if (!file || busy) return;
+        if (file.size > 16 * 1024 * 1024) { notice = ''; failure = 'Firmware files must be at most 16 MiB.'; update(); return; }
+        progress.hidden = false; setProgress(0);
+        const uploaded = await perform('Uploading firmware…', () => uploadControllerFirmware(controller.mac, file, (percent) => {
+          setProgress(percent);
+          status.textContent = percent === 100 ? 'Checking the firmware signature and version…' : `Uploading firmware… ${percent}%`;
+        }));
+        if (uploaded) await offer();
+      });
       bridgePackage.addEventListener('click', async () => {
-        if (await perform('Checking firmware on the bridge…', () => api('POST', endpoint + '/bridge-package', {}))) {
-          input.value = ''; force.checked = false; update();
+        if (await perform('Checking the firmware on the bridge…', () => api('POST', endpoint + '/bridge-package', {}))) await offer();
+      });
+      offerButton.addEventListener('click', () => offer());
+      cancel.addEventListener('click', () => perform('Cancelling…', () => api('POST', endpoint + '/cancel', {})));
+      return { node, update, isBusy: () => busy };
+    };
+
+    const BOOTSTRAP_LABELS = {
+      none: 'No custom firmware staged', staged: 'Package uploaded', preparing: 'Preparing the controller',
+      await_now_playing: 'Waiting for Now Playing confirmation', triggering: 'Processing album art',
+      root_ready: 'Controller access established', preflight: 'Checking the flash destination',
+      await_flash_confirmation: 'Ready for flash confirmation', installing: 'Installing custom firmware',
+      verifying: 'Checking the installation', completed: 'Installation complete',
+      failed: 'Installation stopped', cancelled: 'Installation cancelled', uncertain: 'Installation outcome uncertain',
+    };
+
+    const IDLE_BOOTSTRAP = ['none', 'staged', 'failed', 'cancelled', 'completed'];
+    const bootstrapPanel = (controller) => {
+      const node = el(`<button type="button" class="inline-button install-open" aria-haspopup="dialog">Install custom firmware</button>`);
+      const overlay = el(`<div class="picker install-overlay" role="dialog" aria-modal="true" aria-labelledby="install-title" aria-describedby="install-intro">
+        <section class="popup install-dialog">
+          <header class="install-header"><div><p class="install-eyebrow">CR100 setup</p><h2 id="install-title">Install custom firmware</h2>
+            <p id="install-intro">For a stock CR100 on firmware 4.3.2.</p></div>
+            <button type="button" class="install-close" aria-label="Close installation guide" data-close>×</button></header>
+          <div class="install-meter"><span class="install-step-count"></span><ol aria-label="Installation steps">
+            <li>Package</li><li>Controller</li><li>Install</li></ol></div>
+          <div class="install-content"><div class="install-copy"><h3 class="install-stage-title" tabindex="-1"></h3>
+            <p class="install-instruction"></p>
+            <div class="install-default-package" hidden><span>Included with the bridge</span><strong class="install-default-name"></strong><span class="install-default-size"></span></div>
+            <div class="install-file-section" hidden><div class="bootstrap-pick file-pick"><label><input type="file" class="bootstrap-package" accept=".upd,application/octet-stream"><span class="inline-button quiet">Choose .upd package</span></label><span class="bootstrap-package-name file-name">No package chosen</span></div>
+              <details class="install-key-options"><summary>Use a different public key</summary><div class="bootstrap-pick file-pick"><label><input type="file" class="bootstrap-key" accept=".pub,application/octet-stream"><span class="inline-button quiet">Choose .pub key</span></label><span class="bootstrap-key-name file-name">Bundled development key</span></div></details>
+              <div class="bootstrap-progress" hidden><span class="level" role="progressbar" aria-label="Custom firmware upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">${'<i></i>'.repeat(10)}</span></div></div>
+            <button type="button" class="install-change-package" hidden>Use another .upd package</button>
+            <div class="bootstrap-identity" hidden><dl class="meta-grid"><div><dt>Package</dt><dd class="bootstrap-filename"></dd></div><div class="bootstrap-version-row" hidden><dt>Firmware version</dt><dd class="bootstrap-version"></dd></div><div><dt>SHA-256</dt><dd class="bootstrap-sha hash"></dd></div><div class="bootstrap-key-row" hidden><dt>Public key SHA-256</dt><dd class="bootstrap-key-sha hash"></dd></div></dl></div>
+            <div class="bootstrap-destination" hidden><p>Flash destination</p><dl class="meta-grid"><div><dt>Controller</dt><dd class="bootstrap-controller"></dd></div><div><dt>Firmware bank</dt><dd class="bootstrap-bank"></dd></div><div><dt>Generation</dt><dd class="bootstrap-generation"></dd></div></dl></div>
+            <label class="check install-review" hidden><input type="checkbox" class="bootstrap-reviewed"><span class="box">${ICONS.tick}</span><span>I checked this package and flash destination.</span></label>
+            <p class="bootstrap-error error" role="alert"></p></div>
+            <figure class="install-figure"><div class="install-device"><div class="install-screen"><img class="install-image" alt=""><span class="install-image-fallback" hidden>Controller screen example unavailable</span></div><div class="install-device-controls" aria-hidden="true"><i></i><i></i><i></i></div></div><figcaption class="install-caption"></figcaption></figure></div>
+          <footer class="install-footer"><p class="bootstrap-status" role="status" aria-live="polite"></p>
+            <div class="install-actions"><button type="button" class="inline-button quiet bootstrap-cancel" hidden>Cancel installation</button>
+              <button type="button" class="inline-button bootstrap-default" hidden>Use included firmware</button>
+              <button type="button" class="inline-button bootstrap-upload" hidden>Upload package</button>
+              <button type="button" class="inline-button bootstrap-start" hidden>Prepare controller</button>
+              <button type="button" class="inline-button bootstrap-screen" hidden>I am on Now Playing</button>
+              <button type="button" class="inline-button bootstrap-flash" hidden>Confirm flash</button>
+              <button type="button" class="inline-button install-done" hidden>Done</button></div></footer>
+        </section></div>`);
+      const packageInput = $('.bootstrap-package', overlay), keyInput = $('.bootstrap-key', overlay);
+      const stageDefault = $('.bootstrap-default', overlay), upload = $('.bootstrap-upload', overlay);
+      const start = $('.bootstrap-start', overlay);
+      const screen = $('.bootstrap-screen', overlay), flash = $('.bootstrap-flash', overlay);
+      const cancel = $('.bootstrap-cancel', overlay), done = $('.install-done', overlay);
+      const progress = $('.bootstrap-progress', overlay), status = $('.bootstrap-status', overlay);
+      const error = $('.bootstrap-error', overlay), reviewed = $('.bootstrap-reviewed', overlay);
+      const changePackage = $('.install-change-package', overlay), fileSection = $('.install-file-section', overlay);
+      const defaultCard = $('.install-default-package', overlay);
+      const image = $('.install-image', overlay), imageFallback = $('.install-image-fallback', overlay);
+      const endpoint = `/api/controllers/${controller.mac}/bootstrap`;
+      let snapshot = { status: 'none' }, identity, defaultCandidate = { available: false };
+      let busy = false, notice = '', replacing = false, summary = '', customAlready = false;
+      let screenConfirmed = false, flashConfirmed = false, reviewedDestination = '', shownImage = '';
+      let modal;
+
+      const stageView = (state) => {
+        if (identity?.classification === 'custom' && ['none', 'staged', 'failed', 'cancelled', 'completed'].includes(state))
+          return { step: 3, title: 'Custom firmware is installed',
+            text: `The bridge detected ${identity.release || 'custom firmware'} on this controller. Upload later releases from the Firmware row, or use Online Updates on the CR100.`,
+            art: null, caption: '' };
+        if (snapshot.recovery_required) return { step: 2, title: 'Controller recovery needed',
+          text: 'The bridge needs the controller to recover before another attempt. Check the status below.',
+          art: 'rooms', caption: 'CR100 Rooms screen' };
+        switch (state) {
+          case 'none': case 'cancelled': return { step: 0, title: 'Choose a firmware package',
+            text: defaultCandidate.available ? 'Use the firmware included with the bridge to begin the guided installation.' :
+              'Select a custom firmware .upd package for this controller. A different public key is optional.',
+            art: 'rooms', caption: 'The installation room will appear after preparation' };
+          case 'staged': return { step: 1, title: 'Prepare the controller',
+            text: 'Keep the CR100 awake. The bridge will temporarily show only the Install firmware room.',
+            art: 'rooms', caption: 'On your CR100 · Rooms' };
+          case 'preparing': return { step: 1, title: 'Preparing the controller',
+            text: 'Wait for Install firmware to appear in the Rooms list.',
+            art: 'rooms', caption: 'On your CR100 · Rooms' };
+          case 'await_now_playing': return { step: 1, title: 'Open Now Playing',
+            text: 'On the CR100, open Install firmware from Rooms and enter its Now Playing screen. Confirm here only after that screen is open.',
+            art: 'now-playing', caption: 'On your CR100 · Now Playing' };
+          case 'triggering': case 'root_ready': case 'preflight': return { step: 2, title: 'Checking the controller',
+            text: 'The bridge has sent the album art and is checking temporary controller access. The CR100 screen may pause briefly.',
+            art: 'now-playing', caption: 'The Now Playing screen may pause during this step' };
+          case 'await_flash_confirmation': return { step: 2, title: 'Review and confirm',
+            text: 'Check the package and flash destination below. Confirming runs the controller upgrade; the controller may restart.',
+            art: null, caption: '' };
+          case 'installing': case 'verifying': return { step: 2, title: 'Installing custom firmware',
+            text: 'Leave the controller powered on while the bridge checks the result. Its screen may go blank or restart.',
+            art: 'now-playing', caption: 'The screen may pause, go blank, or restart' };
+          case 'completed': return { step: 0, title: 'Previous install recorded',
+            text: 'The bridge assumes stock when it has no fresh custom firmware report. If custom firmware still runs, use Online Updates on the CR100. If you restored original stock 4.3.2, you can install custom firmware here.',
+            art: 'rooms', caption: 'The installation room will appear after preparation' };
+          case 'failed': return snapshot.sha256 ? { step: 1, title: 'Installation stopped',
+            text: 'The temporary room did not become ready. If this controller already runs custom firmware, use Online Updates on the CR100. Retry this setup only on original stock 4.3.2.',
+            art: 'rooms', caption: 'On your CR100 · Rooms' } : { step: 0, title: 'Choose a firmware package',
+            text: 'The previous attempt stopped. Choose a package to try again.',
+            art: 'rooms', caption: 'On your CR100 · Rooms' };
+          case 'uncertain': return { step: 2, title: 'Check the controller',
+            text: 'The bridge could not confirm the installation result. Check the controller screen and firmware information.',
+            art: null, caption: '' };
+          default: return { step: 0, title: 'Install custom firmware', text: 'Check the status below.',
+            art: 'rooms', caption: 'On your CR100 · Rooms' };
+        }
+      };
+      const setProgress = (percent) => {
+        const bar = $('.level', progress);
+        bar.setAttribute('aria-valuenow', String(percent));
+        bar.querySelectorAll('i').forEach((segment, i) => segment.classList.toggle('on', i < Math.round(percent / 10)));
+      };
+      const update = (fresh, fetchError, freshIdentity, freshDefault) => {
+        if (fresh) {
+          if (fresh.status !== snapshot.status) notice = '';
+          snapshot = fresh;
+        }
+        if (freshIdentity) identity = freshIdentity;
+        if (freshDefault) defaultCandidate = freshDefault;
+        const state = snapshot.status || 'none';
+        customAlready = identity?.classification === 'custom' &&
+          ['none', 'staged', 'failed', 'cancelled', 'completed'].includes(state);
+        node.textContent = IDLE_BOOTSTRAP.includes(state) ? 'Install custom firmware' : 'Continue custom install';
+        $('#install-intro', overlay).textContent = customAlready
+          ? `${identity.release || 'Custom firmware'} detected on this controller.` : 'For a stock CR100 on firmware 4.3.2.';
+        if (state !== 'await_now_playing') screenConfirmed = false;
+        if (state !== 'await_flash_confirmation') flashConfirmed = false;
+        summary = ['none', 'cancelled', 'completed'].includes(state) ? ''
+          : state === 'staged' ? 'Custom install ready to prepare'
+          : state === 'failed' ? 'Custom install stopped' : BOOTSTRAP_LABELS[state] || state;
+        const selectedFile = packageInput.files[0];
+        const canStage = !customAlready && !snapshot.recovery_required && ['none', 'staged', 'failed', 'cancelled', 'completed'].includes(state);
+        const needsPackage = ['none', 'cancelled', 'completed'].includes(state) || (state === 'failed' && !snapshot.sha256);
+        const showPicker = canStage && (replacing || !!selectedFile || (needsPackage && !defaultCandidate.available));
+        fileSection.hidden = !showPicker;
+        defaultCard.hidden = !canStage || !defaultCandidate.available || !needsPackage || showPicker;
+        $('.install-default-name', overlay).textContent = defaultCandidate.cfw_release
+          ? `${defaultCandidate.cfw_release} custom firmware`
+          : defaultCandidate.filename || 'Included firmware';
+        $('.install-default-size', overlay).textContent = defaultCandidate.bytes ?
+          `${(defaultCandidate.bytes / 1024 / 1024).toFixed(1)} MiB` : '';
+        changePackage.hidden = !canStage || showPicker;
+        $('.bootstrap-package-name', overlay).textContent = selectedFile?.name || 'No package chosen';
+        $('.bootstrap-key-name', overlay).textContent = keyInput.files[0]?.name || 'Bundled development key';
+        packageInput.disabled = keyInput.disabled = busy || !canStage;
+        stageDefault.hidden = defaultCard.hidden;
+        stageDefault.textContent = `Use included ${defaultCandidate.cfw_release || 'firmware'}`;
+        stageDefault.disabled = busy;
+        upload.hidden = !showPicker;
+        upload.disabled = busy || !selectedFile;
+        start.hidden = customAlready || !['staged', 'failed'].includes(state) || !snapshot.sha256 || showPicker;
+        start.disabled = busy || !!snapshot.recovery_required;
+        start.textContent = state === 'failed' ? 'Try preparation again' : 'Prepare controller';
+        screen.hidden = state !== 'await_now_playing'; screen.disabled = busy || screenConfirmed;
+        screen.textContent = screenConfirmed ? 'Now Playing confirmed' : 'I am on Now Playing';
+        const hasDestination = Number.isInteger(snapshot.destination_bank) && Number.isInteger(snapshot.destination_generation);
+        const destinationId = `${snapshot.sha256}:${snapshot.destination_bank}:${snapshot.destination_generation}`;
+        if (state !== 'await_flash_confirmation') { reviewed.checked = false; reviewedDestination = ''; }
+        else if (reviewedDestination !== destinationId) { reviewed.checked = false; reviewedDestination = destinationId; }
+        $('.install-review', overlay).hidden = state !== 'await_flash_confirmation' || !hasDestination || !snapshot.sha256;
+        flash.hidden = state !== 'await_flash_confirmation';
+        flash.disabled = busy || flashConfirmed || !hasDestination || !snapshot.sha256 || !reviewed.checked;
+        flash.textContent = flashConfirmed ? 'Flash confirmed' : 'Confirm flash';
+        cancel.hidden = !snapshot.can_cancel; cancel.disabled = busy;
+        done.hidden = !customAlready; done.disabled = busy;
+        $('.bootstrap-identity', overlay).hidden = !['staged', 'failed', 'await_flash_confirmation'].includes(state) || !snapshot.sha256 || showPicker;
+        $('.bootstrap-filename', overlay).textContent = snapshot.filename || 'Uploaded package';
+        $('.bootstrap-version-row', overlay).hidden = !snapshot.version;
+        $('.bootstrap-version', overlay).textContent = [snapshot.cfw_release, snapshot.version].filter(Boolean).join(' · ');
+        $('.bootstrap-sha', overlay).textContent = snapshot.sha256 || '';
+        $('.bootstrap-key-row', overlay).hidden = !snapshot.key_sha256;
+        $('.bootstrap-key-sha', overlay).textContent = snapshot.key_sha256 || '';
+        $('.bootstrap-destination', overlay).hidden = state !== 'await_flash_confirmation';
+        $('.bootstrap-controller', overlay).textContent = `${controller.name} (${controller.mac})${snapshot.controller_ip ? ` · ${snapshot.controller_ip}` : ''}`;
+        $('.bootstrap-bank', overlay).textContent = hasDestination ? String(snapshot.destination_bank) : 'Checking…';
+        $('.bootstrap-generation', overlay).textContent = hasDestination ? String(snapshot.destination_generation) : 'Checking…';
+        const view = showPicker && !['none', 'cancelled'].includes(state) ? {
+          step: 0, title: 'Choose a firmware package',
+          text: 'Select a different custom firmware .upd package. A different public key is optional.',
+          art: 'rooms', caption: 'On your CR100 · Rooms',
+        } : stageView(state);
+        $('.install-stage-title', overlay).textContent = view.title;
+        $('.install-instruction', overlay).textContent = view.text;
+        $('.install-caption', overlay).textContent = view.caption;
+        $('.install-step-count', overlay).textContent = view.step === 3 ? 'Complete' : `Step ${view.step + 1} of 3`;
+        overlay.querySelectorAll('.install-meter li').forEach((item, i) => {
+          item.className = i < view.step ? 'done' : i === view.step ? 'now' : '';
+          if (i === view.step) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
+        });
+        $('.install-figure', overlay).hidden = !view.art;
+        $('.install-content', overlay).classList.toggle('without-image', !view.art);
+        const nextImage = view.art ? `/static/install/${view.art}.png` : '';
+        if (nextImage && shownImage !== nextImage) {
+          shownImage = nextImage; image.hidden = false; imageFallback.hidden = true;
+          image.alt = view.art === 'rooms' ? 'CR100 Rooms screen with Install firmware room' :
+            view.art === 'now-playing' ? 'CR100 Now Playing screen for Install firmware' :
+              'CR100 screen after custom firmware installation';
+          image.src = nextImage;
+        }
+        $('.install-dialog', overlay).setAttribute('aria-busy', String(busy));
+        if (!busy) status.textContent = fetchError || notice || (customAlready ? 'Confirmed from a recent controller heartbeat.' :
+          state === 'completed' ? 'Previous installation completed; stock is assumed without a fresh report.' : snapshot.message) ||
+          BOOTSTRAP_LABELS[state] || '';
+      };
+      const perform = async (message, operation) => {
+        busy = true; notice = ''; error.textContent = ''; status.textContent = message; update();
+        try {
+          const result = await operation();
+          snapshot = result.bootstrap;
+          return true;
+        } catch (failure) {
+          error.textContent = failure.message;
+          if (failure.message === 'Sign in again to continue.') modal?.close({ restoreFocus: false });
+          return false;
+        } finally {
+          busy = false; progress.hidden = true; update();
+        }
+      };
+      image.addEventListener('error', () => { image.hidden = true; imageFallback.hidden = false; });
+      node.addEventListener('click', (event) => {
+        if (modal?.overlay.isConnected) return;
+        update();
+        modal = openModal(overlay, event.currentTarget, $('.install-stage-title', overlay), () => { modal = null; });
+      });
+      done.addEventListener('click', () => modal?.close());
+      changePackage.addEventListener('click', () => { replacing = true; error.textContent = ''; update(); packageInput.focus(); });
+      packageInput.addEventListener('change', () => { error.textContent = ''; update(); });
+      keyInput.addEventListener('change', () => { error.textContent = ''; update(); });
+      reviewed.addEventListener('change', () => update());
+      stageDefault.addEventListener('click', async () => {
+        if (busy || !defaultCandidate.available || identity?.classification === 'custom') return;
+        if (await perform('Staging the included package…', () => api('POST', endpoint + '/stage-default', {}))) {
+          notice = `${snapshot.cfw_release || 'The firmware'} is ready. Prepare the controller when it is awake.`; update();
         }
       });
-      input.addEventListener('change', () => { error.textContent = ''; update(); });
-      force.addEventListener('change', () => update());
-      proceed.addEventListener('change', () => update());
-      form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const file = input.files[0];
+      upload.addEventListener('click', async () => {
+        const file = packageInput.files[0], publicKey = keyInput.files[0];
         if (!file || busy) return;
-        if (file.size > 16 * 1024 * 1024) { error.textContent = 'Firmware files must be at most 16 MiB.'; return; }
+        if (!file.name.toLowerCase().endsWith('.upd') || !file.size || file.size > 16 * 1024 * 1024) {
+          error.textContent = 'Choose a nonempty .upd file of at most 16 MiB.'; return;
+        }
+        if (publicKey && (!publicKey.name.toLowerCase().endsWith('.pub') || !publicKey.size || publicKey.size > 4096)) {
+          error.textContent = 'Choose a nonempty .pub public key of at most 4096 bytes.'; return;
+        }
         progress.hidden = false; setProgress(0);
-        const ok = await perform('Uploading and verifying firmware…', () => uploadControllerFirmware(controller.mac, file, (percent) => {
-          setProgress(percent);
-          status.textContent = percent === 100 ? 'Verifying the firmware signature and version…' : `Uploading firmware… ${percent}%`;
+        const ok = await perform('Uploading custom firmware…', () => uploadStockBootstrap(controller.mac, file, publicKey, (percent) => {
+          setProgress(percent); status.textContent = `Uploading custom firmware… ${percent}%`;
         }));
-        if (ok) { input.value = ''; force.checked = false; notice = `Firmware ${firmware.cfw_release || firmware.version} is uploaded. Choose Install to stage it for this controller.`; update(); }
+        if (ok) {
+          packageInput.value = ''; keyInput.value = ''; replacing = false;
+          notice = 'Package uploaded. Prepare the controller when it is awake.'; update();
+        }
       });
-      install.addEventListener('click', () => perform('Preparing the controller update…', () => api('POST', endpoint + '/install', { force: force.checked, sha256: firmware.sha256, allow_unverified: proceed.checked })));
-      cancel.addEventListener('click', async () => {
-        if (await perform('Cancelling the staged update…', () => api('POST', endpoint + '/cancel', {}))) { force.checked = false; update(); }
+      start.addEventListener('click', () => {
+        if (!busy && ['staged', 'failed'].includes(snapshot.status) && snapshot.sha256)
+          perform('Preparing Install firmware room…', () => api('POST', endpoint + '/start', {}));
       });
-      return { node, update, isBusy: () => busy };
+      screen.addEventListener('click', async () => {
+        if (busy || snapshot.status !== 'await_now_playing') return;
+        if (await perform('Sending album art to Now Playing…', () => api('POST', endpoint + '/confirm-screen', {}))) {
+          if (snapshot.status === 'await_now_playing') {
+            screenConfirmed = true; notice = 'Now Playing confirmed. The bridge is sending album art.';
+          }
+          update();
+        }
+      });
+      flash.addEventListener('click', async () => {
+        if (busy || snapshot.status !== 'await_flash_confirmation' || !reviewed.checked) return;
+        const sha256 = snapshot.sha256;
+        if (!sha256 || !Number.isInteger(snapshot.destination_bank) || !Number.isInteger(snapshot.destination_generation)) return;
+        if (await perform('Launching the controller upgrade…', () => api('POST', endpoint + '/confirm-flash', { sha256 }))) {
+          if (snapshot.status === 'await_flash_confirmation') {
+            flashConfirmed = true; notice = 'Flash confirmed. Waiting for the controller upgrade to start.';
+          }
+          update();
+        }
+      });
+      cancel.addEventListener('click', () => {
+        if (!busy && snapshot.can_cancel) perform('Cancelling installation and restoring rooms…', () => api('POST', endpoint + '/cancel', {}));
+      });
+      update();
+      return { node, update, isBusy: () => busy, isOpen: () => !!modal?.overlay.isConnected,
+        summary: () => summary, hidden: () => customAlready,
+        idle: () => IDLE_BOOTSTRAP.includes(snapshot.status || 'none') && !snapshot.recovery_required };
     };
 
     const chooseComponents = (data, trigger) => {
@@ -999,8 +1271,20 @@ views.controllers = {
       if (current !== 'controllers') return;
       for (const controller of data.controllers) controller.update = data.updates
         ? data.updates.controllers?.[controller.mac] || { status: 'none' } : undefined;
-      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.controller-firmware') || [...firmwarePanels.values()].some((panel) => panel.isBusy()))) {
-        for (const controller of data.controllers) firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware, controller.firmware_identity);
+      await Promise.all(data.controllers.map(async (controller) => {
+        try {
+          const result = await api('GET', `/api/controllers/${controller.mac}/bootstrap`);
+          controller.bootstrap = result.bootstrap;
+          controller.default_cfw = result.default_cfw;
+          controller.firmware_identity = result.firmware_identity || controller.firmware_identity;
+        }
+        catch (error) { controller.bootstrap_error = error.message; }
+      }));
+      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.firmware-entry') || [...firmwarePanels.values()].some((panel) => panel.isBusy()) || [...bootstrapPanels.values()].some((panel) => panel.isBusy() || panel.isOpen()))) {
+        for (const controller of data.controllers) {
+          bootstrapPanels.get(controller.mac)?.update(controller.bootstrap, controller.bootstrap_error, controller.firmware_identity, controller.default_cfw);
+          firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware, controller.firmware_identity);
+        }
         updateBridgeStatus(data);
         updateDevicesStatus(data);
         return;

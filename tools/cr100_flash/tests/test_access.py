@@ -2,6 +2,8 @@
 
 from io import BytesIO
 import hashlib
+import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -179,7 +181,8 @@ class AccessTests(unittest.TestCase):
 
         self.patch(access.subprocess, "run", run)
         manager.check_fixture_address()
-        self.assertEqual(calls[1][:4], ['sudo', '-n', 'arping', '-i'])
+        expected = ['arping', '-i'] if os.geteuid() == 0 else ['sudo', '-n', 'arping', '-i']
+        self.assertEqual(calls[1][:len(expected)], expected)
 
         def occupied(command, **_kwargs):
             if command[0] == "ip":
@@ -318,14 +321,590 @@ class AccessTests(unittest.TestCase):
 
         self.patch(access, "RootShellClient", FakeClient)
         self.patch(access.time, "sleep", lambda *_args: None)
+        self.patch(manager, "_start_clean_inetd", lambda _first: calls.append((22347, "start_clean_inetd")))
         self.patch(manager, "_inetd_processes", lambda _shell: {
             10: ("/usr/sbin/inetd", "/tmp/cve-inetd.conf"),
             11: ("/usr/sbin/inetd", "/tmp/cve-inetd-clean.conf"),
         })
+        self.patch(manager, "_prove_clean_listener_fds", lambda *_args: None)
+        self.patch(manager, "_wait_old_listener_released", lambda *_args, **_kwargs: None)
         self.patch(manager, "verify_identity", lambda **_kwargs: object())
         manager.establish_clean_listener()
         self.assertEqual(clean_attempts, 2)
-        self.assertEqual(sum(('/usr/sbin/inetd /tmp/cve-inetd-clean.conf' in command for _, command in calls)), 1)
+        self.assertEqual(calls.count((22347, "start_clean_inetd")), 1)
+
+    def test_clean_listener_waits_for_daemonizing_inetd_parent(self):
+        manager = _manager(self.tmp_path)
+        inventories = []
+        proved = []
+        sleeps = []
+        ui_waits = []
+
+        class FakeClient:
+            def __init__(self, _host, port):
+                self.port = port
+
+            def run(self, command, **_kwargs):
+                if self.port == 22348 and command == "id; uname -m":
+                    return access.ShellResult(0, "uid=0(root)\nsh4\n", 0)
+                return access.ShellResult(0, "", 0)
+
+        def inventory(_shell):
+            inventories.append(True)
+            processes = {
+                10: ("/usr/sbin/inetd", access.OLD_INETD_CONFIG),
+                12: ("/usr/sbin/inetd", access.CLEAN_INETD_CONFIG),
+            }
+            if len(inventories) == 1:
+                processes[11] = ("/usr/sbin/inetd", access.CLEAN_INETD_CONFIG)
+            return processes
+
+        self.patch(access, "RootShellClient", FakeClient)
+        self.patch(access.time, "sleep", lambda seconds: sleeps.append(seconds))
+        self.patch(manager, "_start_clean_inetd", lambda _first: None)
+        self.patch(manager, "_inetd_processes", inventory)
+        self.patch(manager, "_prove_clean_listener_fds", lambda _shell, pid: proved.append(pid))
+        self.patch(manager, "_wait_old_listener_released", lambda *_args, **_kwargs: None)
+        self.patch(manager, "_wait_for_ui", lambda seconds, **kwargs: ui_waits.append((seconds, kwargs)))
+        manager.establish_clean_listener()
+        self.assertEqual(len(inventories), 2)
+        self.assertEqual(sleeps, [0.2])
+        self.assertEqual(proved, [12])
+        self.assertEqual(ui_waits, [(60, {'quiet_seconds': 15, 'poll_seconds': 3})])
+        self.assertFalse(manager.preserve_clean_listener)
+
+    def test_clean_listener_preserves_shell_after_inetd_ambiguity_timeout(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        inventories = []
+        commands = []
+
+        class FakeClient:
+            def __init__(self, _host, port):
+                self.port = port
+
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                if self.port == 22348 and command == "id; uname -m":
+                    return access.ShellResult(0, "uid=0(root)\nsh4\n", 0)
+                return access.ShellResult(0, "", 0)
+
+        def inventory(_shell):
+            inventories.append(True)
+            return {
+                10: ("/usr/sbin/inetd", access.OLD_INETD_CONFIG),
+                11: ("/usr/sbin/inetd", access.CLEAN_INETD_CONFIG),
+                12: ("/usr/sbin/inetd", access.CLEAN_INETD_CONFIG),
+            }
+
+        self.patch(access, "RootShellClient", FakeClient)
+        self.patch(access.time, "monotonic", lambda: clock[0])
+        self.patch(access.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        self.patch(manager, "_start_clean_inetd", lambda _first: None)
+        self.patch(manager, "_inetd_processes", inventory)
+        with self.assertRaisesRegex(access.UiRecoveryError, "found 2 clean") as caught:
+            manager.establish_clean_listener()
+        self.assertTrue(caught.exception.listener_preserved)
+        self.assertTrue(manager.preserve_clean_listener)
+        self.assertGreaterEqual(clock[0], access.INETD_SETTLE_SECONDS)
+        self.assertLessEqual(len(inventories), 12)
+        self.assertFalse(any(command.startswith("kill ") for command in commands))
+
+    def test_clean_listener_descriptor_proof_rejects_inherited_ui_socket(self):
+        manager = _manager(self.tmp_path)
+        tcp = (
+            '  sl  local_address rem_address   st tx_queue:rx_queue tr:tm->when retrnsmt   uid  timeout inode\n'
+            '   0: 00000000:0D48 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 34000\n'
+            '   1: 00000000:574C 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 22348\n'
+        )
+
+        class FakeShell:
+            def read_proc(self, path):
+                assert path == '/proc/net/tcp'
+                return tcp
+
+            def run(self, command, **_kwargs):
+                self.command = command
+                return access.ShellResult(0, (
+                    'lrwx------ 1 root root 64 /proc/11/fd/3 -> socket:[22348]\r\n'
+                    'lrwx------ 1 root root 64 /proc/11/fd/4 -> socket:[34000]\r\n'
+                ), 0)
+
+        shell = FakeShell()
+        with self.assertRaisesRegex(access.AccessError, 'inherited.*3400'):
+            manager._prove_clean_listener_fds(shell, 11)
+        self.assertIn('/bin/ls -l /proc/11/fd/*', shell.command)
+        report = manager.run_dir / 'clean-listener-fds.json'
+        self.assertEqual(json.loads(report.read_text())['clean_holds_ui_listener'], True)
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(manager._listening_inodes(tcp, 3400), {34000})
+        self.assertEqual(manager._listening_inodes(tcp, 22348), {22348})
+        report.unlink()
+        self.patch(shell, 'run', lambda *_args, **_kwargs: access.ShellResult(
+            0, 'lrwx------ 1 root root 64 /proc/11/fd/3 -> socket:[22348]\n', 0))
+        manager._prove_clean_listener_fds(shell, 11)
+        report.unlink()
+        self.patch(shell, 'run', lambda *_args, **_kwargs: access.ShellResult(
+            0, 'lrwx------ 1 root root 64 /proc/11/fd/4 -> socket:[34000]\n', 0))
+        with self.assertRaisesRegex(access.AccessError, 'did not prove'):
+            manager._prove_clean_listener_fds(shell, 11)
+
+    def test_old_listener_release_retries_only_exact_pid_then_records_proof(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        commands = []
+
+        class FakeShell:
+            old_alive = True
+
+            def read_proc(self, path):
+                self_path = path
+                self_test.assertEqual(self_path, '/proc/net/tcp')
+                if not self.old_alive:
+                    return ''
+                return ('0: 00000000:0D48 00000000:0000 0A 00000000:00000000 '
+                        '00:00000000 00000000 0 0 142\n')
+
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                if command.startswith('kill -TERM 10'):
+                    self.old_alive = False
+                return access.ShellResult(0, '', 0)
+
+        self_test = self
+        shell = FakeShell()
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            10: ('/usr/sbin/inetd', access.OLD_INETD_CONFIG)
+        } if shell.old_alive else {})
+        manager._wait_old_listener_released(
+            shell, old_pid=10, clean_pid=11, ui_before={142})
+        self.assertEqual(commands, ['kill -TERM 10 || test ! -e /proc/10'])
+        self.assertGreaterEqual(clock[0], access.OLD_INETD_RETRY_SECONDS)
+        report = self.tmp_path / 'old-listener-release.jsonl'
+        row = json.loads(report.read_text().splitlines()[0])
+        self.assertTrue(row['released'])
+        self.assertTrue(row['term_retried'])
+        self.assertEqual(row['ui_listener_inodes_remaining'], [])
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
+    def test_old_listener_release_requires_original_ui_inode_to_close(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        commands = []
+
+        class FakeShell:
+            def read_proc(self, path):
+                self_test.assertEqual(path, '/proc/net/tcp')
+                return ('0: 00000000:0D48 00000000:0000 0A 00000000:00000000 '
+                        '00:00000000 00000000 0 0 142\n')
+
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                return access.ShellResult(0, '', 0)
+
+        self_test = self
+        self.patch(manager, '_inetd_processes', lambda _shell: {})
+        with self.assertRaisesRegex(access.AccessError, 'original UI listener remained'):
+            manager._wait_old_listener_released(
+                FakeShell(), old_pid=10, clean_pid=11, ui_before={142})
+        self.assertGreaterEqual(clock[0], access.OLD_INETD_RELEASE_SECONDS)
+        self.assertFalse(any(command.startswith('kill -TERM') for command in commands))
+        row = json.loads((self.tmp_path / 'old-listener-release.jsonl').read_text().splitlines()[0])
+        self.assertFalse(row['released'])
+        self.assertEqual(row['ui_listener_inodes_remaining'], [142])
+
+    def test_old_listener_release_rejects_pid_identity_change_without_signal(self):
+        manager = _manager(self.tmp_path)
+        commands = []
+
+        class FakeShell:
+            def read_proc(self, path):
+                assert path == '/proc/net/tcp'
+                return ''
+
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                return access.ShellResult(0, '', 0)
+
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            10: ('/usr/sbin/inetd', '/etc/inetd.conf')
+        })
+        with self.assertRaisesRegex(access.AccessError, 'changed identity'):
+            manager._wait_old_listener_released(
+                FakeShell(), old_pid=10, clean_pid=11, ui_before={142})
+        self.assertFalse(any(command.startswith('kill -TERM') for command in commands))
+
+    def test_preterm_old_fd_snapshot_records_ui_and_m16_holder(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeShell:
+            def run(self, command, **_kwargs):
+                self_command = command
+                self_test.assertEqual(self_command, '/bin/ls -l /proc/10/fd/*')
+                return access.ShellResult(0, (
+                    'lrwx------ 1 root root 64 /proc/10/fd/3 -> socket:[142]\n'
+                    'lrwx------ 1 root root 64 /proc/10/fd/4 -> /dev/hhkbd\n'
+                ), 0)
+
+        self_test = self
+        held = manager._save_old_listener_before_term(FakeShell(), old_pid=10,
+                                                     ui_before={142, 999})
+        report = self.tmp_path / 'old-listener-before-term.json'
+        row = json.loads(report.read_text())
+        self.assertTrue(row['old_holds_ui_listener'])
+        self.assertEqual(held, {142})
+        self.assertEqual(row['old_ui_listener_inodes'], [142])
+        self.assertTrue(row['old_holds_hhkbd'])
+        self.assertEqual(row['old_pid'], 10)
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
+    def test_abort_closes_clean_when_old_gone_but_ui_inode_remains(self):
+        manager = _manager(self.tmp_path)
+        commands = []
+
+        class FakeShell:
+            def read_proc(self, path):
+                self_test.assertEqual(path, '/proc/net/tcp')
+                return ('0: 00000000:0D48 00000000:0000 0A 00000000:00000000 '
+                        '00:00000000 00000000 0 0 142\n')
+
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                if command.startswith('for p in /proc/[0-9]*'):
+                    return access.ShellResult(0, (
+                        'lrwx------ 1 root root 64 /proc/99/fd/8 -> socket:[142]\n'
+                    ), 0)
+                return access.ShellResult(0, '', 0)
+
+        self_test = self
+        shell = FakeShell()
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            11: ('/usr/sbin/inetd', access.CLEAN_INETD_CONFIG)
+        })
+        self.patch(manager, 'close_clean_listener', lambda: commands.append('close-clean'))
+        manager._abort_temporary_listeners(shell, 10, 11, {142})
+        self.assertIn('rm -f /var/run/stopanacapa && test ! -e /var/run/stopanacapa',
+                      commands)
+        self.assertEqual(commands[-1], 'close-clean')
+        self.assertFalse(any(command.startswith('kill -TERM') for command in commands))
+        row = json.loads((self.tmp_path / 'old-listener-release.jsonl').read_text().splitlines()[0])
+        self.assertTrue(row['abort_cleanup'])
+        self.assertFalse(row['released'])
+        self.assertIn('/proc/99/fd/8', row['ui_inode_holders'][0])
+
+    def test_dirty_clean_listener_aborts_both_before_ui_recovery(self):
+        manager = _manager(self.tmp_path)
+        commands = []
+
+        class FakeClient:
+            def __init__(self, _host, port):
+                self.port = port
+
+            def run(self, command, **_kwargs):
+                commands.append((self.port, command))
+                if self.port == 22348 and command == 'id; uname -m':
+                    return access.ShellResult(0, 'uid=0(root)\nsh4\n', 0)
+                return access.ShellResult(0, '', 0)
+
+        self.patch(access, 'RootShellClient', FakeClient)
+        self.patch(manager, '_start_clean_inetd', lambda _first: None)
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            10: ('/usr/sbin/inetd', '/tmp/cve-inetd.conf'),
+            11: ('/usr/sbin/inetd', '/tmp/cve-inetd-clean.conf'),
+        })
+        def dirty_proof(*_args):
+            commands.append(('proof', 'dirty'))
+            raise access.AccessError('clean inetd inherited the controller UI port 3400')
+
+        def close_clean():
+            commands.append(('abort', 'close-clean'))
+            manager.shell = None
+
+        self.patch(manager, '_prove_clean_listener_fds', dirty_proof)
+        self.patch(manager, '_wait_old_listener_released', lambda *_args, **_kwargs: commands.append(('old', 'released')))
+        self.patch(manager, 'close_clean_listener', close_clean)
+        self.patch(manager, '_wait_for_ui', lambda _seconds, **_kwargs: commands.append(('ui', 'recovered')))
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager.establish_clean_listener()
+        self.assertFalse(caught.exception.recovery_required)
+        self.assertFalse(caught.exception.listener_preserved)
+        self.assertFalse(manager.preserve_clean_listener)
+        self.assertLess(commands.index(('proof', 'dirty')),
+                        commands.index((22348, 'kill -TERM 10 || test ! -e /proc/10')))
+        self.assertIn(('abort', 'close-clean'), commands)
+        self.assertIn(('ui', 'recovered'), commands)
+
+    def test_failed_handoff_abort_preserves_verified_recovery_shell(self):
+        manager = _manager(self.tmp_path)
+        shell = object()
+        manager.shell = shell
+        def cannot_abort(*_args):
+            raise access.AccessError('cannot inspect exact PID')
+
+        self.patch(manager, '_abort_temporary_listeners', cannot_abort)
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager._abort_handoff(shell, 10, 11, 'dirty clean listener')
+        self.assertTrue(caught.exception.recovery_required)
+        self.assertTrue(caught.exception.listener_preserved)
+        self.assertTrue(manager.preserve_clean_listener)
+        self.assertIs(manager.shell, shell)
+
+    def test_safe_abort_with_ui_still_down_reports_recovery_without_listener(self):
+        manager = _manager(self.tmp_path)
+        shell = object()
+        manager.shell = shell
+        self.patch(manager, '_abort_temporary_listeners', lambda *_args: setattr(manager, 'shell', None))
+
+        def still_down(_seconds):
+            self.assertEqual(_seconds, 180)
+            raise access.AccessError('HTTP status still unreachable')
+
+        self.patch(manager, '_wait_for_ui', still_down)
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager._abort_handoff(shell, 10, 11, 'dirty clean listener')
+        self.assertTrue(caught.exception.recovery_required)
+        self.assertFalse(caught.exception.listener_preserved)
+        self.assertFalse(manager.preserve_clean_listener)
+
+    def test_unreadable_inetd_inventory_preserves_verified_shell(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeClient:
+            def __init__(self, _host, port):
+                self.port = port
+
+            def run(self, _command, **_kwargs):
+                return access.ShellResult(0, 'uid=0(root)\nsh4\n', 0)
+
+        self.patch(access, 'RootShellClient', FakeClient)
+        self.patch(manager, '_start_clean_inetd', lambda _first: None)
+
+        def inventory(_shell):
+            raise access.AccessError('inventory unreadable')
+
+        self.patch(manager, '_inetd_processes', inventory)
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager.establish_clean_listener()
+        self.assertTrue(caught.exception.listener_preserved)
+        self.assertTrue(manager.preserve_clean_listener)
+        self.assertIsNotNone(manager.shell)
+
+    def test_abort_ui_recovery_wait_allows_more_than_old_90_seconds(self):
+        manager = _manager(self.tmp_path)
+        clock = [0]
+        attempts = [0]
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+        def verify(**_kwargs):
+            attempts[0] += 1
+            if clock[0] < 95:
+                raise access.AccessError('controller still restarting')
+            return 'recovered'
+
+        self.patch(manager, 'verify_identity', verify)
+        self.assertEqual(manager._wait_for_ui(access.UI_ABORT_RECOVERY_SECONDS), 'recovered')
+        self.assertGreater(attempts[0], 90)
+
+    def test_normal_ui_wait_keeps_quiet_then_probes_slowly(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        checks = []
+        snapshots = []
+        manager.shell = object()
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+        def verify(**_kwargs):
+            checks.append(clock[0])
+            if clock[0] < 21:
+                raise access.AccessError('controller still restarting')
+            return 'recovered'
+
+        self.patch(manager, 'verify_identity', verify)
+        self.patch(manager, '_record_ui_recovery_snapshot', lambda name='ui-recovery-snapshot.json': snapshots.append((name, clock[0])))
+        self.assertEqual(manager._wait_for_ui(60, quiet_seconds=15, poll_seconds=3), 'recovered')
+        self.assertEqual(checks, [15, 18, 21])
+        self.assertEqual(snapshots, [('ui-before-http-snapshot.json', 15)])
+        event_path = self.tmp_path / 'handoff-events.jsonl'
+        events = [json.loads(line)['event'] for line in event_path.read_text().splitlines()]
+        self.assertEqual(event_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(events, ['ui-quiet-start', 'ui-quiet-end',
+                                  'first-http-identity-probe', 'http-identity-returned'])
+
+    def test_normal_ui_wait_bounds_quiet_and_probes_to_60_seconds(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        checks = []
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+        def unavailable(**_kwargs):
+            checks.append(clock[0])
+            raise access.AccessError('controller still restarting')
+
+        self.patch(manager, 'verify_identity', unavailable)
+        with self.assertRaisesRegex(access.AccessError, 'after 60s'):
+            manager._wait_for_ui(60, quiet_seconds=15, poll_seconds=3)
+        self.assertEqual(clock[0], 60)
+        self.assertEqual(checks[0], 15)
+        self.assertEqual(checks[-1], 57)
+        events = [json.loads(line)['event'] for line in (self.tmp_path / 'handoff-events.jsonl').read_text().splitlines()]
+        self.assertEqual(events[-1], 'http-identity-timeout')
+
+    def test_ui_recovery_collects_one_snapshot_without_interrupting_recovery(self):
+        manager = _manager(self.tmp_path)
+        clock = [0.0]
+        snapshots = []
+        manager.shell = object()
+        self.patch(access.time, 'monotonic', lambda: clock[0])
+        self.patch(access.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+        def verify(**_kwargs):
+            if clock[0] < 12:
+                raise access.AccessError('controller still restarting')
+            return 'recovered'
+
+        self.patch(manager, 'verify_identity', verify)
+        self.patch(manager, '_record_ui_recovery_snapshot', lambda: snapshots.append(clock[0]))
+        self.assertEqual(manager._wait_for_ui(20), 'recovered')
+        self.assertEqual(snapshots, [10.0])
+
+    def test_ui_recovery_snapshot_is_private_and_read_only(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeShell:
+            def run(self, command, **_kwargs):
+                self_test.assertIn('/bin/ps -ef', command)
+                self_test.assertIn('cat /proc/net/tcp', command)
+                self_test.assertIn('/opt/log/hh.anacapa.pid', command)
+                return access.ShellResult(0, 'process and socket inventory', 0)
+
+        self_test = self
+        manager.shell = FakeShell()
+        manager._record_ui_recovery_snapshot()
+        path = self.tmp_path / 'ui-recovery-snapshot.json'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertIn('process and socket inventory', json.loads(path.read_text())['output'])
+
+    def test_early_handoff_failure_closes_exact_old_and_clean_listeners(self):
+        manager = _manager(self.tmp_path)
+        commands = []
+
+        class FakeShell:
+            def run(self, command, **_kwargs):
+                commands.append(command)
+                if command == 'id; uname -m':
+                    return access.ShellResult(0, 'uid=0(root)\nsh4\n', 0)
+                return access.ShellResult(0, '', 0)
+
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            10: ('/usr/sbin/inetd', '/tmp/cve-inetd.conf'),
+            11: ('/usr/sbin/inetd', '/tmp/cve-inetd-clean.conf'),
+            12: ('/usr/sbin/inetd', '/etc/inetd.conf'),
+        })
+        self.patch(manager, '_temporary_ports_closed', lambda: True)
+        self.patch(manager, '_wait_for_ui', lambda _seconds: 'recovered')
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager._abort_before_clean_verified(FakeShell(), 'helper launch failed')
+        self.assertFalse(caught.exception.recovery_required)
+        self.assertFalse(manager.preserve_clean_listener)
+        self.assertIsNone(manager.shell)
+        self.assertIn('(sleep 1; kill -TERM 10 11) </dev/null >/dev/null 2>&1 &', commands)
+        self.assertFalse(any(' 12' in command and 'kill' in command for command in commands))
+
+    def test_early_handoff_ambiguous_identity_preserves_old_root(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeShell:
+            def run(self, command, **_kwargs):
+                if command == 'id; uname -m':
+                    return access.ShellResult(0, 'uid=0(root)\nsh4\n', 0)
+                self.failed = True
+                return access.ShellResult(0, '', 0)
+
+        shell = FakeShell()
+        self.patch(manager, '_inetd_processes', lambda _shell: {
+            10: ('/usr/sbin/inetd', '/tmp/cve-inetd.conf'),
+            13: ('/usr/sbin/inetd', '/tmp/cve-inetd.conf'),
+        })
+        with self.assertRaises(access.UiRecoveryError) as caught:
+            manager._abort_before_clean_verified(shell, 'helper launch failed')
+        self.assertTrue(caught.exception.recovery_required)
+        self.assertTrue(caught.exception.listener_preserved)
+        self.assertTrue(manager.preserve_clean_listener)
+        self.assertIs(manager.shell, shell)
+        self.assertFalse(hasattr(shell, 'failed'))
+
+    def test_clean_inetd_launch_checks_current_shell_fds_and_saves_transcript(self):
+        manager = _manager(self.tmp_path)
+        commands = []
+
+        class FakeShell:
+            def run(self, command, **kwargs):
+                commands.append((command, kwargs))
+                return access.ShellResult(0, '0 -> socket:[100]\n1 -> socket:[100]\n', 0)
+
+        manager._start_clean_inetd(FakeShell())
+        self.assertEqual(len(commands), 1)
+        command, kwargs = commands[0]
+        self.assertIn('>/tmp/cve-inetd-clean.conf && { fd_ok=1;', command)
+        self.assertIn('for fd in /proc/$$/fd/*; do test -L "$fd" || continue;', command)
+        self.assertIn('/bin/ls -l /proc/$$/fd && test "$fd_ok" -eq 1;', command)
+        self.assertIn('} && /usr/sbin/inetd /tmp/cve-inetd-clean.conf', command)
+        self.assertFalse(command.rstrip().endswith('&'))
+        self.assertEqual(kwargs['timeout'], 45)
+        report = manager.run_dir / 'clean-launch-shell.txt'
+        self.assertIn('socket:[100]', report.read_text())
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
+    def test_clean_inetd_launch_rejects_fd_gate_or_daemon_failure(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeShell:
+            def run(self, _command, **_kwargs):
+                return access.ShellResult(1, '9 -> /dev/null\n', 0)
+
+        with self.assertRaisesRegex(access.AccessError, 'RC 1'):
+            manager._start_clean_inetd(FakeShell())
+        self.assertIn('9 -> /dev/null', (manager.run_dir / 'clean-launch-shell.txt').read_text())
+
+    def test_clean_inetd_lost_transport_saves_partial_output(self):
+        manager = _manager(self.tmp_path)
+
+        class FakeShell:
+            def run(self, _command, **_kwargs):
+                raise access.ShellTransportError('connection lost', 'fd inventory incomplete')
+
+        with self.assertRaises(access.ShellTransportError):
+            manager._start_clean_inetd(FakeShell())
+        self.assertEqual((manager.run_dir / 'clean-launch-shell.txt').read_text(),
+                         'fd inventory incomplete')
+
+    def test_failed_clean_launch_aborts_old_listener_before_clean_probe(self):
+        manager = _manager(self.tmp_path)
+        called = []
+
+        class FakeClient:
+            def __init__(self, _host, port):
+                self.port = port
+
+            def run(self, _command, **_kwargs):
+                return access.ShellResult(1, 'extra descriptor\n', 0)
+
+        def abort(_first, reason):
+            called.append(reason)
+            raise access.UiRecoveryError('aborted', recovery_required=False)
+
+        self.patch(access, 'RootShellClient', FakeClient)
+        self.patch(manager, '_abort_before_clean_verified', abort)
+        with self.assertRaises(access.UiRecoveryError):
+            manager.establish_clean_listener()
+        self.assertIn('RC 1', called[0])
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ python3 -m cr100_flash.flash flash
 ```
 
 `check` is offline. `flash` confirms the exact MAC and release, asks for
-`READY` after stable cradle power is set, then advertises **Shell artwork**.
+`READY` after stable cradle power is set, then advertises **Install firmware**.
 Select that room on the CR100 and open Now Playing; press Enter at the Pi prompt.
 The artwork initially is harmless. The script waits for that fetch before
 arming one root-shell artwork image. It removes the temporary room and address

@@ -789,41 +789,6 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 .setting .sub { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
 .setting.check { cursor: pointer; }
 
-.controller-firmware > summary { display: flex; align-items: center; gap: 8px; padding: 12px 0; }
-.controller-firmware > summary .meta { margin-left: auto; text-align: right; }
-.controller-firmware[open] > summary { padding-bottom: 8px; }
-.firmware-form { padding-top: 4px; }
-.versions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-.versions .ver {
-  font-size: 19px; font-weight: 300; font-variant-numeric: tabular-nums;
-  padding: 4px 12px; border-radius: 8px; background: #fff; border: 1px solid #d4dae3;
-}
-.versions .ver.target { border-color: #2f73cb; color: #1e57a3; }
-.versions .arrow { width: 18px; height: 18px; color: var(--muted); }
-.firmware-target-wrap { display: inline-flex; align-items: center; gap: 8px; }
-.firmware-target-wrap[hidden] { display: none; }
-
-.stepper { list-style: none; margin: 0 0 16px; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; counter-reset: none; }
-.stepper li {
-  position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px;
-  text-align: center; font-size: 13px; color: var(--muted);
-}
-.stepper li::before {
-  content: ''; position: absolute; top: 12px; right: 50%; width: calc(100% + 4px); height: 2px; background: #d4dae3; z-index: 0;
-}
-.stepper li:first-child::before { display: none; }
-.stepper .num {
-  position: relative; z-index: 1; display: grid; place-items: center;
-  width: 24px; height: 24px; border-radius: 50%; font-weight: 700; font-size: 13px;
-  background: #fff; border: 2px solid #c3c9d3; color: var(--muted);
-}
-.stepper li.done { color: var(--ink); }
-.stepper li.done .num { background: #6fbf2a; border-color: #6fbf2a; color: #fff; }
-.stepper li.done::before, .stepper li.now::before { background: #6fbf2a; }
-.stepper li.now { color: var(--ink); font-weight: 700; }
-.stepper li.now .num { background: linear-gradient(180deg, var(--key-top), var(--key-low)); border-color: #1a4f9c; color: #fff; }
-.stepper li.now.bad .num { background: var(--alert); border-color: var(--alert); }
-
 .file-pick { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .file-pick label { position: relative; display: inline-flex; }
 .file-pick input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
@@ -831,13 +796,118 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 .file-pick input:disabled + .inline-button { opacity: 0.5; }
 .file-pick input:focus-visible + .inline-button { outline: 3px solid rgba(47, 115, 203, 0.45); outline-offset: 2px; }
 .file-name { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
-.controller-firmware .check { margin: 8px 0; white-space: normal; }
-.firmware-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.firmware-actions [hidden] { display: none; }
-.firmware-progress { margin-top: 12px; }
+/* Firmware row: what the CR100 runs, an upload, and a status line while an update is under way. */
+.firmware-entry { border-bottom: 1px solid rgba(28, 91, 175, 0.18); }
+.firmware-entry > .setting { border-bottom: none; flex-wrap: wrap; }
+.firmware-entry > .setting > .what { flex: 1 1 200px; }
+.controller-body .settings-list > :last-child, .controller-body .settings-list > .setting:last-child { border-bottom: none; }
+.firmware-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.firmware-tools .file-pick { margin: 0; }
+.firmware-tools .inline-button { flex: none; white-space: nowrap; }
+.firmware-tools [hidden] { display: none; }
+.firmware-state { padding: 0 0 12px; }
+.firmware-state[hidden] { display: none; }
+.firmware-progress { margin-bottom: 8px; }
 .firmware-progress .level i { width: 24px; }
-.firmware-status, .firmware-error { font-size: 14px; overflow-wrap: anywhere; margin: 8px 0 0; }
+.firmware-status, .firmware-error { font-size: 14px; overflow-wrap: anywhere; margin: 0 0 8px; }
 .firmware-status:empty, .firmware-error:empty { display: none; }
+.firmware-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.firmware-actions [hidden] { display: none; }
+.install-overlay { z-index: 9; background: rgba(15, 34, 64, 0.6); overscroll-behavior: contain; }
+.install-overlay .install-dialog {
+  width: min(920px, 100%); max-height: calc(100dvh - 32px); margin: 0; padding: 0;
+  display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+  border-radius: 18px; background: #f8fafc; box-shadow: 0 24px 80px rgba(7, 25, 52, .35);
+}
+.install-header {
+  display: flex; justify-content: space-between; gap: 24px; align-items: flex-start;
+  padding: 24px 28px 20px; border-bottom: 1px solid #d9e2ed;
+  background: linear-gradient(180deg, #fbfcfe, #edf4fb);
+}
+.install-header .install-eyebrow {
+  margin: 0 0 4px; color: #527095; font-size: 11px; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .14em;
+}
+.install-header h2 { margin: 0 0 4px; color: #173d70; font-size: clamp(24px, 3.5vw, 31px); font-weight: 700; line-height: 1.16; }
+.install-header #install-intro { margin: 0; color: #526b88; font-size: 14px; }
+.install-close {
+  flex: none; width: 36px; height: 36px; display: grid; place-items: center;
+  border: 1px solid #cbd8e6; border-radius: 50%; background: #fff; color: #365779;
+  font: inherit; font-size: 26px; line-height: 1; cursor: pointer;
+}
+.install-close:hover { background: #e9f2fb; }
+.install-meter { display: flex; align-items: center; gap: 20px; padding: 0 28px; border-bottom: 1px solid #e0e7f0; }
+.install-step-count { flex: none; color: #5e7691; font-size: 12px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.install-meter ol { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; list-style: none; margin: 0; padding: 0; }
+.install-meter li { padding: 12px 4px 10px; border-bottom: 3px solid #dbe4ed; color: #74869a; font-size: 13px; font-weight: 700; text-align: center; }
+.install-meter li.now { border-color: #2f73cb; color: #1f5ca8; }
+.install-meter li.done { border-color: #6ba936; color: #426f1e; }
+.install-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, 360px); gap: 32px; padding: 28px; }
+.install-content.without-image { display: block; max-width: 620px; }
+.install-copy { min-width: 0; }
+.install-copy h3 { margin: 0 0 10px; color: #173d70; font-size: clamp(22px, 2.7vw, 27px); font-weight: 700; line-height: 1.2; }
+.install-copy h3:focus { outline: none; }
+.install-copy .install-instruction { margin: 0 0 20px; max-width: 44ch; font-size: 16px; line-height: 1.5; }
+.install-default-package {
+  display: grid; gap: 2px; margin: 0 0 14px; padding: 14px 16px;
+  border: 1px solid #bed4e8; border-left: 4px solid #2f73cb; border-radius: 8px; background: #eef6fd;
+}
+.install-default-package span { color: #536e89; font-size: 12px; }
+.install-default-package strong { color: #173d70; font-size: 15px; overflow-wrap: anywhere; }
+.install-file-section { margin-bottom: 12px; }
+.install-file-section .bootstrap-pick { margin-bottom: 10px; }
+.install-file-section .file-name { min-width: 0; }
+.install-key-options { margin: 6px 0 12px; font-size: 13px; color: #416188; }
+.install-key-options summary { width: fit-content; cursor: pointer; font-weight: 700; }
+.install-key-options .bootstrap-pick { margin: 12px 0 0; }
+.install-change-package { padding: 0; border: 0; background: transparent; color: #1d5fae; font: inherit; font-size: 13px; font-weight: 800; text-decoration: underline; cursor: pointer; }
+.install-review { display: flex; align-items: flex-start; gap: 8px; margin-top: 18px; font-size: 14px; font-weight: 700; line-height: 1.35; white-space: normal; cursor: pointer; }
+.install-review .box { flex: none; }
+.bootstrap-progress { margin-top: 12px; }
+.bootstrap-progress .level i { width: 20px; }
+.install-copy .bootstrap-identity, .install-copy .bootstrap-destination { margin-top: 14px; padding: 12px; background: #fff; border: 1px solid #d4dae3; border-radius: 8px; }
+.install-copy .bootstrap-identity .meta-grid, .install-copy .bootstrap-destination .meta-grid { margin: 0; }
+.install-copy .bootstrap-identity .hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.install-copy .bootstrap-destination { border-color: #8cb3e2; }
+.install-copy .bootstrap-destination > p { margin: 0 0 10px; font-weight: 800; }
+.install-figure { align-self: start; min-width: 0; margin: 0; }
+.install-device { padding: 14px 14px 0; border: 2px solid #525d6e; border-radius: 24px; background: linear-gradient(145deg, #4c5667, #242d3b); box-shadow: 0 14px 24px rgba(20, 39, 65, .22), inset 0 2px 1px rgba(255,255,255,.24); }
+.install-screen { aspect-ratio: 4 / 3; display: grid; place-items: center; overflow: hidden; border: 4px solid #222a36; border-radius: 7px; background: #9fc8e9; }
+.install-screen img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.install-image-fallback { padding: 20px; color: #24456b; font-size: 14px; text-align: center; }
+.install-device-controls { display: flex; justify-content: space-around; align-items: center; height: 42px; }
+.install-device-controls i { width: 12px; height: 8px; border-radius: 8px; background: #8994a4; box-shadow: inset 0 1px 2px rgba(0,0,0,.45); }
+.install-figure figcaption { padding-top: 12px; color: #4c6886; font-size: 13px; text-align: center; }
+.install-copy .bootstrap-error { margin: 14px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+.install-copy .bootstrap-error:empty { display: none; }
+.install-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 28px; border-top: 1px solid #d9e2ed; background: #f8fafc; box-shadow: 0 -7px 18px rgba(31, 64, 101, .04); }
+.install-footer .bootstrap-status { flex: 1; min-width: 0; margin: 0; color: #4e6681; font-size: 13px; overflow-wrap: anywhere; }
+.install-footer .bootstrap-status:empty { display: none; }
+.install-actions { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.install-actions .inline-button { white-space: nowrap; }
+@media (max-width: 760px) {
+  .install-content { grid-template-columns: 1fr; gap: 20px; padding: 20px; }
+  .install-figure { width: min(340px, 100%); margin: 0 auto; }
+  .install-header { padding: 20px; }
+  .install-meter { padding: 0 20px; }
+  .install-footer { padding: 14px 20px; align-items: stretch; flex-direction: column; }
+  .install-actions { justify-content: stretch; }
+  .install-actions .inline-button:not([hidden]) { flex: 1; }
+}
+@media (max-width: 480px) {
+  .firmware-entry > .setting { align-items: stretch; flex-direction: column; gap: 8px; }
+  .firmware-entry > .setting > .what { flex: none; }
+  .firmware-tools { justify-content: flex-start; }
+  .install-overlay { padding: 0; }
+  .install-overlay .install-dialog { width: 100%; max-height: 100dvh; border-radius: 0; }
+  .install-meter { gap: 8px; }
+  .install-step-count { font-size: 11px; }
+  .install-meter li { font-size: 12px; }
+  .install-figure { width: min(300px, 100%); }
+  .install-copy .bootstrap-identity .meta-grid { grid-template-columns: 1fr; }
+  .install-actions { flex-direction: column-reverse; }
+  .install-actions .inline-button:not([hidden]) { width: 100%; flex: none; white-space: normal; }
+}
 
 .pairing .meta-grid { margin-bottom: 12px; }
 .pair-row { display: flex; align-items: center; gap: 12px; padding-top: 12px; border-top: 1px solid rgba(28, 91, 175, 0.18); }
@@ -853,7 +923,6 @@ details[open] > summary .chevron { transform: rotate(90deg); }
   .vital .label { font-size: 12px; }
   .vital .value { font-size: 16px; font-weight: 600; }
   .vital .level i { width: 14px; height: 12px; }
-  .stepper li { font-size: 12px; }
   .pair-row { flex-wrap: wrap; }
   .pair-row .dot { display: none; }
 }

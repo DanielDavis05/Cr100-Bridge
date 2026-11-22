@@ -127,7 +127,8 @@ class UpdateServiceIntegration(unittest.TestCase):
         custom = self.service.message(A)
         self.assertEqual(custom['MessageHeader'], 'Custom controller firmware')
         self.assertIn('Custom firmware R15 (25.2-50130)', custom['MessageBody'])
-        self.assertIn('requires custom firmware', custom['MessageBody'])
+        self.assertIn("bridge's one-time Install custom firmware setup", custom['MessageBody'])
+        self.assertIn('instead of installing here', custom['MessageBody'])
         self.assertIn('R15', custom['IntroMessageBody'])
         self.assertEqual(custom['ContinuePrompt'], 'Install custom firmware')
 

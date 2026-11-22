@@ -17,6 +17,7 @@ spotify_service.py spotify_ui_actions.py spotify_menu.py spotify_folders.py spot
 sonos_backend.py sonos_content.py sonos_upnp.py sonos_identity.py fake_sonos.py build_info.py
 radio_store.py radiotime.py radio_catalog.py native_radio.py radio_playback.py radio_management.py radio_runtime.py radio_transcode.py alarms.py alarm_runtime.py alarm_timezones.py patch_native_radio_ui.py patch_controller_settings_ui.py
 online_updates.py update_transport.py update_service.py bridge_updater.py ui_events.py workspace.py radio_platform.py
+stock_bootstrap.py stock_room_mode.py
 bridge_queue.py media_sources.py spotify_media.py relay_stream.py bridge_player.py bridge_runtime.py zeroconf_browse.py
 distribution.py'''.split()
 FIRMWARE_ASSETS = '''README.md .gitignore ownership.c ownership.h tsf_query.c tsf_query.h
@@ -34,7 +35,8 @@ def files(root=ROOT):
                        if p.is_file() and p.suffix in ('.md', '.png'))
     selected += [root / 'firmware/nexmon-ownership' / name for name in FIRMWARE_ASSETS]
     selected += sorted((root / 'tools').glob('test_*.py')) + [root / 'tools' / 'run_tests.py']
-    for name in ('systemd', 'scripts', 'config', '.github', 'tools/zp80', 'tools/webui'):
+    for name in ('systemd', 'scripts', 'config', '.github', 'tools/zp80', 'tools/webui',
+                 'tools/cr100_flash', 'tools/stock_bootstrap_assets'):
         selected += sorted(p for p in (root / name).rglob('*')
                            if p.is_file() and '__pycache__' not in p.parts and p.name != '.DS_Store')
     for path in selected:
