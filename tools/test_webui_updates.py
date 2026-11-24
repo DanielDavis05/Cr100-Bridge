@@ -133,14 +133,14 @@ class FirmwareHttp(unittest.TestCase):
         self.assertEqual(code, 200, result)
         self.assertTrue(result['firmware']['force_prompt'])
         manager = self.bridge.updates()
-        self.assertNotEqual(manager.compatibility_floor(CR1), '24.1-00000')
+        self.assertNotEqual(manager.compatibility_floor(CR1), '1.0-00000')
         code, result = self.call('POST', self.path + '/cancel', {})
         self.assertEqual(code, 200, result)
         self.assertEqual(result['firmware']['status'], 'cancelled')
         self.assertFalse(result['firmware']['armed'])
         self.assertFalse(result['firmware']['force_prompt'])
         self.assertIsNone(manager.selection(CR1, '24.1-75101'))
-        self.assertEqual(manager.compatibility_floor(CR1), '24.1-00000')
+        self.assertEqual(manager.compatibility_floor(CR1), '1.0-00000')
 
     def test_authentication_csrf_and_controller_identity_checked_before_staging(self):
         self.assertEqual(self.upload(authenticated=False)[0], 401)
@@ -299,7 +299,7 @@ class FirmwareHttp(unittest.TestCase):
         self.assertTrue(result['firmware']['armed'])
         self.assertFalse(result['firmware']['force_active'])
         self.assertIsNotNone(manager.selection(CR1, '24.1-75101'))
-        self.assertEqual(manager.compatibility_floor(CR1), '24.1-00000')
+        self.assertEqual(manager.compatibility_floor(CR1), '1.0-00000')
 
     def test_force_prompt_rejects_432_later_and_unknown_while_manual_install_works(self):
         for current in ('25.2-50130', '4.3.2', '25.3-60000', None):
@@ -315,7 +315,7 @@ class FirmwareHttp(unittest.TestCase):
                 status = manager.status(CR1)
                 self.assertFalse(status['armed'])
                 self.assertFalse(status['force_active'])
-                self.assertEqual(manager.compatibility_floor(CR1), '24.1-00000')
+                self.assertEqual(manager.compatibility_floor(CR1), '1.0-00000')
                 code, result = self.call('POST', self.path + '/install',
                     {'force': False, 'sha256': uploaded['firmware']['sha256']})
                 self.assertEqual(code, 200, result)

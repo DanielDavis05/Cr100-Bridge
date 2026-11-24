@@ -222,6 +222,12 @@ class UpdateError(ValueError):
         self.message, self.status = message, status
 
 
+# The lowest version version_tuple() accepts. Advertising it as the minimum and
+# legacy compatible version admits a CR100 on any firmware; only an armed force
+# prompt raises it for one controller.
+CONTROLLER_FLOOR = '1.0-00000'
+
+
 def version_tuple(value):
     match = _VERSION.fullmatch(value or '') if isinstance(value, str) else None
     if not match:
@@ -717,7 +723,7 @@ class UpdateManager:
                 return None
             return dict(record, kind='controller-recovery')
 
-    def compatibility_floor(self, mac, default='24.1-00000'):
+    def compatibility_floor(self, mac, default=CONTROLLER_FLOOR):
         try:
             mac = normalize_mac(mac)
             with self._state() as state:

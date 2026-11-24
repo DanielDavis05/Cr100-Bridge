@@ -1,4 +1,4 @@
-"""Firmware 4.3 accepts bridge discovery without changing its 7.1 persona."""
+"""Controllers on any firmware accept bridge discovery without changing its 7.1 persona."""
 import copy
 import itertools
 import re
@@ -11,7 +11,8 @@ import zoneplayers
 zp = zoneplayers.load_peer_module(zoneplayers.DEFAULT_PEER_DIR)
 NS = {'d': 'urn:schemas-upnp-org:device-1-0'}
 FIRMWARE_43 = '24.1-75101'
-FLOOR = '24.1-00000'
+OLDEST = '1.0-00001'
+FLOOR = '1.0-00000'
 
 
 def version(value):
@@ -42,7 +43,7 @@ class ControllerCompatibility(unittest.TestCase):
     def description(self, player):
         return ET.fromstring(player.state.description()).find('d:device', NS)
 
-    def test_firmware_43_floor_is_consistent_in_room_and_about_discovery(self):
+    def test_open_floor_is_consistent_in_room_and_about_discovery(self):
         zoneplayers.configure_profile(zp)
         house = self.household()
         self.assertEqual(zoneplayers.MIN_CONTROLLER_VERSION, FLOOR)
@@ -53,7 +54,7 @@ class ControllerCompatibility(unittest.TestCase):
             for tag in ('minCompatibleVersion', 'legacyCompatibleVersion'):
                 advertised = description.findtext('d:' + tag, namespaces=NS)
                 self.assertEqual(advertised, FLOOR)
-                self.assertGreaterEqual(version(FIRMWARE_43), version(advertised))
+                self.assertGreaterEqual(version(OLDEST), version(advertised))
             self.assertEqual(description.findtext('d:softwareVersion', namespaces=NS), '34.16-37101')
         members = ET.fromstring(house.topology()).findall('.//ZoneGroupMember')
         self.assertEqual(len(members), len(house.devices()))
@@ -61,7 +62,7 @@ class ControllerCompatibility(unittest.TestCase):
             self.assertEqual(member.get('SoftwareVersion'), '34.16-37101')
             for field in ('MinCompatibleVersion', 'LegacyCompatibleVersion'):
                 self.assertEqual(member.get(field), FLOOR)
-                self.assertGreaterEqual(version(FIRMWARE_43), version(member.get(field)))
+                self.assertGreaterEqual(version(OLDEST), version(member.get(field)))
 
     def test_lowering_floor_preserves_captured_profiles_and_existing_persona(self):
         captured = copy.deepcopy(zp.PROFILES)

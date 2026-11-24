@@ -246,27 +246,27 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(status['version'], '25.2-50130')
         self.assertNotIn('token', status)
         self.assertIsNone(self.manager.selection(MAC))
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.status(OTHER)['status'], 'none')
 
     def test_force_prompt_is_controller_scoped_one_shot_and_cancel_safe(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
         selection = self.manager.selection(MAC)
         self.assertEqual(self.manager.floor(MAC), '24.1-75102')
-        self.assertEqual(self.manager.floor(OTHER), '24.1-00000')
+        self.assertEqual(self.manager.floor(OTHER), '1.0-00000')
         self.assertTrue(self.manager.status(MAC)['force_active'])
         self.manager.acknowledge_prompt(MAC, selection['token'])
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertFalse(self.manager.status(MAC)['force_active'])
         self.assertEqual(self.manager.selection(MAC)['status'], 'armed')
         self.manager.cancel_controller(MAC)
         self.assertIsNone(self.manager.selection(MAC))
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_short_prompt_lease_preserves_manual_stage_after_expiry(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
         self.now += updates.PROMPT_TTL + 1
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.selection(MAC)['status'], 'armed')
         self.assertFalse(self.manager.status(MAC)['force_active'])
 
@@ -275,7 +275,7 @@ class Lifecycle(unittest.TestCase):
         other = updates.UpdateManager(self.directory / 'bridge-config.json', clock=lambda: self.now)
         self.assertEqual(other.floor(MAC), '24.1-75102')
         other.release_prompts()
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.selection(MAC)['status'], 'armed')
 
     def test_delivery_is_bound_to_controller_and_token_and_not_install_success(self):
@@ -287,7 +287,7 @@ class Lifecycle(unittest.TestCase):
         path = self.manager.authorize_download(selected['token'], MAC)
         self.assertEqual(path.read_bytes(), self.package)
         self.manager.controller_started(selected['token'], MAC)
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.status(MAC)['status'], 'downloading')
         self.manager.report_controller(MAC, '24.1-75101')
         self.assertEqual(self.manager.status(MAC)['status'], 'downloading')
@@ -317,7 +317,7 @@ class Lifecycle(unittest.TestCase):
         result = self.manager.arm_controller(MAC, current_version='25.2-50130')
         self.assertTrue(result['armed'])
         self.assertIsNotNone(self.manager.selection(MAC, '25.2-50130'))
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_same_version_reports_preserve_retry_without_install_evidence(self):
         self.stage(current_version='25.2-50130')
@@ -470,18 +470,18 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(updates.UpdateError):
             self.manager.arm_controller(MAC, force_prompt=True, current_version='25.2-50130')
         self.assertEqual(self.manager.status(MAC)['status'], 'staged')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.stage(force_prompt=True, current_version='24.1-75101')
         self.assertIsNotNone(self.manager.selection(MAC, current_version='25.2-50130'))
         self.assertEqual(self.manager.status(MAC)['status'], 'armed')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_nonfinite_persisted_timestamps_recover_without_a_force_floor(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
         state = json.loads(self.manager.state_path.read_text())
         state['controllers'][MAC]['expires_at'] = float('nan')
         self.manager.state_path.write_text(json.dumps(state))
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.status(MAC)['status'], 'none')
 
     def test_validly_signed_replacement_clears_floor_when_arm_metadata_differs(self):
@@ -492,7 +492,7 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(updates.UpdateError):
             self.manager.arm_controller(MAC, force_prompt=True, current_version='24.1-75101')
         self.assertEqual(self.manager.status(MAC)['status'], 'failed')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_reviewed_hash_prevents_installing_another_admins_replacement(self):
         reviewed = self.stage(arm=False, current_version='24.1-75101')
@@ -502,7 +502,7 @@ class Lifecycle(unittest.TestCase):
             self.manager.arm_controller(MAC, expected_sha256=reviewed['sha256'], force_prompt=True)
         self.assertEqual(error.exception.status, 409)
         self.assertEqual(self.manager.status(MAC)['sha256'], replaced['sha256'])
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_file_mutation_fails_receipt_and_clears_floor_even_when_delivery_raises(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
@@ -511,16 +511,16 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(updates.UpdateError):
             self.manager.authorize_download(selected['token'], MAC)
         self.assertEqual(self.manager.status(MAC)['status'], 'failed')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_arm_expiry_and_corrupt_state_cannot_leave_a_prompt(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
         self.now += updates.DEFAULT_TTL + 1
         self.assertEqual(self.manager.status(MAC)['status'], 'expired')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.manager.arm_controller(MAC, force_prompt=True, current_version='24.1-75101')
         self.manager.state_path.write_text('{broken')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.status(MAC)['status'], 'none')
         self.assertEqual(len(list(self.manager.storage.glob('state.json.corrupt-*'))), 1)
 
@@ -556,28 +556,28 @@ class Lifecycle(unittest.TestCase):
         for current in ('25.2-50130', None):
             with self.assertRaisesRegex(updates.UpdateError, 'only on a controller confirmed to run 4.3'):
                 self.manager.arm_controller(MAC, force_prompt=True, current_version=current)
-            self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+            self.assertEqual(self.manager.floor(MAC), '1.0-00000')
             self.assertEqual(self.manager.status(MAC)['status'], 'staged')
         self.manager.arm_controller(MAC, current_version='25.2-50130')
         self.assertEqual(self.manager.selection(MAC)['version'], '24.1-75101')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_unsupported_force_stage_retains_valid_upload_but_never_arms(self):
         with self.assertRaises(updates.UpdateError):
             self.stage(force_prompt=True, current_version='25.2-50130')
         self.assertEqual(self.manager.status(MAC)['status'], 'staged')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_newly_observed_432_releases_an_old_armed_force_override(self):
         self.stage(force_prompt=True, current_version='24.1-75101')
         self.manager.report_controller(MAC, '25.2-50129')
-        self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+        self.assertEqual(self.manager.floor(MAC), '1.0-00000')
         self.assertEqual(self.manager.status(MAC)['status'], 'armed')
         self.assertFalse(self.manager.status(MAC)['force_active'])
 
     def test_storage_failure_always_advertises_default_floor(self):
         with patch.object(self.manager, '_state', side_effect=OSError('disk unavailable')):
-            self.assertEqual(self.manager.floor(MAC), '24.1-00000')
+            self.assertEqual(self.manager.floor(MAC), '1.0-00000')
 
     def test_bridge_job_status_exposes_progress_without_tokens_or_internal_paths(self):
         self.manager.storage.mkdir(parents=True)

@@ -17,7 +17,7 @@ import threading
 from urllib.parse import unquote, urlsplit
 
 import update_transport
-from online_updates import (CFW_RELEASE_PROPERTY, UpdateError, UpdateManager,
+from online_updates import (CFW_RELEASE_PROPERTY, CONTROLLER_FLOOR, UpdateError, UpdateManager,
                             candidate_firmware, version_tuple)
 from update_transport import BridgeUpdateCoordinator, UpdateTransport
 
@@ -25,7 +25,14 @@ from update_transport import BridgeUpdateCoordinator, UpdateTransport
 UpdateTransportError = update_transport.UpdateTransportError
 
 ORIGIN = 'http://update.sonos.com'
-BASE_FLOOR = '24.1-00000'
+BASE_FLOOR = CONTROLLER_FLOOR
+# Firmware 4.3, the oldest controller known to accept the players' 7.1 persona.
+# Older firmware (for example 16.5-48010a) shows its "older software than the
+# rest of your Sonos system" screen whenever players report a newer software
+# version, whatever the floors say, so those controllers see their own version.
+PERSONA_CONTROLLER = '24.1-00000'
+# Some stock builds append a letter to the version (Sonos/16.5-48010a (CR100)).
+_CONTROLLER_AGENT = re.compile(r'Sonos/(\d+\.\d+-\d+)[A-Za-z]?\s+\(CR100\)')
 _TOKEN = r'[A-Za-z0-9_-]{24,128}'
 _MANIFEST = re.compile(r'/updates/(controller|bridge)/(' + _TOKEN + r')/manifest\.upm\Z')
 _PACKAGE = re.compile(r'/updates/controller/(' + _TOKEN + r')/([^/]+)/([^/]+)\Z')
@@ -66,7 +73,7 @@ class UpdateService:
 
     def observe(self, address, user_agent=''):
         mac = self._mac(address)
-        match = re.search(r'Sonos/(\d+\.\d+-\d+)\s+\(CR100\)', user_agent or '')
+        match = _CONTROLLER_AGENT.search(user_agent or '')
         if mac and match:
             try:
                 version_tuple(match[1])
@@ -78,27 +85,34 @@ class UpdateService:
 
     def profile(self, address=None):
         profile = dict(self.house.zp.PROFILE)
-        profile['server'] = profile['server'].replace('/' + profile['sw'], '/' + self.version)
-        profile['sw'] = self.version
         mac = self._mac(address)
+        software = (self._mirrored_version(mac) if mac else None) or self.version
+        profile['server'] = profile['server'].replace('/' + profile['sw'], '/' + software)
+        profile['sw'] = software
         floor = self._floor(mac) if mac else BASE_FLOOR
         profile.update(mincompat=floor, legacycompat=floor)
         return profile
 
     def _floor(self, mac):
         """One source of truth for request profiles and discovery invalidation."""
-        admission_floor = BASE_FLOOR
         try:
-            current = self._current_controller(mac)
-            if current and version_tuple(current) < version_tuple(admission_floor):
-                # A controller returning on an older signed image must still
-                # be admitted. Its own request reports the installed version;
-                # this does not mark a pending installation successful.
-                admission_floor = current
-            return self.manager.compatibility_floor(mac, admission_floor)
+            return self.manager.compatibility_floor(mac, BASE_FLOOR)
         except (OSError, ValueError):
             # Controller admission must not depend on writable update storage.
-            return admission_floor
+            return BASE_FLOOR
+
+    def _mirrored_version(self, mac):
+        """The controller's own version when it predates the players' persona."""
+        try:
+            current = self._current_controller(mac)
+            if current and version_tuple(current) < version_tuple(PERSONA_CONTROLLER):
+                return current
+        except (OSError, ValueError):
+            pass
+        return None
+
+    def _advertised(self, mac):
+        return self._floor(mac), self._mirrored_version(mac)
 
     def generation(self, address):
         mac = self._mac(address)
@@ -117,13 +131,13 @@ class UpdateService:
             states = {}
         with self.lock:
             controllers = states.keys() | self.versions.keys() | self.floors.keys() | self.availability.keys()
-        floors = {mac: self._floor(mac) for mac in controllers}
+        floors = {mac: self._advertised(mac) for mac in controllers}
         availability = {mac: self._available_for_mac(mac) for mac in controllers}
         changed = []
         update_changed = []
         with self.lock:
             for mac in floors.keys() | self.floors.keys():
-                if floors.get(mac, BASE_FLOOR) != self.floors.get(mac, BASE_FLOOR):
+                if floors.get(mac, (BASE_FLOOR, None)) != self.floors.get(mac, (BASE_FLOOR, None)):
                     self.generations[mac] = self.generations.get(mac, 0) + 1
                     changed.append(mac)
             self.floors = floors

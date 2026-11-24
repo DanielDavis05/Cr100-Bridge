@@ -549,8 +549,12 @@ Identity reads run in background workers and retain the last successful details
 during temporary failures; missing information is shown as unavailable. Playback
 discovery and topology keep the bridge's common compatible firmware profile, so
 real S1/S2 version differences in About do not trigger the CR100's update checks.
-The bridge advertises `24.1-00000` for both minimum and legacy compatibility,
-allowing controllers on firmware 4.3 (`24.1-75101`) as well as 4.3.2. The
+The bridge advertises `1.0-00000` for both minimum and legacy compatibility,
+so it admits controllers on any firmware rather than only 4.3 (`24.1-75101`)
+and later. Firmware older than 4.3 (for example `16.5-48010a`) also asks for an
+update whenever the players report a newer software version, so such a
+controller sees the players on its own version once its first request reports
+it; 4.3 and later controllers keep the selected player profile's version. The
 discovery software identity and capabilities retain the selected player profile.
 
 Non-Sonos players are labelled **Bridge Virtual Component** with the bridge build.

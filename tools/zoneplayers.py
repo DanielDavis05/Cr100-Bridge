@@ -53,6 +53,7 @@ from backends import LINE_IN_PREFIX, BackendError
 from content import ContentError, ContentSource, Node
 from controller_visibility import BRIDGE_COMPONENT, component_visible, room_component_key, visible_components
 from ha_backend import HomeAssistantDisconnected
+from online_updates import CONTROLLER_FLOOR
 from spotify_controllers import ControllerNotices
 
 _HERE = Path(__file__).resolve().parent
@@ -66,7 +67,7 @@ MAX_SLOTS = 38           # player addresses .11-.48, below the DHCP range (.50-.
 IDENTITY_INTERVAL = 1.0
 UPSTREAM_INTERVAL = 30.0
 BRIDGE_KEY = 'cr100-bridge'
-MIN_CONTROLLER_VERSION = '24.1-00000'  # firmware 4.3; 4.3.2 is 25.2-50130
+MIN_CONTROLLER_VERSION = CONTROLLER_FLOOR  # admits every CR100 firmware
 
 
 def about_text(value, limit=64):
@@ -104,7 +105,7 @@ def load_peer_module(peer_dir):
 
 
 def configure_profile(zp, name='7.1'):
-    """Keep the player's protocol persona while admitting original 4.3 controllers.
+    """Keep the player's protocol persona while admitting controllers on any firmware.
 
     Both discovery floors must agree: old controllers use the legacy floor when
     offered, while the regular floor is also present in descriptions/topology.

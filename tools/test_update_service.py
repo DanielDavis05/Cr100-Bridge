@@ -417,17 +417,17 @@ class UpdateServiceIntegration(unittest.TestCase):
         events, initial = self.callback()
         for body in initial.values():
             self.assertEqual({m.get('LegacyCompatibleVersion') for m in
-                              ET.fromstring(topology_body(body)).iter('ZoneGroupMember')}, {'24.1-00000'})
+                              ET.fromstring(topology_body(body)).iter('ZoneGroupMember')}, {'1.0-00000'})
         self.stage(force=True)
         self.service.tick()
-        for source, wanted in ((IP_A, '24.1-75102'), (IP_B, '24.1-00000')):
+        for source, wanted in ((IP_A, '24.1-75102'), (IP_B, '1.0-00000')):
             device = self.description(source)
             self.assertEqual(device.findtext('d:minCompatibleVersion', namespaces=NS), wanted)
             self.assertEqual(device.findtext('d:legacyCompatibleVersion', namespaces=NS), wanted)
             self.assertEqual({m.get('LegacyCompatibleVersion') for m in self.topology(source).iter('ZoneGroupMember')}, {wanted})
         changed = self.events_for(events, lambda path, tree:
             {m.get('LegacyCompatibleVersion') for m in tree.iter('ZoneGroupMember')} ==
-            ({'24.1-75102'} if path == '/a' else {'24.1-00000'}))
+            ({'24.1-75102'} if path == '/a' else {'1.0-00000'}))
         self.assertNotEqual(next(changed['/a'].iter('ZoneGroupMember')).get('BootSeq'),
                             next(changed['/b'].iter('ZoneGroupMember')).get('BootSeq'))
         selected = self.manager.selection(A)
@@ -435,20 +435,20 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.assertEqual(self.manager.status(A)['status'], 'armed')
         self.assertEqual(self.manager.selection(A)['token'], selected['token'])
         for source in (IP_A, IP_B):
-            self.assertEqual(self.description(source).findtext('d:minCompatibleVersion', namespaces=NS), '24.1-00000')
+            self.assertEqual(self.description(source).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
         self.events_for(events, lambda _, tree:
-            {m.get('LegacyCompatibleVersion') for m in tree.iter('ZoneGroupMember')} == {'24.1-00000'})
+            {m.get('LegacyCompatibleVersion') for m in tree.iter('ZoneGroupMember')} == {'1.0-00000'})
         self.assertEqual(self.backend.calls, [])
 
     def test_manual_stage_never_changes_admission_floor(self):
         self.stage(force=False)
         self.service.tick()
         for source in (IP_A, IP_B):
-            self.assertEqual(self.description(source).findtext('d:minCompatibleVersion', namespaces=NS), '24.1-00000')
-            self.assertEqual({m.get('LegacyCompatibleVersion') for m in self.topology(source).iter('ZoneGroupMember')}, {'24.1-00000'})
+            self.assertEqual(self.description(source).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
+            self.assertEqual({m.get('LegacyCompatibleVersion') for m in self.topology(source).iter('ZoneGroupMember')}, {'1.0-00000'})
         item = self.check()
         self.assertIn('/controller/', item.get('ManifestURL'))
-        self.assertEqual(self.manager.floor(A), '24.1-00000')
+        self.assertEqual(self.manager.floor(A), '1.0-00000')
 
     def test_unavailable_storage_releases_cached_force_floor_and_announces_recovery(self):
         events, _ = self.callback()
@@ -456,16 +456,16 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.service.tick()
         self.events_for(events, lambda path, tree:
             {x.get('LegacyCompatibleVersion') for x in tree.iter('ZoneGroupMember')} ==
-            ({'24.1-75102'} if path == '/a' else {'24.1-00000'}))
+            ({'24.1-75102'} if path == '/a' else {'1.0-00000'}))
         before = self.service.generation(IP_A)
         with patch.object(self.manager, '_state', side_effect=OSError('Storage unavailable')):
             self.service.tick()
             self.assertEqual(self.service.generation(IP_A), before + 1)
-            self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '24.1-00000')
+            self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
             self.assertEqual({x.get('LegacyCompatibleVersion') for x in
-                self.topology(IP_A).iter('ZoneGroupMember')}, {'24.1-00000'})
+                self.topology(IP_A).iter('ZoneGroupMember')}, {'1.0-00000'})
             self.events_for(events, lambda _, tree:
-                {x.get('LegacyCompatibleVersion') for x in tree.iter('ZoneGroupMember')} == {'24.1-00000'})
+                {x.get('LegacyCompatibleVersion') for x in tree.iter('ZoneGroupMember')} == {'1.0-00000'})
         self.assertEqual(self.backend.calls, [])
 
     def test_staged_priority_manifest_preserves_signed_version_and_source_bound_delivery(self):
@@ -495,7 +495,7 @@ class UpdateServiceIntegration(unittest.TestCase):
         status, downloaded, _ = self.update_http(IP_A, package_path)
         self.assertEqual((status, downloaded), (200, expected))
         self.assertEqual(self.manager.status(A)['status'], 'downloading')
-        self.assertEqual(self.manager.floor(A), '24.1-00000')
+        self.assertEqual(self.manager.floor(A), '1.0-00000')
         self.manager.cancel_controller(A)
         self.assertNotEqual(self.update_http(IP_A, package_path)[0], 200)
         self.assertNotEqual(self.update_http(IP_A, path)[0], 200)
@@ -510,9 +510,9 @@ class UpdateServiceIntegration(unittest.TestCase):
                 self.service.tick()
                 for source in (IP_A, IP_B):
                     self.assertEqual(self.description(source).findtext(
-                        'd:minCompatibleVersion', namespaces=NS), '24.1-00000')
+                        'd:minCompatibleVersion', namespaces=NS), '1.0-00000')
                     self.assertEqual({m.get('LegacyCompatibleVersion') for m in
-                        self.topology(source).iter('ZoneGroupMember')}, {'24.1-00000'})
+                        self.topology(source).iter('ZoneGroupMember')}, {'1.0-00000'})
 
     def test_previous_unsupported_armed_receipt_recovers_to_normal_admission(self):
         for current in ('25.2-50129', None):
@@ -530,9 +530,9 @@ class UpdateServiceIntegration(unittest.TestCase):
                 self.assertIsNotNone(self.manager.selection(A))
                 for source in (IP_A, IP_B):
                     self.assertEqual(self.description(source).findtext(
-                        'd:legacyCompatibleVersion', namespaces=NS), '24.1-00000')
+                        'd:legacyCompatibleVersion', namespaces=NS), '1.0-00000')
                     self.assertEqual({m.get('LegacyCompatibleVersion') for m in
-                        self.topology(source).iter('ZoneGroupMember')}, {'24.1-00000'})
+                        self.topology(source).iter('ZoneGroupMember')}, {'1.0-00000'})
 
     def test_adapter_tick_expires_abandoned_bridge_job_without_a_controller_request(self):
         now = [1000.0]
@@ -570,26 +570,29 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.assertEqual(self.manager.status(A)['status'], 'downloading')
         events, _ = self.callback()
         before = self.service.generation(IP_A)
-        # A real socket request reports a version below the ordinary admission
-        # floor, but different from the signed target under installation.
+        # A real socket request reports an old version, different from the
+        # signed target under installation. The common floor admits it, and
+        # the players report its own version because it predates 4.3.
         status, body, _ = request(self.room, IP_A, 'GET', '/xml/device_description.xml', headers={
             'User-Agent': 'Linux UPnP/1.0 Sonos/23.1-12345 (CR100)'})
         self.assertEqual(status, 200)
         device = ET.fromstring(body).find('d:device', NS)
-        self.assertEqual(device.findtext('d:minCompatibleVersion', namespaces=NS), '23.1-12345')
+        self.assertEqual(device.findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
+        self.assertEqual(device.findtext('d:softwareVersion', namespaces=NS), '23.1-12345')
         self.assertEqual(self.manager.status(A)['status'], 'downloading')
         self.assertEqual(self.manager.selection(A)['version'], '24.1-75101')
         self.service.tick()
         self.assertEqual(self.service.generation(IP_A), before + 1)
         self.events_for(events, lambda path, tree:
-            {x.get('LegacyCompatibleVersion') for x in tree.iter('ZoneGroupMember')} ==
-            ({'23.1-12345'} if path == '/a' else {'24.1-00000'}))
-        self.assertEqual(self.description(IP_B).findtext('d:minCompatibleVersion', namespaces=NS), '24.1-00000')
+            {x.get('SoftwareVersion') for x in tree.iter('ZoneGroupMember')} ==
+            ({'23.1-12345'} if path == '/a' else {self.service.version}))
+        self.assertEqual(self.description(IP_B).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
+        self.assertEqual(self.description(IP_B).findtext('d:softwareVersion', namespaces=NS), self.service.version)
         # An invalid observed version cannot replace the last valid admission
         # version or falsely complete the pending signed target.
         request(self.room, IP_A, 'GET', '/xml/device_description.xml', headers={
             'User-Agent': 'Sonos/999.999-999999999999 (CR100)'})
-        self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '23.1-12345')
+        self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
         self.assertEqual(self.manager.status(A)['status'], 'downloading')
         self.assertEqual(self.manager.status(A)['current_version'], '23.1-12345')
         request(self.room, IP_A, 'GET', '/xml/device_description.xml', headers={
@@ -597,7 +600,36 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.manager.status(A)['status'], 'completed')
         self.assertIsNone(self.manager.selection(A))
-        self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '24.1-00000')
+        self.assertEqual(self.description(IP_A).findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
+        self.assertEqual(self.description(IP_A).findtext('d:softwareVersion', namespaces=NS), self.service.version)
+
+    def test_pre_43_controller_sees_players_on_its_own_version(self):
+        # Firmware 16.5 shows its "older software than the rest of your Sonos
+        # system" screen whenever players report a newer version, even with
+        # the lowest floors; its user agent also carries a letter suffix.
+        events, _ = self.callback()
+        before = self.service.generation(IP_A)
+        status, _, _ = soap(self.room, IP_A, 'SystemProperties', 'GetString',
+            '<VariableName>R_CustomerID</VariableName>', path='/SystemProperties/Control',
+            extra_headers={'User-Agent': 'Linux UPnP/1.0 Sonos/16.5-48010a (CR100)'})
+        self.assertEqual(status, 200)
+        device = self.description(IP_A)
+        self.assertEqual(device.findtext('d:softwareVersion', namespaces=NS), '16.5-48010')
+        self.assertEqual(device.findtext('d:minCompatibleVersion', namespaces=NS), '1.0-00000')
+        self.assertEqual({m.get('SoftwareVersion') for m in self.topology(IP_A).iter('ZoneGroupMember')},
+                         {'16.5-48010'})
+        self.service.tick()
+        self.assertEqual(self.service.generation(IP_A), before + 1)
+        self.events_for(events, lambda path, tree:
+            {x.get('SoftwareVersion') for x in tree.iter('ZoneGroupMember')} ==
+            ({'16.5-48010'} if path == '/a' else {self.service.version}))
+        self.assertIn('Sonos/16.5-48010 ', self.service.profile(IP_A)['server'])
+        # A 4.3 or later controller keeps the players' persona version.
+        soap(self.room, IP_B, 'SystemProperties', 'GetString',
+            '<VariableName>R_CustomerID</VariableName>', path='/SystemProperties/Control',
+            extra_headers={'User-Agent': 'Linux UPnP/1.0 Sonos/24.1-75101 (CR100)'})
+        self.assertEqual(self.description(IP_B).findtext('d:softwareVersion', namespaces=NS), self.service.version)
+        self.assertEqual(self.backend.calls, [])
 
     def test_expired_unaccepted_bridge_offer_cannot_serve_a_manifest_or_confirmation(self):
         now = [1000.0]
@@ -633,7 +665,7 @@ class UpdateServiceIntegration(unittest.TestCase):
                     with self.assertRaises(http.client.IncompleteRead):
                         self.update_http(IP_A, path)
                 wait_for(lambda: self.manager.status(A)['status'] == 'failed', timeout=2)
-                self.assertEqual(self.manager.floor(A), '24.1-00000')
+                self.assertEqual(self.manager.floor(A), '1.0-00000')
                 self.assertIn('interrupted', self.manager.status(A)['last_error'])
                 self.assertIn('Upload the firmware again', self.manager.status(A)['last_error'])
                 reviewed = self.manager.stage_controller(A, self.package, arm=False, current_version='24.1-75101')
