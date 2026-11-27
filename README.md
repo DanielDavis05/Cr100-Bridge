@@ -226,6 +226,11 @@ The radio tracks each controller's association, power saving, buffered traffic,
 and link status independently. The Controllers page shows each controller's own
 status and recent events. Multi-controller radio behavior is covered by offline
 tests; simultaneous operation with physical CR100s still needs acceptance testing.
+For controllers running RE100 R20 or later, the
+[controller JSON API](docs/features/CONTROLLER-API.md) can wake the screen, open
+a menu or a room's Now Playing screen, and sound the buzzer on one controller
+or every paired controller. Swagger is available at `/swagger/` on the bridge.
+
 Under Controllers, use **Choose components** on a controller to select its speakers
 and About entries. **Use household selection** follows every globally enabled
 component, including newly added speakers. Turn it off to keep an explicit

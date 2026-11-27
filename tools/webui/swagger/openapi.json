@@ -1,0 +1,213 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CR100 Controller API",
+    "version": "1.0.0",
+    "description": "Control paired CR100s running RE100 R20 or later. Sign in to the bridge and create a token under Password → Controller API tokens. Select Authorize and enter the token itself."
+  },
+  "servers": [{"url": "/api/v1"}],
+  "security": [{"controllerToken": []}],
+  "paths": {
+    "/controllers": {
+      "get": {
+        "operationId": "listControllers",
+        "summary": "List paired controllers",
+        "responses": {
+          "200": {
+            "description": "Controller MAC addresses, display names and recent remote-control readiness.",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "required": ["controllers"],
+              "properties": {"controllers": {"type": "array", "items": {"$ref": "#/components/schemas/Controller"}}}
+            }}}
+          },
+          "401": {"$ref": "#/components/responses/InvalidToken"}
+        }
+      }
+    },
+    "/controllers/{target}/remote": {
+      "get": {
+        "operationId": "getRemoteOptions",
+        "summary": "Get menus and room IDs for one controller",
+        "parameters": [{"$ref": "#/components/parameters/Controller"}],
+        "responses": {
+          "200": {
+            "description": "Actions and currently visible rooms for the controller.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RemoteOptions"}}}
+          },
+          "400": {"$ref": "#/components/responses/InvalidRequest"},
+          "401": {"$ref": "#/components/responses/InvalidToken"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "post": {
+        "operationId": "sendRemoteAction",
+        "summary": "Send an action to one controller or all paired controllers",
+        "description": "Use a controller MAC address or the literal all. The bridge waits for a controller receipt. For all, commands run concurrently and each target has its own result. A room that is hidden from one controller fails only for that controller.",
+        "parameters": [{
+          "name": "target",
+          "in": "path",
+          "required": true,
+          "description": "A paired controller MAC address or all.",
+          "schema": {"type": "string", "pattern": "^(all|([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})$"},
+          "examples": {"one": {"value": "00:0e:58:12:34:56"}, "all": {"value": "all"}}
+        }],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/Command"},
+            "examples": {
+              "wake": {"summary": "Wake screen", "value": {"action": "wake"}},
+              "rooms": {"summary": "Open Rooms", "value": {"action": "rooms"}},
+              "music": {"summary": "Open Music", "value": {"action": "music"}},
+              "settings": {"summary": "Open System Settings", "value": {"action": "settings"}},
+              "nowPlaying": {"summary": "Open Now Playing for a room", "value": {"action": "now_playing", "room": "ha:media_player.kitchen"}},
+              "find": {"summary": "Sound the controller buzzer", "value": {"action": "find"}}
+            }
+          }}
+        },
+        "responses": {
+          "200": {
+            "description": "One successful receipt or a set of results for all controllers. Check ok and the individual results for partial failure.",
+            "content": {"application/json": {
+              "schema": {"oneOf": [
+                {"$ref": "#/components/schemas/Receipt"},
+                {"$ref": "#/components/schemas/BulkReceipt"}
+              ]},
+              "examples": {
+                "single": {"value": {"controller": "00:0e:58:12:34:56", "action": "wake", "ok": true, "message": "Command completed."}},
+                "partial": {"value": {"action": "wake", "ok": false, "results": [
+                  {"controller": "00:0e:58:12:34:56", "ok": true, "status": 200, "message": "Command completed."},
+                  {"controller": "00:0e:58:12:34:57", "ok": false, "status": 504, "code": "controller_timeout", "error": "No response from the controller. Wake it or check its connection."}
+                ]}}
+              }
+            }}
+          },
+          "400": {"$ref": "#/components/responses/InvalidRequest"},
+          "401": {"$ref": "#/components/responses/InvalidToken"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {
+            "description": "A command is pending, the controller is busy, the room is unavailable, or the buzzer failed.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {
+            "description": "Request body exceeds 64 KiB.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "415": {
+            "description": "The request must use application/json.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "504": {
+            "description": "The controller did not acknowledge the command within eight seconds.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "controllerToken": {"type": "http", "scheme": "bearer", "description": "A controller API token applies to every paired CR100."}
+    },
+    "parameters": {
+      "Controller": {
+        "name": "target",
+        "in": "path",
+        "required": true,
+        "schema": {"$ref": "#/components/schemas/MAC"}
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "Invalid MAC address, JSON body, or command.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "InvalidToken": {
+        "description": "The bearer token is missing, invalid, or revoked.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "NotFound": {
+        "description": "The controller is unpaired, the requested room is unavailable, or there are no paired controllers for all.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      }
+    },
+    "schemas": {
+      "MAC": {"type": "string", "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", "example": "00:0e:58:12:34:56"},
+      "Action": {"type": "string", "enum": ["wake", "rooms", "music", "settings", "now_playing", "find"]},
+      "ControllerIdentity": {
+        "type": "object",
+        "required": ["mac", "name"],
+        "properties": {"mac": {"$ref": "#/components/schemas/MAC"}, "name": {"type": "string"}}
+      },
+      "Controller": {
+        "allOf": [
+          {"$ref": "#/components/schemas/ControllerIdentity"},
+          {"type": "object", "required": ["ready"], "properties": {
+            "ready": {"type": "boolean", "description": "An authenticated controller poll was received recently."}
+          }}
+        ]
+      },
+      "RemoteOptions": {
+        "type": "object",
+        "required": ["controller", "ready", "actions", "menus", "rooms"],
+        "properties": {
+          "controller": {"$ref": "#/components/schemas/ControllerIdentity"},
+          "ready": {"type": "boolean"},
+          "actions": {"type": "array", "items": {"$ref": "#/components/schemas/Action"}},
+          "menus": {"type": "object", "additionalProperties": {"type": "string"}},
+          "rooms": {"type": "array", "items": {
+            "type": "object",
+            "required": ["id", "name"],
+            "properties": {"id": {"type": "string", "example": "ha:media_player.kitchen"}, "name": {"type": "string"}}
+          }}
+        }
+      },
+      "Command": {
+        "oneOf": [
+          {"type": "object", "required": ["action"], "additionalProperties": false,
+           "properties": {"action": {"type": "string", "enum": ["wake", "rooms", "music", "settings", "find"]}}},
+          {"type": "object", "required": ["action", "room"], "additionalProperties": false,
+           "properties": {"action": {"type": "string", "enum": ["now_playing"]},
+                          "room": {"type": "string", "minLength": 1, "description": "Use a room ID from the controller's remote options."}}}
+        ]
+      },
+      "Receipt": {
+        "type": "object",
+        "required": ["controller", "action", "ok", "message"],
+        "properties": {
+          "controller": {"$ref": "#/components/schemas/MAC"},
+          "action": {"$ref": "#/components/schemas/Action"},
+          "ok": {"type": "boolean", "enum": [true]},
+          "message": {"type": "string"}
+        }
+      },
+      "BulkReceipt": {
+        "type": "object",
+        "required": ["action", "ok", "results"],
+        "properties": {
+          "action": {"$ref": "#/components/schemas/Action"},
+          "ok": {"type": "boolean", "description": "True when every target succeeded."},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/TargetResult"}}
+        }
+      },
+      "TargetResult": {
+        "type": "object",
+        "required": ["controller", "ok", "status"],
+        "properties": {
+          "controller": {"$ref": "#/components/schemas/MAC"},
+          "ok": {"type": "boolean"},
+          "status": {"type": "integer", "example": 200},
+          "message": {"type": "string"},
+          "code": {"type": "string"},
+          "error": {"type": "string"}
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["code", "error"],
+        "properties": {"code": {"type": "string", "example": "controller_timeout"}, "error": {"type": "string"}}
+      }
+    }
+  }
+}

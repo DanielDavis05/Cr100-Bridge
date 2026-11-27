@@ -545,6 +545,7 @@ views.controllers = {
     const openLogs = new Set();
     let renaming = false;
     let importing = false;
+    let remoteOpen = false;
 
     const updateDevicesStatus = (data) => {
       const node = $('.smart-device-status', main);
@@ -736,6 +737,9 @@ views.controllers = {
             <div><dt>Details from</dt><dd>${c.details_at ? escapeHtml(clock(c.details_at)) : 'Once connected'}</dd></div>
           </dl>
           <div class="settings-list">
+            <div class="setting"><span class="what"><span class="main">Remote control</span>
+              <span class="sub">${c.remote_ready ? 'Controller is responding' : 'Controller is offline or needs RE100 R20'}</span></span>
+              <button type="button" class="inline-button quiet remote-controller">Open</button></div>
             <div class="setting"><span class="what"><span class="main">Components</span>
               <span class="sub">${c.visible_components == null ? 'Uses the household selection' : `${c.visible_components.length} chosen for this controller`}</span></span>
               <button type="button" class="inline-button quiet choose-components">Choose</button></div>
@@ -749,6 +753,13 @@ views.controllers = {
       if (strip) $('.vitals', node).after(strip);
 
       $('.rename-controller', node).addEventListener('click', () => startRename(node, c));
+      $('.remote-controller', node).addEventListener('click', async (event) => {
+        const trigger = event.currentTarget;
+        trigger.disabled = true;
+        try { openRemote(await api('GET', `/api/controllers/${c.mac}/remote`), trigger); }
+        catch (error) { toast('Remote control unavailable', error.message, true); }
+        finally { trigger.disabled = false; }
+      });
       $('.choose-components', node).addEventListener('click', async (event) => {
         const trigger = event.currentTarget;
         trigger.disabled = true;
@@ -1213,6 +1224,55 @@ views.controllers = {
         idle: () => IDLE_BOOTSTRAP.includes(snapshot.status || 'none') && !snapshot.recovery_required };
     };
 
+    const openRemote = (data, trigger) => {
+      const overlay = el(`<div class="picker" role="dialog" aria-modal="true" aria-labelledby="remote-title">
+        <div class="popup controller-component-picker">
+          <h2 id="remote-title" tabindex="-1">Remote control for ${escapeHtml(data.controller.name)}</h2>
+          <p class="hint">${data.ready ? 'Controller is responding.' : 'The controller is offline or needs RE100 firmware with remote control.'}</p>
+          <div class="setting firmware-tools">
+            <button type="button" class="inline-button" data-action="wake">Wake screen</button>
+            <button type="button" class="inline-button" data-action="find">Find controller</button>
+          </div>
+          <div class="setting"><label class="what">Menu
+            <select class="remote-menu">${Object.entries(data.menus).map(([id, name]) =>
+              `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('')}</select></label>
+            <button type="button" class="inline-button" data-action="menu">Open menu</button></div>
+          <div class="setting"><label class="what">Room
+            <select class="remote-room">${data.rooms.length ? data.rooms.map(({id, name}) =>
+              `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('')
+              : '<option value="">No rooms available</option>'}</select></label>
+            <button type="button" class="inline-button" data-action="now_playing">Open Now Playing</button></div>
+          <p class="remote-status" role="status"></p>
+          <button type="button" class="inline-button quiet remote-close">Close</button>
+        </div></div>`);
+      remoteOpen = true;
+      const modal = openModal(overlay, trigger, $('#remote-title', overlay), () => { remoteOpen = false; });
+      const controls = [...overlay.querySelectorAll('[data-action]')];
+      const status = $('.remote-status', overlay);
+      const room = $('.remote-room', overlay);
+      const disable = (busy) => controls.forEach((button) => {
+        button.disabled = busy || (button.dataset.action === 'now_playing' && !room.value);
+      });
+      for (const button of controls) button.addEventListener('click', async () => {
+        const action = button.dataset.action === 'menu' ? $('.remote-menu', overlay).value : button.dataset.action;
+        disable(true);
+        status.classList.remove('error');
+        status.textContent = 'Waiting for the controller…';
+        try {
+          const result = await api('POST', `/api/controllers/${data.controller.mac}/remote`,
+            action === 'now_playing' ? { action, room: room.value } : { action });
+          status.textContent = result.message;
+        } catch (error) {
+          status.classList.add('error');
+          status.textContent = error.message;
+        } finally {
+          disable(false);
+        }
+      });
+      disable(false);
+      $('.remote-close', overlay).addEventListener('click', () => modal.close());
+    };
+
     const chooseComponents = (data, trigger) => {
       let inherit = data.visible_components == null;
       const selected = new Set(data.visible_components ?? data.components.filter((item) => item.enabled).map((item) => item.key));
@@ -1280,7 +1340,7 @@ views.controllers = {
         }
         catch (error) { controller.bootstrap_error = error.message; }
       }));
-      if (passive && (renaming || importing || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.firmware-entry') || [...firmwarePanels.values()].some((panel) => panel.isBusy()) || [...bootstrapPanels.values()].some((panel) => panel.isBusy() || panel.isOpen()))) {
+      if (passive && (renaming || importing || remoteOpen || document.activeElement?.id === 'pairing-import' || document.activeElement?.id === 'radio-channel' || document.activeElement?.closest('.firmware-entry') || [...firmwarePanels.values()].some((panel) => panel.isBusy()) || [...bootstrapPanels.values()].some((panel) => panel.isBusy() || panel.isOpen()))) {
         for (const controller of data.controllers) {
           bootstrapPanels.get(controller.mac)?.update(controller.bootstrap, controller.bootstrap_error, controller.firmware_identity, controller.default_cfw);
           firmwarePanels.get(controller.mac)?.update(controller.update, controller.firmware, controller.firmware_identity);
@@ -2156,6 +2216,74 @@ views.password = {
     form.addEventListener('submit', (event) => { event.preventDefault(); change(); });
     softkeys([{ label: 'Sign out', run: async () => { await api('POST', '/api/logout'); showGate(false); } }, null,
       { label: 'Change password', run: change }]);
+
+    const tokens = el(`<section class="popup">
+      <h3>Controller API tokens</h3>
+      <p>Each token can control any paired CR100. <a href="/swagger/" target="_blank" rel="noopener">Open Swagger docs</a></p>
+      <form class="inline-field">
+        <label class="field"><span>Token name</span><input name="name" required maxlength="64" placeholder="Home Assistant"></label>
+        <button type="submit" class="inline-button">Create token</button>
+      </form>
+      <label class="field new-controller-token" hidden><span>Copy this token now. It is shown once.</span>
+        <input type="text" readonly spellcheck="false" autocomplete="off"></label>
+      <p class="error token-error" role="alert"></p>
+      <div class="settings-list token-list"></div></section>`);
+    main.append(tokens);
+    const tokenForm = $('form', tokens);
+    const tokenList = $('.token-list', tokens);
+    const tokenError = $('.token-error', tokens);
+    const created = $('.new-controller-token', tokens);
+    const secret = $('input', created);
+    const refreshTokens = async () => {
+      const data = await api('GET', '/api/controller-api-tokens');
+      tokenList.replaceChildren();
+      if (!data.tokens.length) tokenList.append(el('<p class="hint">No controller API tokens.</p>'));
+      for (const token of data.tokens) {
+        const row = el(`<div class="setting"><span class="what"><span class="main"></span></span>
+          <button type="button" class="inline-button quiet">Revoke</button></div>`);
+        $('.main', row).textContent = token.name;
+        const revoke = $('button', row);
+        revoke.setAttribute('aria-label', `Revoke ${token.name}`);
+        revoke.addEventListener('click', async () => {
+          if (!confirm(`Revoke the API token “${token.name}”?`)) return;
+          tokenError.textContent = '';
+          revoke.disabled = true;
+          try {
+            await api('POST', `/api/controller-api-tokens/${token.id}/revoke`, {});
+            if (created.dataset.id === token.id) {
+              created.hidden = true;
+              secret.value = '';
+            }
+            await refreshTokens();
+          } catch (error) {
+            tokenError.textContent = error.message;
+            revoke.disabled = false;
+          }
+        });
+        tokenList.append(row);
+      }
+    };
+    tokenForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const create = $('button', tokenForm);
+      create.disabled = true;
+      tokenError.textContent = '';
+      try {
+        const { id, token } = await api('POST', '/api/controller-api-tokens', { name: tokenForm.elements.name.value });
+        tokenForm.reset();
+        created.dataset.id = id;
+        created.hidden = false;
+        secret.value = token;
+        secret.focus();
+        secret.select();
+        await refreshTokens();
+      } catch (error) {
+        tokenError.textContent = error.message;
+      } finally {
+        create.disabled = false;
+      }
+    });
+    await refreshTokens().catch((error) => { tokenError.textContent = error.message; });
   },
 };
 

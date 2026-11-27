@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import fcntl
 from functools import lru_cache
@@ -54,8 +55,9 @@ from bridge_config import (ConfigError as ApiError, LIBRARY_KEYS, MAX_ROOM_NAME,
                            room_key_ref, update_config_file, write_json)
 from controller_state import (controller_records, merge_controller, normalize_mac, normalize_state,
                               remove_controller)
+from controller_remote import ACTIONS as REMOTE_ACTIONS, MENUS as REMOTE_MENUS, ControllerRemote, RemoteCommandError
 from controller_visibility import (BRIDGE_COMPONENT, configured_components, validate_selection,
-                                   visible_components)
+                                   room_component_key, visible_components)
 from music_service_registry import provider_settings
 
 _HERE = Path(__file__).resolve().parent
@@ -72,6 +74,8 @@ SESSION_COOKIE = 'bridge_session'
 LOGIN_WINDOW = 60
 LOGIN_FAILURES = 5
 MAX_LOGIN_CLIENTS = 1024
+MAX_CONTROLLER_API_TOKENS = 32
+CONTROLLER_API_TOKEN = re.compile(r'cr100_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}')
 BODY_LIMIT = 64 * 1024
 FIRMWARE_BODY_LIMIT = 16 * 1024 * 1024
 
@@ -136,6 +140,13 @@ def resolve(base_file, value, default):
     return path if path.is_absolute() else Path(base_file).resolve().parent / path
 
 
+def controller_api_error(error):
+    codes = {400: 'invalid_request', 404: 'not_found', 409: 'conflict',
+             413: 'body_too_large', 415: 'unsupported_media_type', 500: 'bridge_error'}
+    return {'code': getattr(error, 'code', codes.get(error.status, 'request_failed')),
+            'error': error.message}
+
+
 # --- password and sessions ---------------------------------------------------------
 class Auth:
     """One password for the page, stored as a PBKDF2 hash in the web interface's data file."""
@@ -196,6 +207,46 @@ class Auth:
     def end(self, token):
         with self.lock: self.sessions.pop(token or '', None)
 
+    def controller_tokens(self):
+        with self.lock:
+            tokens = self.data.values.get('controller_tokens', {})
+            return [{'id': key, 'name': value['name'], 'created_at': value['created_at']}
+                    for key, value in tokens.items()]
+
+    def create_controller_token(self, name):
+        name = name.strip() if isinstance(name, str) else ''
+        if not 1 <= len(name) <= 64 or not name.isprintable():
+            raise ApiError(400, 'Enter a token name of 1 to 64 characters.')
+        with self.lock:
+            tokens = self.data.values.get('controller_tokens', {})
+            if len(tokens) >= MAX_CONTROLLER_API_TOKENS:
+                raise ApiError(409, 'Revoke an existing token before creating another.')
+            token_id = secrets.token_hex(8)
+            while token_id in tokens:
+                token_id = secrets.token_hex(8)
+            token = 'cr100_' + token_id + '.' + secrets.token_urlsafe(32)
+            record = {'name': name, 'created_at': int(time.time())}
+            self.data.update(controller_tokens={**tokens, token_id: {
+                **record, 'digest': hashlib.sha256(token.encode('ascii')).hexdigest()}})
+            return {'id': token_id, **record, 'token': token}
+
+    def revoke_controller_token(self, token_id):
+        with self.lock:
+            tokens = dict(self.data.values.get('controller_tokens', {}))
+            if tokens.pop(token_id, None) is None:
+                raise ApiError(404, 'That API token does not exist.')
+            self.data.update(controller_tokens=tokens)
+        return {'revoked': True}
+
+    def valid_controller_token(self, token):
+        if not CONTROLLER_API_TOKEN.fullmatch(token):
+            return False
+        token_id = token[6:22]
+        with self.lock:
+            record = self.data.values.get('controller_tokens', {}).get(token_id)
+            return record is not None and hmac.compare_digest(
+                record['digest'], hashlib.sha256(token.encode('ascii')).hexdigest())
+
 
 class DataFile:
     """The web interface's own small state (password hash, cached Spotify account), mode 0600."""
@@ -205,8 +256,9 @@ class DataFile:
 
     def update(self, **values):
         with self.lock:
-            self.values.update(values)
-            write_json(self.path, self.values, mode=0o600)
+            updated = {**self.values, **values}
+            write_json(self.path, updated, mode=0o600)
+            self.values = updated
 
 
 # --- the bridge --------------------------------------------------------------------
@@ -237,6 +289,7 @@ class Bridge:
         self.default_cfw_path = _HERE / 'stock_bootstrap_assets' / 'default-cfw.upd'
         self.default_cfw_name = 'cr100-custom-4.3.2-r15.upd'
         self.stop = threading.Event()
+        self.remote = ControllerRemote(self.state, self.stop, log)
         self.managed = managed
 
     # config --------------------------------------------------------------------
@@ -319,6 +372,7 @@ class Bridge:
     def start(self):
         if self.source() == 'ha': self.connect_ha()
         threading.Thread(target=self.poll_controllers, name='controller-poll', daemon=True).start()
+        self.remote.start()
 
     def close(self):
         self.stop.set()
@@ -947,6 +1001,7 @@ class Bridge:
                            ('Controller' if index == 0 else 'Controller %d' % (index + 1)),
                            'status': status, 'status_label': label, 'ip': ips.get(mac),
                            'auto_reconnect': (names.get(mac) or {}).get('auto_reconnect') is not False,
+                           'remote_ready': self.remote.supported(mac),
                            'last_heard_s': station.get('last_heard_s') if station else None,
                            'visible_components': None if visible_components(config, mac) is None else
                                list((names.get(mac) or {}).get('visible_components', [])),
@@ -1147,6 +1202,78 @@ class Bridge:
         selection = ((config.get('controllers') or {}).get(controller['mac']) or {}).get('visible_components')
         return {'controller': controller, 'visible_components': selection,
                 'components': self.component_inventory(config, controller['mac'])}
+
+    def controller_remote(self, mac, payload=None, *, execute=False):
+        controller = self.spotify_controller(mac)
+        mac = controller['mac']
+        runtime = self.player_runtime()
+        selection = visible_components(self.config(), mac)
+        rooms = {}
+        for room in runtime['rooms']:
+            key = room['key']
+            if key.startswith('media_player.'):
+                key = room_component_key(('ha', key), room['slot'])
+            elif key.startswith('sim:'):
+                key = room_component_key(None, room['slot'])
+            if selection is None or key in selection:
+                rooms[key] = room
+        if not execute:
+            return {'controller': controller, 'ready': self.remote.supported(mac),
+                    'menus': REMOTE_MENUS,
+                    'rooms': [{'id': key, 'name': room['name']} for key, room in rooms.items()]}
+        action = payload.get('action') if isinstance(payload, dict) else None
+        if not isinstance(action, str) or action not in REMOTE_ACTIONS:
+            raise ApiError(400, 'Choose a supported controller action.')
+        argument = ''
+        if action == 'now_playing':
+            from zoneplayers import player_mac
+            room = payload.get('room')
+            if not isinstance(room, str) or room not in rooms:
+                raise RemoteCommandError(404, 'room_unavailable',
+                                         'Choose a room available to this controller.')
+            argument = 'RINCON_' + player_mac(rooms[room]['slot']).replace(':', '').upper() + '01400'
+        return self.remote.execute(mac, action, argument)
+
+    def controller_api_list(self):
+        names = self.config().get('controllers') or {}
+        return {'controllers': [{'mac': mac, 'name': (names.get(mac) or {}).get('name') or 'Controller',
+                                 'ready': self.remote.supported(mac)}
+                                for mac in self.controller_macs(self.state())]}
+
+    def controller_api_options(self, mac):
+        return {**self.controller_remote(mac), 'actions': list(REMOTE_ACTIONS)}
+
+    def controller_api_action(self, target, payload):
+        action = payload.get('action')
+        if not isinstance(action, str) or action not in REMOTE_ACTIONS:
+            raise ApiError(400, 'Choose a supported controller action.')
+        required = {'action', 'room'} if action == 'now_playing' else {'action'}
+        if payload.keys() != required or (action == 'now_playing' and
+                                           not (isinstance(payload['room'], str) and payload['room'])):
+            raise ApiError(400, 'Now Playing requires a room ID. Other actions take only an action name.')
+        if target != 'all':
+            result = self.controller_remote(target, payload, execute=True)
+            return {'controller': target, 'action': action, 'ok': True, **result}
+
+        targets = self.controller_macs(self.state())
+        if not targets:
+            raise RemoteCommandError(404, 'no_controllers', 'No controllers are paired with this bridge.')
+
+        def run(mac):
+            try:
+                result = self.controller_remote(mac, payload, execute=True)
+                return {'controller': mac, 'ok': True, 'status': 200, **result}
+            except ApiError as error:
+                return {'controller': mac, 'ok': False, 'status': error.status,
+                        **controller_api_error(error)}
+            except Exception as error:
+                self.log({'event': 'controller-api-error', 'mac': mac, 'error': repr(error)})
+                return {'controller': mac, 'ok': False, 'status': 500,
+                        'code': 'bridge_error', 'error': 'The bridge could not send this command.'}
+
+        with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
+            results = list(pool.map(run, targets))
+        return {'action': action, 'ok': all(row['ok'] for row in results), 'results': results}
 
     def save_controller_components(self, mac, payload):
         controller = self.spotify_controller(mac)
@@ -1577,11 +1704,18 @@ def default_profile_fetch(client_id, token_file):
 def make_handler(bridge, auth, log):
     routes = {}
 
-    def route(method, pattern, public=False, binary=False):
+    def route(method, pattern, public=False, binary=False, controller_token=False):
         def register(function):
-            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public, binary))
+            routes.setdefault(method, []).append((re.compile(pattern + '$'), function, public, binary,
+                                                  controller_token))
             return function
         return register
+
+    def controller_target(segment):
+        try:
+            return normalize_mac(urllib.parse.unquote(segment))
+        except ValueError:
+            raise ApiError(400, 'Choose a valid controller MAC address.') from None
 
     @route('GET', '/api/session', public=True)
     def session(handler, body, match):
@@ -1620,6 +1754,24 @@ def make_handler(bridge, auth, log):
             auth.keep_session(handler.session_token())
         return {'message': 'Password changed.'}
 
+    route('GET', '/api/controller-api-tokens')(lambda h, b, m: {'tokens': auth.controller_tokens()})
+    route('POST', '/api/controller-api-tokens')(lambda h, b, m: auth.create_controller_token(b.get('name')))
+    route('POST', r'/api/controller-api-tokens/([0-9a-f]{16})/revoke')(
+        lambda h, b, m: auth.revoke_controller_token(m.group(1)))
+
+    @route('GET', r'/api/v1/openapi\.json', public=True)
+    def controller_openapi(handler, body, match):
+        return json.loads((STATIC_DIR / 'swagger' / 'openapi.json').read_text())
+
+    route('GET', '/api/v1/controllers', controller_token=True)(lambda h, b, m: bridge.controller_api_list())
+    route('GET', r'/api/v1/controllers/([^/]+)/remote', controller_token=True)(
+        lambda h, b, m: bridge.controller_api_options(controller_target(m.group(1))))
+
+    @route('POST', r'/api/v1/controllers/([^/]+)/remote', controller_token=True)
+    def controller_action(handler, body, match):
+        target = match.group(1)
+        return bridge.controller_api_action('all' if target == 'all' else controller_target(target), body)
+
     route('GET', '/api/overview')(lambda h, b, m: bridge.overview())
     route('GET', '/api/speakers')(lambda h, b, m: bridge.speakers())
     route('PUT', '/api/speakers')(lambda h, b, m: bridge.save_speakers(b))
@@ -1633,6 +1785,9 @@ def make_handler(bridge, auth, log):
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/reconnect')(lambda h, b, m: bridge.save_controller_reconnect(m.group(1), b))
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.controller_components(m.group(1)))
     route('PUT', r'/api/controllers/([0-9a-fA-F:]{17})/components')(lambda h, b, m: bridge.save_controller_components(m.group(1), b))
+    route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/remote')(lambda h, b, m: bridge.controller_remote(m.group(1)))
+    route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/remote')(
+        lambda h, b, m: bridge.controller_remote(m.group(1), b, execute=True))
     route('GET', '/api/updates')(lambda h, b, m: bridge.update_status())
     route('GET', r'/api/controllers/([0-9a-fA-F:]{17})/firmware')(lambda h, b, m: bridge.controller_firmware(m.group(1)))
     route('POST', r'/api/controllers/([0-9a-fA-F:]{17})/firmware/bridge-package')(lambda h, b, m: bridge.controller_firmware(m.group(1), 'bridge-package'))
@@ -1778,21 +1933,32 @@ def make_handler(bridge, auth, log):
                 self.wfile.write(data)
                 return
             if method == 'GET' and not path.startswith('/api/'): return self.static(path)
-            for pattern, function, public, binary in routes.get(method, []):
+            for pattern, function, public, binary, controller_token in routes.get(method, []):
                 match = pattern.match(path)
                 if not match: continue
-                if method != 'GET' and self.headers.get('X-Bridge') != '1':
+                if controller_token:
+                    headers = self.headers.get_all('Authorization', [])
+                    credential = re.fullmatch(r'Bearer ([^ ]+)', headers[0], re.IGNORECASE) if len(headers) == 1 else None
+                    if not credential or not auth.valid_controller_token(credential.group(1)):
+                        return self.reply(401, {'code': 'invalid_token', 'error': 'Supply a valid API token.'},
+                                          bearer_challenge=True)
+                    if method == 'POST' and self.headers.get_content_type() != 'application/json':
+                        return self.reply(415, {'code': 'unsupported_media_type', 'error': 'Send application/json.'})
+                elif method != 'GET' and self.headers.get('X-Bridge') != '1':
                     return self.reply(403, {'error': 'Missing request header.'})   # cross-site forms cannot set it
-                if not public and not auth.valid(self.session_token()):
+                if not public and not controller_token and not auth.valid(self.session_token()):
                     return self.reply(401, {'error': 'Sign in first.'})
                 try:
                     body = self.read_body() if method != 'GET' and not binary else {}
                     return self.reply(200, function(self, body, match))
                 except ApiError as error:
-                    return self.reply(error.status, {'error': error.message})
+                    return self.reply(error.status, controller_api_error(error) if controller_token
+                                      else {'error': error.message})
                 except Exception as error:
                     log({'event': 'api-error', 'path': path, 'error': repr(error)})
-                    return self.reply(500, {'error': 'Something went wrong on the bridge. Check its log.'})
+                    failure = ApiError(500, 'Something went wrong on the bridge. Check its log.')
+                    return self.reply(500, controller_api_error(failure) if controller_token
+                                      else {'error': failure.message})
             self.reply(404, {'error': 'Not found.'})
 
         def read_body(self):
@@ -1850,12 +2016,14 @@ def make_handler(bridge, auth, log):
                              "default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
                              "font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'")
 
-        def reply(self, status, value):
+        def reply(self, status, value, *, bearer_challenge=False):
             data = json.dumps(value).encode()
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', 'no-store')
+            if bearer_challenge:
+                self.send_header('WWW-Authenticate', 'Bearer realm="CR100 controller API"')
             if self.new_cookie is not None:
                 age = SESSION_SECONDS if self.new_cookie else 0
                 self.send_header('Set-Cookie', '%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict'
@@ -1866,6 +2034,8 @@ def make_handler(bridge, auth, log):
 
         def static(self, path):
             name = 'index.html' if path in ('/', '') else path.lstrip('/')
+            if path in ('/swagger', '/swagger/'):
+                name = 'swagger/index.html'
             if name.startswith('static/'): name = name[len('static/'):]
             target = (STATIC_DIR / name).resolve()
             if STATIC_DIR.resolve() not in target.parents or not target.is_file() or target.suffix not in STATIC_TYPES:
