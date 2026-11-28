@@ -631,6 +631,47 @@ class UpdateServiceIntegration(unittest.TestCase):
         self.assertEqual(self.description(IP_B).findtext('d:softwareVersion', namespaces=NS), self.service.version)
         self.assertEqual(self.backend.calls, [])
 
+    def test_pre_43_controller_legacy_package_url_and_interrupted_retry(self):
+        # Pre-4.3 firmware (e.g. 3.6 / 16.5-48010a) passes UpdateItem.UpdateURL
+        # (.../begin) directly to /bin/upgrade, which fetches begindefault-1-2.upd.
+        soap(self.room, IP_A, 'SystemProperties', 'GetString',
+             '<VariableName>R_CustomerID</VariableName>', path='/SystemProperties/Control',
+             extra_headers={'User-Agent': 'Linux UPnP/1.0 Sonos/16.5-48010a (CR100)'})
+
+        # Unarmed inert check must never serve a package on begindefault-1-2.upd.
+        inert = self.check()
+        inert_url = urlsplit(inert.get('UpdateURL')).path + 'default-1-2.upd'
+        self.assertEqual(self.update_http(IP_A, inert_url)[0], 404)
+
+        # Arm a controller package; legacy begindefault-1-2.upd delivers it to the paired MAC only.
+        self.stage()
+        item = self.check()
+        legacy_path = urlsplit(item.get('UpdateURL')).path + 'default-1-2.upd'
+        self.assertEqual(self.update_http(IP_B, legacy_path)[0], 404)
+
+        # Interrupted legacy download releases 'downloading' state cleanly.
+        with patch('update_transport.shutil.copyfileobj', side_effect=ConnectionResetError('dropped')):
+            try:
+                self.update_http(IP_A, legacy_path)
+            except (http.client.HTTPException, OSError):
+                pass
+        wait_for(lambda: self.manager.status(A)['status'] == 'failed', timeout=3)
+
+        # Re-arm and complete download over legacy URL, then report 25.2-50130.
+        self.stage()
+        item = self.check()
+        legacy_path = urlsplit(item.get('UpdateURL')).path + 'default-1-2.upd'
+        status, body, _ = self.update_http(IP_A, legacy_path + '?cmaj=16&cmin=5&cbld=48010')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.package)
+        self.assertEqual(self.manager.status(A)['status'], 'downloading')
+
+        soap(self.room, IP_A, 'SystemProperties', 'GetString',
+             '<VariableName>R_CustomerID</VariableName>', path='/SystemProperties/Control',
+             extra_headers={'User-Agent': 'Linux UPnP/1.0 Sonos/25.2-50130 (CR100)'})
+        self.service.tick()
+        self.assertEqual(self.manager.status(A)['status'], 'completed')
+
     def test_expired_unaccepted_bridge_offer_cannot_serve_a_manifest_or_confirmation(self):
         now = [1000.0]
         self.service.coordinator.clock = lambda: now[0]

@@ -391,6 +391,148 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(UpdateTransportError):
             message_xml({'Buttons': 'arbitrary'})
 
+    @staticmethod
+    def _legacy_tls_exchange(address, offered_ciphers, request_bytes):
+        import hashlib
+        import hmac
+        import os
+        import struct
+        from cryptography import x509
+        from cryptography.hazmat.primitives.asymmetric import padding
+        import legacy_tls_rc4 as ltls
+
+        cli = socket.create_connection(address, timeout=3)
+        try:
+            transcript = bytearray()
+            client_random = os.urandom(32)
+            cs_bytes = b''.join(struct.pack('>H', c) for c in offered_ciphers)
+            ch = ltls._hs_msg(0x01, b'\x03\x01' + client_random + b'\x00'
+                              + struct.pack('>H', len(cs_bytes)) + cs_bytes + b'\x01\x00')
+            transcript.extend(ch)
+            ltls._send_record(cli, 0x16, ch)
+
+            _, _, sh = ltls._recv_record(cli)
+            transcript.extend(sh)
+            server_random = sh[6:38]
+            chosen = struct.unpack('>H', sh[39:41])[0]
+            _, _, cert_msg = ltls._recv_record(cli)
+            transcript.extend(cert_msg)
+            c_len = int.from_bytes(cert_msg[7:10], 'big')
+            peer_cert = x509.load_der_x509_certificate(cert_msg[10:10 + c_len])
+            _, _, shd = ltls._recv_record(cli)
+            transcript.extend(shd)
+
+            pms = b'\x03\x01' + os.urandom(46)
+            enc_pms = peer_cert.public_key().encrypt(pms, padding.PKCS1v15())
+            cke = ltls._hs_msg(0x10, struct.pack('>H', len(enc_pms)) + enc_pms)
+            transcript.extend(cke)
+            ltls._send_record(cli, 0x16, cke)
+
+            mac_mod = hashlib.sha1 if chosen == ltls.TLS_RSA_WITH_RC4_128_SHA else hashlib.md5
+            mac_len = 20 if chosen == ltls.TLS_RSA_WITH_RC4_128_SHA else 16
+            master = ltls._tls10_prf(pms, b'master secret', client_random + server_random, 48)
+            kb = ltls._tls10_prf(master, b'key expansion', server_random + client_random, 2 * mac_len + 32)
+            c_mac = kb[0:mac_len]
+            s_mac = kb[mac_len:2 * mac_len]
+            c_rc4 = ltls._RC4(kb[2 * mac_len:2 * mac_len + 16])
+            s_rc4 = ltls._RC4(kb[2 * mac_len + 16:2 * mac_len + 32])
+            c_seq = s_seq = 0
+
+            def send_enc(ct, data):
+                nonlocal c_seq
+                hdr = struct.pack('>QBBBH', c_seq, ct, 3, 1, len(data))
+                m = hmac.new(c_mac, hdr + data, mac_mod).digest()
+                c_seq += 1
+                ltls._send_record(cli, ct, c_rc4.crypt(data + m))
+
+            def recv_enc():
+                nonlocal s_seq
+                ct, _, enc = ltls._recv_record(cli)
+                dec = s_rc4.crypt(enc)
+                pl, got = dec[:-mac_len], dec[-mac_len:]
+                hdr = struct.pack('>QBBBH', s_seq, ct, 3, 1, len(pl))
+                exp = hmac.new(s_mac, hdr + pl, mac_mod).digest()
+                s_seq += 1
+                assert hmac.compare_digest(got, exp)
+                return ct, pl
+
+            ltls._send_record(cli, 0x14, b'\x01')
+            d1 = hashlib.md5(transcript).digest() + hashlib.sha1(transcript).digest()
+            c_fin = ltls._hs_msg(0x14, ltls._tls10_prf(master, b'client finished', d1, 12))
+            transcript.extend(c_fin)
+            send_enc(0x16, c_fin)
+
+            ct, _, pl = ltls._recv_record(cli)
+            assert ct == 0x14 and pl == b'\x01'
+            ct, s_fin = recv_enc()
+            d2 = hashlib.md5(transcript).digest() + hashlib.sha1(transcript).digest()
+            assert ct == 0x16 and s_fin == ltls._hs_msg(0x14, ltls._tls10_prf(master, b'server finished', d2, 12))
+
+            send_enc(0x17, request_bytes)
+            chunks = bytearray()
+            while True:
+                try:
+                    ct, data = recv_enc()
+                except EOFError:
+                    break
+                if ct == 0x15:
+                    break
+                if ct == 0x17:
+                    chunks.extend(data)
+            return chosen, bytes(chunks)
+        finally:
+            cli.close()
+
+    def test_legacy_rc4_tls10_auto_detected_for_pre_43_controllers(self):
+        import legacy_tls_rc4 as ltls
+
+        # Detection only triggers when OpenSSL shares zero ciphers and RC4-SHA/MD5 is offered.
+        self.assertFalse(ltls.needs_legacy_rc4([0x0035, 0x0005], frozenset({0x0035})))
+        self.assertTrue(ltls.needs_legacy_rc4([0x0005, 0x0004, 0x0064, 0x0060, 0x0003], frozenset({0x0035})))
+        self.assertFalse(ltls.needs_legacy_rc4([0x0064, 0x0003], frozenset({0x0035})))
+
+        events = []
+        transport = UpdateTransport(
+            '127.0.0.1', lambda _: A,
+            lambda mac: dict(MessageHeader='Official firmware', MessageBody='Update to 4.3.2',
+                             ContinuePrompt='Install', CancelPrompt='Cancel', AllowUpdate='true'),
+            self.coordinator, self.root / 'tls',
+            request=lambda method, path, source, headers, body: (503, b'No online registration service', 'text/plain', {}),
+            log=events.append, http_port=None, tls_port=0, tcp_port=0,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            transport.start({})
+            self.addCleanup(transport.close)
+        address = transport.servers[0].server_address
+
+        # Exact CR100 3.6 cipher list -> chooses RC4-SHA (0x0005) and answers GetOnlineUpdateMessage
+        req = (b'POST /ws/pm/?wsdl HTTP/1.1\r\nHost: system-api.sonos.com\r\n'
+               b'SOAPAction: "http://cc.ws#GetOnlineUpdateMessage"\r\nContent-Length: 4\r\n\r\ntest')
+        chosen, raw = self._legacy_tls_exchange(address, [0x0005, 0x0004, 0x0064, 0x0060, 0x0003], req)
+        self.assertEqual(chosen, ltls.TLS_RSA_WITH_RC4_128_SHA)
+        head, _, body = raw.partition(b'\r\n\r\n')
+        self.assertIn(b'200 OK', head)
+        result = ET.fromstring(body).find('.//GetOnlineUpdateMessageReturn')
+        self.assertEqual(result.findtext('statusCode'), '1')
+        self.assertEqual(result.findtext('AllowUpdate'), 'true')
+        self.assertEqual(result.findtext('MessageHeader'), 'Official firmware')
+
+        # RC4-MD5-only client -> chooses RC4-MD5 (0x0004), non-update SOAP gets 503 via _HTTP
+        optin = (b'POST /ws/sys/?wsdl HTTP/1.1\r\nHost: system-api.sonos.com\r\n'
+                 b'SOAPAction: "http://system-api.sonos.com/ws/sys/1.0#usageTracking_optinGet"\r\n'
+                 b'Content-Length: 0\r\n\r\n')
+        chosen_md5, raw_md5 = self._legacy_tls_exchange(address, [0x0004], optin)
+        self.assertEqual(chosen_md5, ltls.TLS_RSA_WITH_RC4_128_MD5)
+        self.assertIn(b'503 ', raw_md5.split(b'\r\n', 1)[0])
+        self.assertIn({'event': 'online-update-legacy-tls', 'controller': A, 'cipher': 'RC4-SHA'}, events)
+        self.assertIn({'event': 'online-update-legacy-tls', 'controller': A, 'cipher': 'RC4-MD5'}, events)
+
+        # Unpaired source IP is still dropped before any legacy TLS handshake
+        transport.controller_resolver = lambda _: None
+        with self.assertRaises((EOFError, ConnectionResetError, BrokenPipeError)):
+            self._legacy_tls_exchange(address, [0x0005], req)
+
 
 if __name__ == '__main__':
     unittest.main()

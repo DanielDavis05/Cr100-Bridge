@@ -16,7 +16,7 @@ smapi_service.py smapi_stub.py speaker_settings.py music_services.py music_servi
 spotify_service.py spotify_ui_actions.py spotify_menu.py spotify_folders.py spotify_controllers.py spotify_connect.py spotify_autoplay.py webui.py netstart_pair.py link_pairing.py synthetic_public_key.bin fake_ha.py
 sonos_backend.py sonos_content.py sonos_upnp.py sonos_identity.py fake_sonos.py build_info.py
 radio_store.py radiotime.py radio_catalog.py native_radio.py radio_playback.py radio_management.py radio_runtime.py radio_transcode.py alarms.py alarm_runtime.py alarm_timezones.py patch_native_radio_ui.py patch_controller_settings_ui.py
-online_updates.py update_transport.py update_service.py bridge_updater.py ui_events.py workspace.py radio_platform.py
+online_updates.py update_transport.py legacy_tls_rc4.py update_service.py bridge_updater.py ui_events.py workspace.py radio_platform.py
 stock_bootstrap.py stock_room_mode.py controller_remote.py
 bridge_queue.py media_sources.py spotify_media.py relay_stream.py bridge_player.py bridge_runtime.py zeroconf_browse.py
 distribution.py'''.split()

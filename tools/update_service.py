@@ -36,6 +36,9 @@ _CONTROLLER_AGENT = re.compile(r'Sonos/(\d+\.\d+-\d+)[A-Za-z]?\s+\(CR100\)')
 _TOKEN = r'[A-Za-z0-9_-]{24,128}'
 _MANIFEST = re.compile(r'/updates/(controller|bridge)/(' + _TOKEN + r')/manifest\.upm\Z')
 _PACKAGE = re.compile(r'/updates/controller/(' + _TOKEN + r')/([^/]+)/([^/]+)\Z')
+# Pre-4.3 controllers (e.g. 3.6 / 16.5-48010a) pass UpdateItem.UpdateURL
+# (.../begin) directly to /bin/upgrade, which appends default-1-2.upd.
+_LEGACY_PACKAGE = re.compile(r'/updates/controller/(' + _TOKEN + r')/begindefault-1-2\.upd\Z')
 _SOFTWARE_PROPERTIES = frozenset(('R_CustomerID', 'R_UpdatePreference', 'R_LastUpdateVersion',
                                  'R_PromoVersion', 'R_ForceReIndex', 'R_UpdateAvailable'))
 
@@ -497,7 +500,8 @@ class UpdateService:
             if match:
                 token, version, filename = match.groups()
                 offer = self._offer(mac, 'controller', token)
-                if version != offer['version'] or filename not in ('^' + version, version + '-1-2.upd'):
+                if offer.get('kind') != 'controller' or version != offer['version'] \
+                        or filename not in ('^' + version, version + '-1-2.upd'):
                     raise UpdateError('Wrong controller firmware selection.', 404)
                 package = self.manager.authorize_download(token, mac)
                 if method == 'GET':
@@ -506,6 +510,20 @@ class UpdateService:
                     self.house.log({'event': 'controller-firmware-delivery', 'controller': mac,
                                     'version': version, 'sha256': offer['sha256']})
                 return 200, package, 'application/octet-stream', {}
+            legacy = _LEGACY_PACKAGE.fullmatch(path)
+            if legacy:
+                token = legacy[1]
+                offer = self._offer(mac, 'controller', token)
+                if offer.get('kind') != 'controller':
+                    raise UpdateError('Wrong controller firmware selection.', 404)
+                package = self.manager.authorize_download(token, mac)
+                if method == 'GET':
+                    self.manager.controller_started(token, mac)
+                    self.tick()
+                    self.house.log({'event': 'controller-firmware-delivery', 'controller': mac,
+                                    'version': offer['version'], 'sha256': offer['sha256'],
+                                    'legacy_url': True})
+                return 200, package, 'application/octet-stream', {}
             return 404, b'Not found', 'text/plain', {}
         except UpdateError as error:
             return error.status, str(error).encode(), 'text/plain', {}
@@ -513,13 +531,16 @@ class UpdateService:
     def delivery_failed(self, address, path, error):
         """Release only the matching controller's interrupted package transfer."""
         mac = self._mac(address)
-        match = _PACKAGE.fullmatch(unquote(urlsplit(path).path))
-        if not mac or not match:
+        clean_path = unquote(urlsplit(path).path)
+        match = _PACKAGE.fullmatch(clean_path)
+        legacy = None if match else _LEGACY_PACKAGE.fullmatch(clean_path)
+        if not mac or (not match and not legacy):
             return
-        token, version, _ = match.groups()
+        token, version = (match[1], match[2]) if match else (legacy[1], None)
         try:
             record = self.manager.selection(mac)
-            if (not record or record['token'] != token or record['version'] != version
+            if (not record or record['token'] != token
+                    or (version is not None and record['version'] != version)
                     or record['status'] != 'downloading'):
                 return
             self.manager.fail_controller(token, mac,

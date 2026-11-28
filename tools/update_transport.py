@@ -26,6 +26,7 @@ import xml.etree.ElementTree as ET
 
 from bridge_config import write_json
 from controller_state import normalize_mac
+import legacy_tls_rc4
 
 MAX_BODY = 65536
 MAX_BRIDGE_STATE_BYTES = 1024 * 1024
@@ -442,9 +443,11 @@ def ensure_certificate(directory):
         private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'system-api.sonos.com')])
         now = datetime.datetime.now(datetime.timezone.utc)
+        # Pre-4.3 controllers boot with an unsynced year-2000 clock; span 1999..+10y.
+        not_before = datetime.datetime(1999, 1, 1, tzinfo=datetime.timezone.utc)
         certificate = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
                        .public_key(private.public_key()).serial_number(x509.random_serial_number())
-                       .not_valid_before(now - datetime.timedelta(days=1))
+                       .not_valid_before(not_before)
                        .not_valid_after(now + datetime.timedelta(days=3650))
                        .add_extension(x509.SubjectAlternativeName([
                            x509.DNSName('system-api.sonos.com')]), critical=False)
@@ -592,13 +595,25 @@ class _HTTP(BaseHTTPRequestHandler):
 
 class _TLS(socketserver.BaseRequestHandler):
     def handle(self):
-        if not self.server.transport.controller_resolver(self.client_address[0]):
+        mac = self.server.transport.controller_resolver(self.client_address[0])
+        if not mac:
             return
         self.request.settimeout(15)
         try:
+            legacy = getattr(self.server, 'legacy_tls', None)
+            if legacy is not None:
+                openssl_ciphers, legacy_key, legacy_cert_der = legacy
+                offered = legacy_tls_rc4.peek_client_hello_ciphers(self.request)
+                if legacy_tls_rc4.needs_legacy_rc4(offered, openssl_ciphers):
+                    with legacy_tls_rc4.LegacyRC4Socket(self.request, legacy_key, legacy_cert_der) as connection:
+                        self.server.transport.log({'event': 'online-update-legacy-tls',
+                                                   'controller': mac,
+                                                   'cipher': connection.cipher_name})
+                        _HTTP(connection, self.client_address, self.server)
+                    return
             with self.server.context.wrap_socket(self.request, server_side=True) as connection:
                 _HTTP(connection, self.client_address, self.server)
-        except (OSError, ValueError):
+        except (EOFError, OSError, ValueError):
             return
 
 
@@ -706,9 +721,10 @@ class UpdateTransport:
         self.player_servers = {}
         self.server_lock = threading.RLock()
 
-    def _start(self, bind, port, handler, players=None, context=None):
+    def _start(self, bind, port, handler, players=None, context=None, legacy_tls=None):
         server = _Server((bind, port), handler)
         server.transport, server.players, server.context = self, players, context
+        server.legacy_tls = legacy_tls
         self.servers.append(server)
         thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .05}, daemon=True)
         self.threads.append(thread)
@@ -729,7 +745,10 @@ class UpdateTransport:
                 context.minimum_version = ssl.TLSVersion.TLSv1
                 context.set_ciphers('ALL:@SECLEVEL=0')
                 context.load_cert_chain(str(cert), str(key))
-                self._start(self.bind, self.tls_port, _TLS, context=context)
+                openssl_ciphers = frozenset(item['id'] & 0xffff for item in context.get_ciphers())
+                legacy_key, legacy_cert_der = legacy_tls_rc4.load_certificate_and_key(cert, key)
+                self._start(self.bind, self.tls_port, _TLS, context=context,
+                            legacy_tls=(openssl_ciphers, legacy_key, legacy_cert_der))
             self.set_players(players)
             return self
         except Exception:
